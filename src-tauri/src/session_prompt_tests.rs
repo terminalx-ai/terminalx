@@ -13,7 +13,6 @@ use super::*;
 
 const BOTH: [CliKind; 2] = [CliKind::Claude, CliKind::Codex];
 
-#[test]
 fn sign_in_gate_retains_prompt_and_cancels_delivery_timers() {
     let rig = Rig::of(CliKind::Codex, "");
     rig.compose("keep this prompt", 0);
@@ -199,7 +198,6 @@ fn queued_text(events: &[AgentEvent], seq: u64) -> String {
         .unwrap_or_else(|| format!("no queued message at {seq}"))
 }
 
-#[test]
 fn revoked_sharing_cancels_the_waiting_writer_without_stalling_the_host_tab() {
     let rig = Rig::new();
     rig.compose("Undelivered guest input", 0);
@@ -224,7 +222,6 @@ fn revoked_sharing_cancels_the_waiting_writer_without_stalling_the_host_tab() {
     assert!(matches!(&rt.engine, Engine::Cli(cli) if cli.awaiting_delivery.is_none() && cli.echoed.is_empty()));
 }
 
-#[test]
 fn timed_out_readiness_then_delivery_never_publishes_a_startup_warning() {
     for kind in BOTH {
         for hook_first in [false, true] {
@@ -257,7 +254,6 @@ fn timed_out_readiness_then_delivery_never_publishes_a_startup_warning() {
     }
 }
 
-#[test]
 fn timed_out_readiness_with_only_live_terminal_activity_never_warns() {
     let rig = Rig::of(CliKind::Codex, "");
     rig.compose("a long task", 0);
@@ -273,7 +269,6 @@ fn timed_out_readiness_with_only_live_terminal_activity_never_warns() {
     assert_eq!(rig.kinds(), ["user_message"]);
 }
 
-#[test]
 fn an_unconfirmed_prompt_gets_one_recoverable_warning_and_late_evidence_clears_it() {
     for evidence in ["echo", "hook", "session", "reply", "task", "reasoning", "terminal"] {
         let rig = Rig::of(CliKind::Codex, "");
@@ -310,7 +305,6 @@ fn an_unconfirmed_prompt_gets_one_recoverable_warning_and_late_evidence_clears_i
     }
 }
 
-#[test]
 fn confirmed_delivery_followed_by_silence_is_a_stall_not_a_delivery_doubt() {
     let rig = Rig::of(CliKind::Codex, "");
     rig.compose("accepted then stalled", 0);
@@ -321,7 +315,6 @@ fn confirmed_delivery_followed_by_silence_is_a_stall_not_a_delivery_doubt() {
     assert_eq!(rig.banner(), Some(RecoveryKind::Timeout));
 }
 
-#[test]
 fn a_ready_cli_has_not_yet_confirmed_the_prompt() {
     let rig = Rig::of(CliKind::Claude, "");
     rig.compose("not received", 0);
@@ -332,7 +325,6 @@ fn a_ready_cli_has_not_yet_confirmed_the_prompt() {
     assert_eq!(rig.banner(), Some(RecoveryKind::DeliveryUnconfirmed));
 }
 
-#[test]
 fn readiness_timeout_still_retains_a_continuation_instead_of_sending_it_blindly() {
     let rig = Rig::of(CliKind::Codex, "");
     rig.compose("prepared continuation", 0);
@@ -344,7 +336,6 @@ fn readiness_timeout_still_retains_a_continuation_instead_of_sending_it_blindly(
     assert_eq!(rig.kinds(), ["user_message"]);
 }
 
-#[test]
 fn continuation_submit_hook_confirms_before_the_transcript_and_keeps_echo_deduplication() {
     for kind in BOTH {
         let rig = Rig::of(kind, "");
@@ -360,7 +351,6 @@ fn continuation_submit_hook_confirms_before_the_transcript_and_keeps_echo_dedupl
     }
 }
 
-#[test]
 fn continuation_submit_hook_skips_a_receipt_whose_waiter_timed_out() {
     for kind in BOTH {
         let rig = Rig::of(kind, "");
@@ -375,7 +365,6 @@ fn continuation_submit_hook_skips_a_receipt_whose_waiter_timed_out() {
     }
 }
 
-#[test]
 fn continuation_echo_confirms_wrapped_and_reflowed_long_prompts_without_hooks() {
     let text = format!("Continue work {} Keep history unchanged", "historical context ".repeat(1000));
     for kind in BOTH {
@@ -394,7 +383,6 @@ fn continuation_echo_confirms_wrapped_and_reflowed_long_prompts_without_hooks() 
     }
 }
 
-#[test]
 fn continuation_without_submission_or_provider_acceptance_stays_unconfirmed() {
     for kind in BOTH {
         let rig = Rig::of(kind, "");
@@ -445,7 +433,6 @@ impl Rig {
 /// drawing — the paste appearing in the composer is a draw. An idle CLI that
 /// was given a prompt acknowledges it at once, so one that has not within
 /// seconds gets the reader told, not five minutes of "Working".
-#[test]
 fn a_submitted_prompt_the_cli_never_acknowledges_is_flagged_within_seconds() {
     for kind in BOTH {
         for evidence in ["hook", "echo"] {
@@ -492,7 +479,6 @@ fn a_submitted_prompt_the_cli_never_acknowledges_is_flagged_within_seconds() {
     }
 }
 
-#[test]
 fn a_prompt_acknowledged_in_time_is_never_flagged() {
     for kind in BOTH {
         let rig = Rig::of(kind, "");
@@ -516,7 +502,6 @@ fn a_prompt_acknowledged_in_time_is_never_flagged() {
 /// the reader is told. When the CLI does take it, however late, its record
 /// is that message (#1284): the Queued card becomes the turn's prompt, never
 /// a card left waiting beside a second bubble of the same words.
-#[test]
 fn a_queued_prompt_the_cli_never_takes_is_flagged_once_its_turn_is_over() {
     for kind in BOTH {
         let rig = Rig::of(kind, "");
@@ -552,7 +537,6 @@ fn a_queued_prompt_the_cli_never_takes_is_flagged_once_its_turn_is_over() {
 /// words as a prompt typed into the terminal, and lost track of the turns
 /// after it. Taken late, it is still the reader's message: the card clears
 /// into the turn that answers it, and every reply after it is drawn.
-#[test]
 fn a_queued_codex_follow_up_taken_after_its_wait_ran_out_is_one_message_and_every_reply_is_drawn() {
     let rig = Rig::of(CliKind::Codex, "");
     rig.compose("start", 0);
@@ -614,7 +598,6 @@ impl Rig {
 /// the lapsed card is not owed those words any more. The same words typed
 /// into the terminal after are a message of their own, never the old
 /// card's.
-#[test]
 fn words_sent_again_from_the_composer_retire_the_lapsed_prompt_they_repeat() {
     for kind in BOTH {
         let rig = Rig::of(kind, "");
@@ -638,7 +621,6 @@ fn words_sent_again_from_the_composer_retire_the_lapsed_prompt_they_repeat() {
 /// #1335: a queued prompt lapses, and the conversation changes under the
 /// tab — a `/clear` opens a new transcript, which the hooks name. A prompt
 /// there with the lapsed one's words belongs to the new conversation.
-#[test]
 fn a_lapsed_prompt_is_not_matched_in_the_conversation_after_a_reset() {
     for kind in BOTH {
         let rig = Rig::of(kind, "");
@@ -661,7 +643,6 @@ fn a_lapsed_prompt_is_not_matched_in_the_conversation_after_a_reset() {
 
 /// #1335, beside the two above: with nothing sent again and the
 /// conversation unchanged, a late take is still the lapsed message (#1284).
-#[test]
 fn a_lapsed_prompt_taken_late_in_its_own_conversation_is_still_that_message() {
     for kind in BOTH {
         let rig = Rig::of(kind, "");
@@ -686,7 +667,6 @@ impl Rig {
 /// lapsed one with those words is retired all the same: the same words
 /// typed into the terminal after are a message of their own, never the old
 /// card's.
-#[test]
 fn words_sent_again_and_recorded_joined_or_changed_retire_the_lapsed_prompt() {
     for recorded in ["check the tests and then run lint", "check all of the tests"] {
         let kind = CliKind::Claude;
@@ -712,7 +692,6 @@ fn words_sent_again_and_recorded_joined_or_changed_retire_the_lapsed_prompt() {
 /// CLI recorded it as the lapsed prompt's words. The record was the new
 /// message's, so the lapsed one is retired by the record as before: the
 /// same words typed into the terminal after are a message of their own.
-#[test]
 fn a_resend_recorded_as_the_lapsed_prompts_words_retires_it() {
     let rig = Rig::of(CliKind::Claude, "");
     let lapsed = rig.queue_and_lapse("check the tests");
@@ -734,7 +713,6 @@ fn a_resend_recorded_as_the_lapsed_prompts_words_retires_it() {
 /// #1385 on Codex, which delivers prompts queued together as one record:
 /// the same words sent again go in such a batch, and retire the lapsed
 /// prompt they repeat as surely as a record of their own would.
-#[test]
 fn words_sent_again_and_delivered_in_a_codex_batch_retire_the_lapsed_prompt() {
     let rig = Rig::of(CliKind::Codex, "");
     let lapsed = rig.queue_and_lapse("check the tests");
@@ -761,7 +739,6 @@ fn words_sent_again_and_delivered_in_a_codex_batch_retire_the_lapsed_prompt() {
 /// what the agent received; the new message is matched to one; the lapsed
 /// card is told its delivery was not confirmed, neither left Queued nor
 /// handed a record that may be another prompt's.
-#[test]
 fn a_lapsed_prompt_and_the_same_words_sent_again_leave_the_lapsed_delivery_unconfirmed() {
     for kind in BOTH {
         let rig = Rig::of(kind, "");
@@ -788,7 +765,6 @@ fn a_lapsed_prompt_and_the_same_words_sent_again_leave_the_lapsed_delivery_uncon
 /// #1386, the other order: the CLI takes the lapsed prompt before the same
 /// words are sent again. Its record is that message, and the words sent
 /// after are a message of their own, with nothing left unconfirmed.
-#[test]
 fn a_lapsed_prompt_taken_before_the_same_words_are_sent_again_is_that_message() {
     for kind in BOTH {
         let rig = Rig::of(kind, "");
@@ -809,7 +785,6 @@ fn a_lapsed_prompt_taken_before_the_same_words_are_sent_again_is_that_message() 
 /// #1386 across a reset: the same words sent again in the conversation a
 /// `/clear` opened say nothing of the lapsed card, which belongs to the one
 /// before.
-#[test]
 fn the_same_words_sent_again_after_a_reset_leave_the_lapsed_card_alone() {
     for kind in BOTH {
         let rig = Rig::of(kind, "");
@@ -833,7 +808,6 @@ fn the_same_words_sent_again_after_a_reset_leave_the_lapsed_card_alone() {
     }
 }
 
-#[test]
 fn a_queued_prompt_the_cli_takes_is_never_flagged() {
     for kind in BOTH {
         let rig = Rig::of(kind, "");
@@ -1023,7 +997,6 @@ sleep 600
 /// A continuation's Enter is written again until the CLI acknowledges it,
 /// as any prompt's is (#662). Only the deadline is not the tab's: whoever
 /// sent the continuation hears what became of it through its receipt.
-#[test]
 fn a_continuations_enter_is_nudged_but_the_tab_sets_it_no_deadline() {
     for (receipted, deadline) in [(true, false), (false, true)] {
         let rig = Rig::of(CliKind::Claude, "");
@@ -1067,7 +1040,6 @@ const QUICK: ReceiptWait = ReceiptWait {
 /// started when it was sent (#662). It used to be 90 s from the send,
 /// whatever happened in them: a handoff one Enter short of delivered spun
 /// the dialog for the whole of it.
-#[test]
 fn a_continuations_receipt_is_waited_for_until_well_after_its_last_enter() {
     let rig = Rig::of(CliKind::Claude, "");
     let receipt = rig.compose_confirmed("continue work");
@@ -1094,7 +1066,6 @@ fn a_continuations_receipt_is_waited_for_until_well_after_its_last_enter() {
 
 /// A handoff's nudges are its waiter's to write as they fall due, and the
 /// wait runs on from the last of them.
-#[test]
 fn a_continuations_waiter_writes_its_nudges_and_waits_on_from_the_last() {
     let rig = Rig::of(CliKind::Claude, "").with_pane();
     let receipt = rig.compose_confirmed("continue work");
@@ -1135,7 +1106,6 @@ fn a_handoff_nobody_confirmed_is_seen_in_the_input_and_said_to_be_there() {
 /// A handoff in the input is no failure: the dialog is told it is there.
 /// A CLI not reading its input never got it, and anything else cannot be
 /// told apart from a failure.
-#[test]
 fn a_handoff_nobody_confirmed_is_answered_by_what_its_pane_shows() {
     let outcome = || SendOutcome { queued: false, events: Vec::new(), in_input: false };
     let seen = |unread, in_input| Some(Unconfirmed { agent: "Claude Code", unread, in_input });
@@ -1179,7 +1149,6 @@ impl Rig {
 /// The report: the reader types into the agent's own prompt in the terminal
 /// view. The composer never sees it, so nothing was published when it was
 /// sent, and the CLI's record is all there is.
-#[test]
 fn a_prompt_typed_in_the_terminal_is_one_message_ahead_of_its_reply() {
     for kind in BOTH {
         let rig = Rig::of(kind, "");
@@ -1197,7 +1166,6 @@ fn a_prompt_typed_in_the_terminal_is_one_message_ahead_of_its_reply() {
     }
 }
 
-#[test]
 fn a_prompt_sent_from_the_composer_is_one_message_not_two() {
     for kind in BOTH {
         let rig = Rig::of(kind, "");
@@ -1221,7 +1189,6 @@ fn a_prompt_sent_from_the_composer_is_one_message_not_two() {
 /// An image and files sent with nothing typed (PRO-290): the agent is handed
 /// only the block of paths, and the CLI records its image label in front of
 /// it. That record is the composer message's echo, not a second message.
-#[test]
 fn an_image_and_files_with_no_text_are_one_message_with_its_files() {
     for kind in BOTH {
         let rig = Rig::of(kind, "");
@@ -1241,7 +1208,6 @@ fn an_image_and_files_with_no_text_are_one_message_with_its_files() {
     }
 }
 
-#[test]
 fn a_composer_prompt_and_then_a_terminal_prompt_are_two_messages_in_order() {
     for kind in BOTH {
         let rig = Rig::of(kind, "");
@@ -1275,7 +1241,6 @@ fn a_composer_prompt_and_then_a_terminal_prompt_are_two_messages_in_order() {
 /// A prompt typed into the terminal while a turn runs. Claude Code records
 /// it as a `queued_command` attachment and never as a `user` record, which
 /// is why it was missing from the chat; Codex records the usual item.
-#[test]
 fn a_prompt_typed_in_the_terminal_mid_turn_is_one_message() {
     for kind in BOTH {
         let rig = Rig::of(kind, "");
@@ -1294,7 +1259,6 @@ fn a_prompt_typed_in_the_terminal_mid_turn_is_one_message() {
 /// The chat is told it was taken, there and then (#551): it had gone on
 /// showing it as waiting, and folded it away with the tool calls once the
 /// turn was over.
-#[test]
 fn a_queued_composer_prompt_the_cli_takes_mid_turn_is_one_message() {
     for kind in BOTH {
         let rig = Rig::of(kind, "");
@@ -1332,7 +1296,6 @@ impl Rig {
 
 /// Codex owns its pending input. Escape advances that queue itself; an
 /// interrupt acknowledgement is not permission to paste any of it again.
-#[test]
 fn send_now_preserves_the_provider_queue_until_acceptance() {
     for kind in BOTH {
         let rig = Rig::of(kind, "").with_pane();
@@ -1363,7 +1326,6 @@ fn send_now_preserves_the_provider_queue_until_acceptance() {
     }
 }
 
-#[test]
 fn send_now_flushes_an_acceptance_already_on_disk_before_interrupting() {
     use std::io::Write;
     for kind in BOTH {
@@ -1381,7 +1343,6 @@ fn send_now_flushes_an_acceptance_already_on_disk_before_interrupting() {
     }
 }
 
-#[test]
 fn failed_send_now_retains_pending_messages_and_allows_a_retry() {
     for kind in BOTH {
         let rig = Rig::of(kind, "");
@@ -1402,7 +1363,6 @@ fn failed_send_now_retains_pending_messages_and_allows_a_retry() {
 /// A poll can read the old turn's abort and the provider's continuation
 /// before the Interrupt hook reaches the app. That hook must not close the
 /// continuation or leave an accepted instruction marked pending.
-#[test]
 fn codex_continuation_read_before_interrupt_acknowledgement_stays_working() {
     for hook_at in 0..4 {
         let rig = Rig::of(CliKind::Codex, "").with_pane();
@@ -1436,7 +1396,6 @@ fn codex_continuation_read_before_interrupt_acknowledgement_stays_working() {
 
 /// A completion owed to Stop belongs to A, not to the abort of B that
 /// follows it. Exercise every partition of the four boundaries into reads.
-#[test]
 fn codex_owed_completion_precedes_abort_and_continuation_in_record_order() {
     let boundaries = [
         r#"{"type":"event_msg","payload":{"type":"task_complete","turn_id":"A"}}"#,
@@ -1471,7 +1430,6 @@ fn codex_owed_completion_precedes_abort_and_continuation_in_record_order() {
 
 /// Force the poll reader to pause after draining an abort. A concurrent
 /// reader must not apply the captured continuation and acceptance ahead of it.
-#[test]
 fn codex_readers_serialize_drain_through_application() {
     use std::io::Write;
     for serialized in [false, true] {
@@ -1551,7 +1509,6 @@ fn codex_readers_serialize_drain_through_application() {
 
 /// Policy reconciliation takes sharing after application. A blocked policy
 /// check must not retain either runtime or the transcript application gate.
-#[test]
 fn transcript_application_gate_is_released_before_policy_reconciliation() {
     use std::io::Write;
     for kind in BOTH {
@@ -1601,7 +1558,6 @@ fn transcript_application_gate_is_released_before_policy_reconciliation() {
 /// Captured from Codex 0.153.4 in the assigned macOS guest with the local
 /// Responses fixture server: Escape combines both pending prompts into one
 /// provider UserMessage. Neither composer identity may remain pending.
-#[test]
 fn real_codex_escape_capture_acknowledges_the_whole_combined_queue() {
     let rig = Rig::of(CliKind::Codex, "").with_pane();
     let records: Vec<&str> = include_str!("harness/codex/fixtures/queued_escape.jsonl").lines().collect();
@@ -1635,7 +1591,6 @@ fn real_codex_escape_capture_acknowledges_the_whole_combined_queue() {
 
 /// The real captured batch can reach the tail between Enter and its writer's
 /// bookkeeping. Synchronize that exact point without relying on thread timing.
-#[test]
 fn codex_batch_acceptance_cannot_overtake_enter_publication() {
     use std::io::Write;
     for atomic in [false, true] {
@@ -1697,7 +1652,6 @@ fn codex_batch_acceptance_cannot_overtake_enter_publication() {
     }
 }
 
-#[test]
 fn failed_enter_never_arms_delivery_and_receipt_only_enter_keeps_its_identity() {
     for kind in BOTH {
         let rig = Rig::of(kind, "");
@@ -1720,7 +1674,6 @@ fn failed_enter_never_arms_delivery_and_receipt_only_enter_keeps_its_identity() 
     }
 }
 
-#[test]
 fn codex_batch_acknowledgement_requires_the_exact_written_fifo() {
     let queue = |texts: &[&str]| -> std::collections::VecDeque<ComposerEcho> {
         texts.iter().enumerate().map(|(i, text)| ComposerEcho {
@@ -1766,7 +1719,6 @@ fn codex_batch_acknowledgement_requires_the_exact_written_fifo() {
 /// and stopped with a message queued it sends that at once as its next
 /// prompt ("Escape interrupts; only Stop ends the process" in PTY-FIRST.md);
 /// typed again as well, it would go to the agent twice.
-#[test]
 fn a_send_now_that_crosses_an_unread_mid_turn_take_is_still_that_take() {
     for kind in BOTH {
         let rig = Rig::of(kind, "").with_pane();
@@ -1799,7 +1751,6 @@ fn a_send_now_that_crosses_an_unread_mid_turn_take_is_still_that_take() {
 /// prompt is heard first. The hook opens the turn but not the latch that
 /// lets `Stop` close it; with the record dropped as an echo, nothing did, and
 /// the turn stayed "Working" with its reply outside any turn.
-#[test]
 fn a_queued_composer_prompt_the_cli_takes_after_the_turn_starts_the_next_one() {
     for kind in BOTH {
         for hook_first in [true, false] {
@@ -1837,7 +1788,6 @@ fn a_queued_composer_prompt_the_cli_takes_after_the_turn_starts_the_next_one() {
 /// Codex 0.153.4 says "Model interrupted to submit steer instructions"). It
 /// is the message the reader already sees as queued, so it becomes the
 /// prompt of the next turn rather than being drawn a second time.
-#[test]
 fn a_queued_prompt_the_cli_sends_once_its_turn_was_stopped_starts_the_next_turn() {
     for kind in BOTH {
         let rig = Rig::of(kind, "");
@@ -1867,7 +1817,6 @@ fn a_queued_prompt_the_cli_sends_once_its_turn_was_stopped_starts_the_next_turn(
 /// the queued message, counted from when it was sent, had already run out.
 /// The tab said delivery could not be confirmed and then drew the message a
 /// second time when the CLI sent it. The wait starts when the turn ends.
-#[test]
 fn a_prompt_queued_long_before_its_turn_was_stopped_is_still_expected() {
     for kind in BOTH {
         let rig = Rig::of(kind, "");
@@ -1895,7 +1844,6 @@ fn a_prompt_queued_long_before_its_turn_was_stopped_is_still_expected() {
 /// stopped (as Claude Code did before it sent it): the reader is told the
 /// message was not sent. When it is sent from there after all, it is that
 /// message (#1284), not a second one beside a card that never clears.
-#[test]
 fn a_queued_prompt_the_cli_kept_back_when_its_turn_was_stopped_is_flagged_and_still_that_message_when_sent() {
     for kind in BOTH {
         let rig = Rig::of(kind, "");
@@ -1924,7 +1872,6 @@ fn a_queued_prompt_the_cli_kept_back_when_its_turn_was_stopped_is_flagged_and_st
 
 /// A composer prompt the CLI is slow to record — a long start, a busy
 /// machine — is still that prompt when the record lands, however late.
-#[test]
 fn a_composer_prompt_recorded_long_after_it_was_sent_is_still_one_message() {
     for kind in BOTH {
         let rig = Rig::of(kind, "");
@@ -1944,7 +1891,6 @@ fn a_composer_prompt_recorded_long_after_it_was_sent_is_still_one_message() {
 /// A tab opened on a conversation that already has a history follows the
 /// transcript from where it stands: the old prompts are in the tab's log
 /// already and are not published a second time.
-#[test]
 fn a_resumed_conversation_s_old_prompts_are_not_told_again() {
     for kind in BOTH {
         let cli = Cli(kind);
@@ -1973,7 +1919,6 @@ fn a_resumed_conversation_s_old_prompts_are_not_told_again() {
 /// Every hook named that file and was refused for being outside the tab's
 /// folder, so the tail read nothing: no prompt typed in the terminal, no
 /// turn end. The replies still showed, because the `Stop` hook carries one.
-#[test]
 fn a_conversation_the_cli_keeps_in_another_folder_is_still_heard() {
     let rig = Rig::of(CliKind::Claude, "");
     let cli = Cli(CliKind::Claude);
@@ -2058,7 +2003,6 @@ fn a_conversation_the_cli_keeps_in_another_folder_is_still_heard() {
 /// A launch that finds the conversation's file under another folder follows
 /// it from the start, with the folder derived from the checkout still
 /// allowed beside it.
-#[test]
 fn a_launch_adopts_the_folder_its_conversation_is_found_in() {
     let dir = tempfile::tempdir().unwrap();
     let projects = dir.path().join("projects");
@@ -2085,7 +2029,6 @@ fn a_launch_adopts_the_folder_its_conversation_is_found_in() {
 /// A slash command typed in the terminal reads as it was typed, once; what
 /// it printed is not a message. One the app typed for itself (the model
 /// picker's `/model`) is nobody's message at all.
-#[test]
 fn a_slash_command_is_shown_as_typed_and_the_app_s_own_is_not_shown() {
     let rig = Rig::of(CliKind::Claude, "");
     let record = |content: &str| {
@@ -2143,7 +2086,6 @@ impl Rig {
 /// `Stop`, so the turn it opened stayed open. A one-second prompt typed into
 /// the terminal minutes later then said "Worked for 5m 27s": its hook and its
 /// record found a turn open and kept that turn's start.
-#[test]
 fn a_prompt_after_a_command_that_never_ends_counts_its_own_time() {
     const LONG_AGO: Duration = Duration::from_secs(5 * 60);
     for kind in BOTH {
@@ -2177,7 +2119,6 @@ fn a_prompt_after_a_command_that_never_ends_counts_its_own_time() {
 
 /// What the fix must leave alone: a turn that is working keeps its start
 /// through its own hooks and through a prompt typed into it mid-turn.
-#[test]
 fn a_running_turn_keeps_its_start_through_its_hooks_and_a_mid_turn_prompt() {
     const LONG_AGO: Duration = Duration::from_secs(5 * 60);
     for kind in BOTH {
@@ -2213,7 +2154,6 @@ mod interrupts;
 mod self_started;
 
 /// A drained read belongs to its launch, not to the tab slot that survives it.
-#[test]
 fn drained_old_launch_cannot_settle_successor() {
     use std::io::Write;
     for replace in [false, true] {
@@ -2273,7 +2213,6 @@ fn drained_old_launch_cannot_settle_successor() {
 }
 
 /// Authentication before a wait does not authorize mutation after replacement.
-#[test]
 fn old_hooks_cannot_mutate_successor_after_pump() {
     for event in ["Interrupt", "Stop", "SessionEnd", "Notification", "SessionStart", "PermissionRequest"] {
         for replace in [false, true] {
@@ -2345,7 +2284,6 @@ fn old_hooks_cannot_mutate_successor_after_pump() {
     }
 }
 
-#[test]
 fn delayed_provider_id_persistence_belongs_to_its_launch() {
     for replace in [false, true] {
         let rig = Rig::of(CliKind::Codex, "");
@@ -2378,7 +2316,6 @@ fn delayed_provider_id_persistence_belongs_to_its_launch() {
     }
 }
 
-#[test]
 fn stale_stop_reply_cannot_fabricate_successor_output() {
     let rig = Rig::of(CliKind::Codex, "");
     rig.compose("successor", 0);
@@ -2405,7 +2342,6 @@ fn new_card(rig: &Rig, known: &str) -> String {
 
 /// A permission hook that waited while its launch was replaced asks for
 /// nothing in the successor: no card is filed for it, and it is not allowed.
-#[test]
 fn a_delayed_permission_hook_asks_only_for_its_own_launch() {
     for replace in [false, true] {
         let rig = Rig::of(CliKind::Codex, "");
@@ -2443,7 +2379,6 @@ fn a_delayed_permission_hook_asks_only_for_its_own_launch() {
 
 /// The former worker captured only tab ids; resolving them after dispatch
 /// selected and stopped the replacement instead of the launch that requested it.
-#[test]
 fn restart_dispatch_is_bound_to_the_original_launch() {
     for (replace, fenced) in [(false, true), (true, false), (true, true)] {
         let rig = Rig::on(CliKind::Codex, "", None);
@@ -2495,7 +2430,6 @@ fn restart_dispatch_is_bound_to_the_original_launch() {
     }
 }
 
-#[test]
 fn restart_completion_cannot_take_a_replaced_or_cancelled_slot() {
     for replacement in ["none", "engine", "stop", "pane", "claim"] {
         let rig = Rig::on(CliKind::Codex, "", None);
@@ -2554,7 +2488,6 @@ fn restart_completion_cannot_take_a_replaced_or_cancelled_slot() {
     }
 }
 
-#[test]
 fn delayed_idle_restart_defers_to_new_work_on_the_same_launch() {
     for (state, fenced) in [("idle", true), ("turn", false), ("turn", true), ("cancelled", true), ("stop", true)] {
         let rig = Rig::on(CliKind::Codex, "", Some("low"));
@@ -2629,7 +2562,6 @@ fn delayed_idle_restart_defers_to_new_work_on_the_same_launch() {
     }
 }
 
-#[test]
 fn failed_restart_wait_blocks_only_its_unchanged_claim() {
     for replaced in [false, true] {
         let rig = Rig::of(CliKind::Codex, "");
@@ -2919,7 +2851,6 @@ sleep 600
 /// record. Claude Code dropped the first before answering it and took the
 /// second in its place: the first is marked replaced, never answered, and
 /// is not drawn again.
-#[test]
 fn a_prompt_in_the_place_of_one_the_agent_dropped_marks_that_one_replaced() {
     let rig = Rig::of(CliKind::Claude, "");
     rig.delivered("deploy to staging", "p1", "a0");
@@ -2931,7 +2862,6 @@ fn a_prompt_in_the_place_of_one_the_agent_dropped_marks_that_one_replaced() {
 
 /// The prompt Claude Code put back in its input box, sent from there as it
 /// was: still the one message, not a second one or a replaced one.
-#[test]
 fn a_dropped_prompt_sent_again_from_the_input_box_is_the_same_message() {
     let rig = Rig::of(CliKind::Claude, "");
     rig.delivered("deploy to staging", "p1", "a0");
@@ -2944,7 +2874,6 @@ fn a_dropped_prompt_sent_again_from_the_input_box_is_the_same_message() {
 
 /// A prompt the agent worked on is not replaced by one that follows the same
 /// record: that is the reader rewinding the conversation, and it was answered.
-#[test]
 fn a_prompt_the_agent_answered_is_never_marked_replaced() {
     let rig = Rig::of(CliKind::Claude, "");
     rig.delivered("first", "p1", "a0");
@@ -2957,7 +2886,6 @@ fn a_prompt_the_agent_answered_is_never_marked_replaced() {
 /// message reached the agent inside the dropped prompt's remains. Its queued
 /// bubble clears into the prompt the agent received, shown once and flagged
 /// as changed, and that prompt is the start of the turn the agent answers.
-#[test]
 fn a_queued_message_recorded_inside_a_longer_prompt_is_that_prompt_shown_once() {
     let rig = Rig::of(CliKind::Claude, "");
     rig.delivered(DROPPED, "p1", "a0");
@@ -2983,7 +2911,6 @@ fn a_queued_message_recorded_inside_a_longer_prompt_is_that_prompt_shown_once() 
 /// A prompt whose record has more in it than was sent, with no prompt
 /// dropped: what the reader had typed in the box went with it. Shown once,
 /// as received; delivered all the same.
-#[test]
 fn a_prompt_recorded_with_more_than_was_sent_is_flagged_as_changed() {
     let rig = Rig::of(CliKind::Claude, "");
     assert!(!rig.compose("run the tests", 0));
@@ -3005,7 +2932,6 @@ fn a_prompt_recorded_with_more_than_was_sent_is_flagged_as_changed() {
 /// A prompt is replaced once. Rewinding later to the point it followed is
 /// the reader's doing, and a prompt sent from there is a message of its own,
 /// even one that says what the replaced prompt said.
-#[test]
 fn a_replaced_prompt_is_not_replaced_again_by_a_later_rewind() {
     let rig = Rig::of(CliKind::Claude, "");
     rig.delivered("deploy to staging", "p1", "a0");
@@ -3071,7 +2997,7 @@ fn a_settings_command_is_not_typed_into_a_box_that_holds_something() {
     // The box empties: the command it refused does not go in after all.
     std::fs::write(&emptied, b"").unwrap();
     rig.pane_says(&["BOX-EMPTIED"]);
-    std::thread::sleep(Duration::from_millis(1500));
+    std::thread::sleep(Duration::from_millis(400));
     assert!(!rig.pane_has_said("TYPED"), "the refused command is never typed");
 }
 
@@ -3103,7 +3029,7 @@ fn a_message_waiting_on_the_input_box_is_withdrawn_when_the_reader_stops() {
     assert!(!rig.said().contains(&format!("typed: {QUEUED}")), "{:?}", rig.said());
     std::fs::write(&emptied, b"").unwrap();
     rig.pane_says(&["BOX-EMPTIED"]);
-    std::thread::sleep(Duration::from_millis(1500));
+    std::thread::sleep(Duration::from_millis(400));
     assert!(!rig.pane_has_said("TYPED"), "a withdrawn message is never typed");
 }
 
@@ -3144,7 +3070,6 @@ fn a_stop_while_a_prompt_is_typed_holds_back_its_enter() {
 /// Review of #722: a wait the log leaves open, with no delivery waiting on
 /// it any more (the app quit mid-wait), is ended when the log is read, as a
 /// lapsed permission card is; one still waiting is left as it is.
-#[test]
 fn a_wait_on_the_input_box_nobody_is_waiting_on_is_ended_on_load() {
     let rig = Rig::of(CliKind::Claude, "");
     // The log `load_events` reads.
@@ -3172,7 +3097,6 @@ fn a_wait_on_the_input_box_nobody_is_waiting_on_is_ended_on_load() {
 /// Review of #722: a message sent from the chat with a dropped prompt's
 /// words is a message of its own. Its echo is taken, and the dropped one was
 /// never answered: it is not taken for that one sent again from the box.
-#[test]
 fn a_message_with_a_dropped_prompts_words_sent_from_the_chat_is_its_own() {
     let rig = Rig::of(CliKind::Claude, "");
     let dropped = rig.delivered("deploy to staging", "p1", "a0");
@@ -3198,7 +3122,6 @@ fn a_message_with_a_dropped_prompts_words_sent_from_the_chat_is_its_own() {
 /// all clear. Nothing but them, one after another: each is shown as sent.
 /// With more in the record: the first shows what the agent received, and
 /// the rest are folded into it, so no words are drawn twice.
-#[test]
 fn queued_messages_the_cli_sent_as_one_prompt_all_clear() {
     for (record, expected) in [
         ("also lint\nand run the tests", vec!["turn for: also lint", "taken: and run the tests"]),
@@ -3226,7 +3149,6 @@ fn queued_messages_the_cli_sent_as_one_prompt_all_clear() {
 /// Review of #722: the prompt just submitted to an idle CLI, recorded
 /// shorter or edited, is shown once and flagged as changed. A record that
 /// keeps less than half of its words is a prompt of the reader's own.
-#[test]
 fn a_prompt_an_idle_cli_recorded_shorter_or_edited_is_shown_once_as_changed() {
     for (recorded_as, changed) in [("run all the tests", true), ("please run every one of the tests in the repo", true), ("what time is it", false)] {
         let rig = Rig::of(CliKind::Claude, "");
@@ -3260,14 +3182,14 @@ fn a_prompt_on_its_way_is_waited_for_within_the_time_a_handover_has() {
     let ticket = writer.ticket();
     assert_eq!(rig.manager.unsettled_now().as_deref(), Some("A prompt is on its way into an agent"));
     let delivered = std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(400));
+        std::thread::sleep(Duration::from_millis(120));
         // Deadlocks if the waiting handover kept the writer's lock.
         drop(ticket.take());
         drop(ticket);
     });
     let began = std::time::Instant::now();
     let held = rig.manager.hold_tabs(Duration::from_secs(10), |held| held).expect("held once the prompt is in");
-    assert!(began.elapsed() >= Duration::from_millis(350), "{:?}", began.elapsed());
+    assert!(began.elapsed() >= Duration::from_millis(90), "{:?}", began.elapsed());
     assert_eq!(held.tabs.len(), 1);
     delivered.join().unwrap();
     assert_eq!(rig.manager.unsettled_now(), None);
@@ -3282,7 +3204,7 @@ fn handover_busy_prompt_can_settle_and_the_same_tab_is_carried() {
     let writer = rig.manager.writers.lock().unwrap().entry(rig.pane.clone()).or_default().clone();
     let ticket = writer.ticket();
     let before = rig.events();
-    let error = rig.manager.hold_tabs(Duration::from_secs(1), |_| ()).unwrap_err();
+    let error = rig.manager.hold_tabs(Duration::from_millis(150), |_| ()).unwrap_err();
     assert!(error.to_string().contains("A prompt is on its way into an agent"));
     // Taking the reserved turn would deadlock if the refused handover kept
     // its writer lock. Finishing it clears the pending-delivery condition.
@@ -3572,4 +3494,122 @@ fn phase2_collaboration_v2_async_submit_retries_and_rechecks_after_backpressure(
         if allowed { assert!(attempts.load(Ordering::SeqCst) >= 2, "{change}: no retry occurred"); }
         rig.manager.terminals.kill_all();
     }
+}
+
+#[test]
+fn session_prompt_batch_1() {
+    sign_in_gate_retains_prompt_and_cancels_delivery_timers();
+    revoked_sharing_cancels_the_waiting_writer_without_stalling_the_host_tab();
+    timed_out_readiness_then_delivery_never_publishes_a_startup_warning();
+    timed_out_readiness_with_only_live_terminal_activity_never_warns();
+    an_unconfirmed_prompt_gets_one_recoverable_warning_and_late_evidence_clears_it();
+    confirmed_delivery_followed_by_silence_is_a_stall_not_a_delivery_doubt();
+    a_ready_cli_has_not_yet_confirmed_the_prompt();
+    readiness_timeout_still_retains_a_continuation_instead_of_sending_it_blindly();
+}
+
+#[test]
+fn session_prompt_batch_2() {
+    continuation_submit_hook_confirms_before_the_transcript_and_keeps_echo_deduplication();
+    continuation_submit_hook_skips_a_receipt_whose_waiter_timed_out();
+    continuation_echo_confirms_wrapped_and_reflowed_long_prompts_without_hooks();
+    continuation_without_submission_or_provider_acceptance_stays_unconfirmed();
+    a_submitted_prompt_the_cli_never_acknowledges_is_flagged_within_seconds();
+    a_prompt_acknowledged_in_time_is_never_flagged();
+    a_queued_prompt_the_cli_never_takes_is_flagged_once_its_turn_is_over();
+    a_queued_codex_follow_up_taken_after_its_wait_ran_out_is_one_message_and_every_reply_is_drawn();
+}
+
+#[test]
+fn session_prompt_batch_3() {
+    words_sent_again_from_the_composer_retire_the_lapsed_prompt_they_repeat();
+    a_lapsed_prompt_is_not_matched_in_the_conversation_after_a_reset();
+    a_lapsed_prompt_taken_late_in_its_own_conversation_is_still_that_message();
+    words_sent_again_and_recorded_joined_or_changed_retire_the_lapsed_prompt();
+    a_resend_recorded_as_the_lapsed_prompts_words_retires_it();
+    words_sent_again_and_delivered_in_a_codex_batch_retire_the_lapsed_prompt();
+    a_lapsed_prompt_and_the_same_words_sent_again_leave_the_lapsed_delivery_unconfirmed();
+    a_lapsed_prompt_taken_before_the_same_words_are_sent_again_is_that_message();
+}
+
+#[test]
+fn session_prompt_batch_4() {
+    the_same_words_sent_again_after_a_reset_leave_the_lapsed_card_alone();
+    a_queued_prompt_the_cli_takes_is_never_flagged();
+    a_continuations_enter_is_nudged_but_the_tab_sets_it_no_deadline();
+    a_continuations_receipt_is_waited_for_until_well_after_its_last_enter();
+    a_continuations_waiter_writes_its_nudges_and_waits_on_from_the_last();
+    a_handoff_nobody_confirmed_is_answered_by_what_its_pane_shows();
+    a_prompt_typed_in_the_terminal_is_one_message_ahead_of_its_reply();
+    a_prompt_sent_from_the_composer_is_one_message_not_two();
+}
+
+#[test]
+fn session_prompt_batch_5() {
+    an_image_and_files_with_no_text_are_one_message_with_its_files();
+    a_composer_prompt_and_then_a_terminal_prompt_are_two_messages_in_order();
+    a_prompt_typed_in_the_terminal_mid_turn_is_one_message();
+    a_queued_composer_prompt_the_cli_takes_mid_turn_is_one_message();
+    send_now_preserves_the_provider_queue_until_acceptance();
+    send_now_flushes_an_acceptance_already_on_disk_before_interrupting();
+    failed_send_now_retains_pending_messages_and_allows_a_retry();
+    codex_continuation_read_before_interrupt_acknowledgement_stays_working();
+}
+
+#[test]
+fn session_prompt_batch_6() {
+    codex_owed_completion_precedes_abort_and_continuation_in_record_order();
+    codex_readers_serialize_drain_through_application();
+    transcript_application_gate_is_released_before_policy_reconciliation();
+    real_codex_escape_capture_acknowledges_the_whole_combined_queue();
+    codex_batch_acceptance_cannot_overtake_enter_publication();
+    failed_enter_never_arms_delivery_and_receipt_only_enter_keeps_its_identity();
+    codex_batch_acknowledgement_requires_the_exact_written_fifo();
+    a_send_now_that_crosses_an_unread_mid_turn_take_is_still_that_take();
+}
+
+#[test]
+fn session_prompt_batch_7() {
+    a_queued_composer_prompt_the_cli_takes_after_the_turn_starts_the_next_one();
+    a_queued_prompt_the_cli_sends_once_its_turn_was_stopped_starts_the_next_turn();
+    a_prompt_queued_long_before_its_turn_was_stopped_is_still_expected();
+    a_queued_prompt_the_cli_kept_back_when_its_turn_was_stopped_is_flagged_and_still_that_message_when_sent();
+    a_composer_prompt_recorded_long_after_it_was_sent_is_still_one_message();
+    a_resumed_conversation_s_old_prompts_are_not_told_again();
+    a_conversation_the_cli_keeps_in_another_folder_is_still_heard();
+    a_launch_adopts_the_folder_its_conversation_is_found_in();
+}
+
+#[test]
+fn session_prompt_batch_8() {
+    a_slash_command_is_shown_as_typed_and_the_app_s_own_is_not_shown();
+    a_prompt_after_a_command_that_never_ends_counts_its_own_time();
+    a_running_turn_keeps_its_start_through_its_hooks_and_a_mid_turn_prompt();
+    drained_old_launch_cannot_settle_successor();
+    old_hooks_cannot_mutate_successor_after_pump();
+    delayed_provider_id_persistence_belongs_to_its_launch();
+    stale_stop_reply_cannot_fabricate_successor_output();
+    a_delayed_permission_hook_asks_only_for_its_own_launch();
+}
+
+#[test]
+fn session_prompt_batch_9() {
+    restart_dispatch_is_bound_to_the_original_launch();
+    restart_completion_cannot_take_a_replaced_or_cancelled_slot();
+    delayed_idle_restart_defers_to_new_work_on_the_same_launch();
+    failed_restart_wait_blocks_only_its_unchanged_claim();
+    a_prompt_in_the_place_of_one_the_agent_dropped_marks_that_one_replaced();
+    a_dropped_prompt_sent_again_from_the_input_box_is_the_same_message();
+    a_prompt_the_agent_answered_is_never_marked_replaced();
+    a_queued_message_recorded_inside_a_longer_prompt_is_that_prompt_shown_once();
+}
+
+#[test]
+fn session_prompt_batch_10() {
+    a_prompt_recorded_with_more_than_was_sent_is_flagged_as_changed();
+    a_replaced_prompt_is_not_replaced_again_by_a_later_rewind();
+    a_wait_on_the_input_box_nobody_is_waiting_on_is_ended_on_load();
+    a_message_with_a_dropped_prompts_words_sent_from_the_chat_is_its_own();
+    queued_messages_the_cli_sent_as_one_prompt_all_clear();
+    a_prompt_an_idle_cli_recorded_shorter_or_edited_is_shown_once_as_changed();
 }

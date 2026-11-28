@@ -245,11 +245,11 @@ fn run_after_setup_actions_start_only_once_setup_succeeds() {
     prepare(&entry).unwrap();
     start(&rig.manager, &entry.id, false).unwrap();
     assert_eq!(rig.wait(&entry.id, Status::Failed).exit_code, Some(3));
-    std::thread::sleep(Duration::from_millis(500));
+    std::thread::sleep(Duration::from_millis(150));
     assert!(runs(&rig).is_empty(), "a failed setup starts nothing");
     assert!(!cwd.join("ran").exists());
 
-    rig.script("sleep 0.3; printf done > setup-done");
+    rig.script("sleep 0.15; printf done > setup-done");
     start(&rig.manager, &entry.id, true).unwrap();
     // Nothing is started while setup is still running.
     rig.wait(&entry.id, Status::Running);
@@ -271,7 +271,7 @@ fn run_after_setup_actions_start_only_once_setup_succeeds() {
     start(&rig.manager, &entry.id, true).unwrap();
     rig.wait(&entry.id, Status::Succeeded);
     assert!(cwd.join("setup-again").exists());
-    std::thread::sleep(Duration::from_millis(500));
+    std::thread::sleep(Duration::from_millis(150));
     assert_eq!(runs(&rig).len(), 1, "a rerun does not start Run after setup actions again");
     assert_eq!(std::fs::read_to_string(cwd.join("ran")).unwrap(), "ran");
 }

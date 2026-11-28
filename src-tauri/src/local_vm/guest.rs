@@ -3193,7 +3193,6 @@ mod tests {
     use super::super::journal::{new_id, Journal, TaskInput};
     use super::*;
 
-    #[test]
     fn linux_owner_cannot_start_shared_uid_task_execution() {
         // Account provisioning must not accidentally activate the old
         // SessionManager path before the cua runtime is fully integrated.
@@ -3465,7 +3464,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn idle_unready_setup_allows_owner_shutdown_only_with_fresh_guest_history() {
         let (_home, guest, task) = setup();
         let journal =
@@ -3543,7 +3541,6 @@ mod tests {
         .contains("history changed"));
     }
 
-    #[test]
     fn owner_shutdown_preserves_unknown_actions_and_requires_proven_helper_exit() {
         let (_home, guest, task) = setup();
         let journal =
@@ -3740,7 +3737,6 @@ mod tests {
         );
     }
 
-    #[test]
     fn setup_action_intent_precedes_effect_and_exact_receipt_is_atomic_idempotent() {
         let (_home, guest, _task) = setup();
         let params = request(
@@ -3815,7 +3811,6 @@ mod tests {
             .is_err());
     }
 
-    #[test]
     fn setup_action_disk_failure_never_exposes_success_or_replays_effect() {
         let (_home, guest, _task) = setup();
         let params = request(
@@ -3875,7 +3870,6 @@ mod tests {
         );
     }
 
-    #[test]
     fn setup_action_restart_retains_unknown_and_same_key_cannot_start_again() {
         let (_home, guest, _task) = setup();
         let params=request(&guest,"environment.setupAction",json!({
@@ -3909,7 +3903,6 @@ mod tests {
         assert!(!durable.contains("loginId"));
     }
 
-    #[test]
     fn setup_shutdown_fences_helpers_without_waiting_for_task_state_lock() {
         let (_home, guest, _task) = setup();
         let held = guest.state.lock().unwrap();
@@ -3927,7 +3920,6 @@ mod tests {
             .is_err());
     }
 
-    #[test]
     fn setup_effects_refuse_manual_or_unfinished_work_and_missing_journal() {
         let (_home, guest, task) = setup();
         let params = request(
@@ -3973,7 +3965,6 @@ mod tests {
         assert!(!guest.base.join("runtime").join(STATE).exists());
     }
 
-    #[test]
     fn setup_readiness_requires_exact_identity_and_refuses_prompt_or_action_parameters() {
         let (_home, guest, _task) = setup();
         let path = guest.base.join("runtime").join(STATE);
@@ -4001,7 +3992,6 @@ mod tests {
         assert_eq!(fs::read(&path).unwrap(), before);
     }
 
-    #[test]
     fn installed_guest_guard_precedes_all_generic_owner_window_mobile_and_sharing_routes() {
         let (_home, guest, task) = setup();
         let req = request(&guest, "desktop.state", json!({}));
@@ -4080,7 +4070,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn provisioning_evidence_uses_durable_pre_execution_marker_and_rejects_lost_history() {
         let (_home, guest, task) = setup();
         let proof = guest.provision_evidence().unwrap();
@@ -4105,7 +4094,6 @@ mod tests {
         assert!(!path.exists());
     }
 
-    #[test]
     fn legacy_initialization_and_restarts_never_mint_or_advance_no_execution_proof() {
         let (_home, guest, _task) = setup();
         let base = guest.base.clone();
@@ -4139,7 +4127,6 @@ mod tests {
             .is_empty());
     }
 
-    #[test]
     fn empty_guest_records_do_not_hide_retained_root_or_session_index_data() {
         let (_home, guest, _task) = setup();
         fs::create_dir(guest.base.join("workspaces/unlisted-work")).unwrap();
@@ -4176,7 +4163,6 @@ mod tests {
         assert!(!sessions.exists());
     }
 
-    #[test]
     fn retained_index_inspects_typed_follow_history_and_nested_unknown_metadata() {
         let (_home, guest, mut task) = setup();
         let session = new_id();
@@ -4309,7 +4295,6 @@ mod tests {
             .count()
     }
 
-    #[test]
     fn recovery_and_untracked_cancel_require_changed_kernel_boot_proof() {
         for (previous, current) in [
             (None, Some(NEW_BOOT)),
@@ -4354,7 +4339,6 @@ mod tests {
         assert!(crate::store::index::load().unwrap().is_empty());
     }
 
-    #[test]
     fn recovery_admission_and_same_key_retry_never_acknowledge_or_replay() {
         let (_home, mut guest, task) = setup();
         let (req, _sender) = pending_recovery(&mut guest, task.clone());
@@ -4411,7 +4395,6 @@ mod tests {
         assert!(crate::store::index::load().unwrap().is_empty());
     }
 
-    #[test]
     fn confirmed_recovery_persists_exact_key_event_and_receipt_together_without_replay() {
         let (_home, mut guest, task) = setup();
         let (req, sender) = pending_recovery(&mut guest, task.clone());
@@ -4447,7 +4430,6 @@ mod tests {
         assert!(crate::store::index::load().unwrap().is_empty());
     }
 
-    #[test]
     fn failed_recovery_receipt_is_durable_unknown_and_same_key_never_resends() {
         let (_home, mut guest, task) = setup();
         let (req, sender) = pending_recovery(&mut guest, task.clone());
@@ -4468,7 +4450,6 @@ mod tests {
         assert!(crate::store::index::load().unwrap().is_empty());
     }
 
-    #[test]
     fn missing_recovery_writer_or_restart_receipt_never_becomes_success() {
         let (_home, mut guest, task) = setup();
         let (req, sender) = pending_recovery(&mut guest, task.clone());
@@ -4511,7 +4492,6 @@ mod tests {
         assert!(crate::store::index::load().unwrap().is_empty());
     }
 
-    #[test]
     fn disk_failure_caches_confirmation_without_exposing_success_then_commits_once() {
         let (_home, mut guest, task) = setup();
         let (_req, sender) = pending_recovery(&mut guest, task.clone());
@@ -4544,7 +4524,6 @@ mod tests {
         assert!(guest.recovery_receipts.lock().unwrap().is_empty());
     }
 
-    #[test]
     fn late_confirmation_after_unknown_state_does_not_emit_recovered() {
         let (_home, mut guest, task) = setup();
         let (_req, sender) = pending_recovery(&mut guest, task.clone());
@@ -4568,7 +4547,6 @@ mod tests {
         );
     }
 
-    #[test]
     fn recovery_rejects_changed_effective_or_pending_settings_including_inherited() {
         let (_home, _guest, mut task) = setup();
         for inherited in [false, true] {
@@ -4602,7 +4580,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn manual_lease_survives_restart_blocks_queue_and_requires_explicit_durable_release() {
         let (_home, guest, task) = setup();
         seed(&guest, record(task.clone()));
@@ -4701,7 +4678,6 @@ mod tests {
         assert!(crate::store::index::load().unwrap().is_empty());
     }
 
-    #[test]
     fn unknown_worker_takeover_retains_pending_lease_until_boot_proof_and_cursor_catchup() {
         let (_home, mut guest, mut task) = setup();
         guest.boot_identity = Some(OLD_BOOT.into());
@@ -4749,7 +4725,6 @@ mod tests {
         assert!(crate::store::index::load().unwrap().is_empty());
     }
 
-    #[test]
     fn artifact_mismatch_refuses_before_guest_dispatch_and_keeps_retained_state() {
         let (_home, guest, _task) = setup();
         let before = std::fs::read(guest.base.join("runtime").join(STATE)).unwrap();
@@ -4762,7 +4737,6 @@ mod tests {
         assert!(guest.dispatch(call).is_ok());
     }
 
-    #[test]
     fn linux_recovery_requires_a_new_kernel_or_container_lifetime_not_runtime_restart() {
         let boot = new_id();
         let stat = |start: u64| format!("1 (init (fixture)) S {} {start} 0 0", "0 ".repeat(18));
@@ -4778,7 +4752,6 @@ mod tests {
         assert!(linux_boot_identity(&boot, 4026533000, &stat(0)).is_none());
     }
 
-    #[test]
     fn guest_boot_identity_is_kernel_backed_and_stable_during_this_process() {
         #[cfg(target_os = "macos")]
         {
@@ -4792,7 +4765,6 @@ mod tests {
         assert!(boot_identity().is_none());
     }
 
-    #[test]
     fn missing_or_same_boot_cannot_prove_worker_exit() {
         let previous = new_id();
         let current = new_id();
@@ -4815,7 +4787,6 @@ mod tests {
         assert!(require_boot_change(legacy.boot_identity.as_deref(), Some(&current)).is_err());
     }
 
-    #[test]
     fn reboot_proof_cancels_untracked_worker_without_erasing_external_uncertainty() {
         let (_home, mut guest, task) = setup();
         let previous = new_id();
@@ -4882,7 +4853,6 @@ mod tests {
         rec
     }
 
-    #[test]
     fn recovery_requires_confirmation_boot_proof_resume_id_and_exclusive_lease() {
         let (_home, mut guest, task) = setup();
         let previous = new_id();
@@ -4933,7 +4903,6 @@ mod tests {
         assert!(crate::store::index::load().unwrap().is_empty());
     }
 
-    #[test]
     fn recovery_receipt_is_keyed_durable_idempotent_and_never_replays_original_input() {
         let (_home, mut guest, task) = setup();
         let previous = new_id();
@@ -5046,7 +5015,6 @@ mod tests {
         assert!(crate::store::index::load().unwrap().is_empty());
     }
 
-    #[test]
     fn failed_recovery_receipt_never_emits_success_or_replays_text() {
         let (_home, mut guest, task) = setup();
         guest.boot_identity = Some(new_id());
@@ -5141,7 +5109,6 @@ mod tests {
     }
 
     /// Review 2: a guest question could not be answered from the task card.
-    #[test]
     fn a_guest_question_is_answered_only_while_open_and_with_bounded_answers() {
         let (_home, guest, mut task) = setup();
         task.status = TaskStatus::Waiting;
@@ -5160,7 +5127,6 @@ mod tests {
 
     /// Review 2: cancelling a task that waits for guest login, whose worker
     /// this runtime already stopped, left it outcomeUnknown until a reboot.
-    #[test]
     fn a_task_whose_worker_was_seen_stopped_cancels_without_a_reboot() {
         {
         let (_home, guest, mut task) = setup();
@@ -5190,7 +5156,6 @@ mod tests {
 
     /// Review 2: the guest kept every event forever, until its state grew past
     /// its bound and the runtime would not start.
-    #[test]
     fn guest_history_keeps_the_budget_and_pages_past_what_it_did_not_keep() {
         let (_home, _guest, mut task) = setup();
         task.events.clear();
@@ -5213,7 +5178,6 @@ mod tests {
 
     /// Review 2: a retention that failed was retried on every tick, forever,
     /// holding the state lock through git add --all and the artifact writes.
-    #[test]
     fn a_failing_retention_stops_after_its_attempts_and_says_so() {
         let (_home, guest, mut task) = setup();
         // Settled, but with no worker session to read results from.
@@ -5269,7 +5233,6 @@ mod tests {
         assert!(crate::store::index::load().unwrap().is_empty());
     }
 
-    #[test]
     fn wrong_generation_and_missing_history_fail_before_any_effect() {
         let (_home, guest, task) = setup();
         let mut stale = request(&guest, "task.cancel", json!({"target":task.target}));
@@ -5291,7 +5254,6 @@ mod tests {
         assert!(!Path::new(&task.guest_cwd).exists());
     }
 
-    #[test]
     fn paged_events_cannot_settle_a_task_until_all_history_is_delivered() {
         let (_home, _guest, mut task) = setup();
         for i in 0..600 {
@@ -5349,7 +5311,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn uncertain_followup_receipt_cannot_send_again() {
         let (_home, guest, mut task) = setup();
         task.status = TaskStatus::Running;
@@ -5378,7 +5339,6 @@ mod tests {
         assert!(crate::store::index::load().unwrap().is_empty());
     }
 
-    #[test]
     fn inherited_model_uses_the_discovered_default_efforts_without_rewriting_input() {
         let (_home, _guest, mut task) = setup();
         task.input.model.clear();
@@ -5416,7 +5376,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn inherited_model_is_unavailable_without_explicit_provider_default_evidence() {
         let (_home, _guest, mut task) = setup();
         task.input.model.clear();
@@ -5458,7 +5417,6 @@ mod tests {
         assert!(discovered_models("claude", &claude).is_err());
     }
 
-    #[test]
     fn missing_installed_identity_is_not_an_ordinary_host_runtime() {
         let root = tempfile::tempdir().unwrap();
         let base = root.path().join(".terminalx-local");
@@ -5477,7 +5435,6 @@ mod tests {
     /// A cloud workspace's runtime runs with `ProtectHome=true`, so the guest
     /// installation's path under /home is closed to it: that is no guest, and
     /// the runtime starts as before rather than exit with "Permission denied".
-    #[test]
     fn an_installation_path_closed_to_this_account_is_no_guest() {
         use std::os::unix::fs::PermissionsExt;
         // Root reads through any mode; the closed home cannot be shown there.
@@ -5495,7 +5452,6 @@ mod tests {
         assert!(!present.unwrap());
     }
 
-    #[test]
     fn provider_mcp_configs_only_name_the_bound_guest_proxy() {
         let (_home, guest, task) = setup();
         let identity = guest.state.lock().unwrap().identity.clone();
@@ -5526,7 +5482,6 @@ mod tests {
     /// Review 2: retention ran Git with the workspace's own configuration, so
     /// a worker that could only edit files could define a filter that ran
     /// after its exit was confirmed.
-    #[test]
     fn retention_git_never_runs_what_the_workspace_configures() {
         let dir = tempfile::tempdir().unwrap();
         let (cwd, repository, ran) = (dir.path().join("workspace"), dir.path().join("repository"), dir.path().join("ran"));
@@ -5545,7 +5500,6 @@ mod tests {
         assert!(repository.join("HEAD").exists() && !cwd.join(".git/HEAD").exists(), "the repository is the runtime's");
     }
 
-    #[test]
     fn real_shell_pty_outputs_files_and_patch_are_retained_without_commits() {
         let (_home, guest, mut task) = setup();
         let cwd = PathBuf::from(&task.guest_cwd);
@@ -5757,5 +5711,71 @@ mod tests {
         altered.generation = super::super::journal::new_id();
         atomic_private_write(&guest.base.join("identity.json"), &serde_json::to_vec(&altered).unwrap()).unwrap();
         assert!(guest.tick().is_err());
+    }
+
+    #[test]
+    fn local_vm_guest_batch_1() {
+        linux_owner_cannot_start_shared_uid_task_execution();
+        idle_unready_setup_allows_owner_shutdown_only_with_fresh_guest_history();
+        owner_shutdown_preserves_unknown_actions_and_requires_proven_helper_exit();
+        setup_action_intent_precedes_effect_and_exact_receipt_is_atomic_idempotent();
+        setup_action_disk_failure_never_exposes_success_or_replays_effect();
+        setup_action_restart_retains_unknown_and_same_key_cannot_start_again();
+        setup_shutdown_fences_helpers_without_waiting_for_task_state_lock();
+        setup_effects_refuse_manual_or_unfinished_work_and_missing_journal();
+        setup_readiness_requires_exact_identity_and_refuses_prompt_or_action_parameters();
+        installed_guest_guard_precedes_all_generic_owner_window_mobile_and_sharing_routes();
+    }
+
+    #[test]
+    fn local_vm_guest_batch_2() {
+        provisioning_evidence_uses_durable_pre_execution_marker_and_rejects_lost_history();
+        legacy_initialization_and_restarts_never_mint_or_advance_no_execution_proof();
+        empty_guest_records_do_not_hide_retained_root_or_session_index_data();
+        retained_index_inspects_typed_follow_history_and_nested_unknown_metadata();
+        recovery_and_untracked_cancel_require_changed_kernel_boot_proof();
+        recovery_admission_and_same_key_retry_never_acknowledge_or_replay();
+        confirmed_recovery_persists_exact_key_event_and_receipt_together_without_replay();
+        failed_recovery_receipt_is_durable_unknown_and_same_key_never_resends();
+        missing_recovery_writer_or_restart_receipt_never_becomes_success();
+        disk_failure_caches_confirmation_without_exposing_success_then_commits_once();
+    }
+
+    #[test]
+    fn local_vm_guest_batch_3() {
+        late_confirmation_after_unknown_state_does_not_emit_recovered();
+        recovery_rejects_changed_effective_or_pending_settings_including_inherited();
+        manual_lease_survives_restart_blocks_queue_and_requires_explicit_durable_release();
+        unknown_worker_takeover_retains_pending_lease_until_boot_proof_and_cursor_catchup();
+        artifact_mismatch_refuses_before_guest_dispatch_and_keeps_retained_state();
+        linux_recovery_requires_a_new_kernel_or_container_lifetime_not_runtime_restart();
+        guest_boot_identity_is_kernel_backed_and_stable_during_this_process();
+        missing_or_same_boot_cannot_prove_worker_exit();
+        reboot_proof_cancels_untracked_worker_without_erasing_external_uncertainty();
+        recovery_requires_confirmation_boot_proof_resume_id_and_exclusive_lease();
+    }
+
+    #[test]
+    fn local_vm_guest_batch_4() {
+        recovery_receipt_is_keyed_durable_idempotent_and_never_replays_original_input();
+        failed_recovery_receipt_never_emits_success_or_replays_text();
+        a_guest_question_is_answered_only_while_open_and_with_bounded_answers();
+        a_task_whose_worker_was_seen_stopped_cancels_without_a_reboot();
+        guest_history_keeps_the_budget_and_pages_past_what_it_did_not_keep();
+        a_failing_retention_stops_after_its_attempts_and_says_so();
+        wrong_generation_and_missing_history_fail_before_any_effect();
+        paged_events_cannot_settle_a_task_until_all_history_is_delivered();
+        uncertain_followup_receipt_cannot_send_again();
+        inherited_model_uses_the_discovered_default_efforts_without_rewriting_input();
+    }
+
+    #[test]
+    fn local_vm_guest_batch_5() {
+        inherited_model_is_unavailable_without_explicit_provider_default_evidence();
+        missing_installed_identity_is_not_an_ordinary_host_runtime();
+        an_installation_path_closed_to_this_account_is_no_guest();
+        provider_mcp_configs_only_name_the_bound_guest_proxy();
+        retention_git_never_runs_what_the_workspace_configures();
+        real_shell_pty_outputs_files_and_patch_are_retained_without_commits();
     }
 }

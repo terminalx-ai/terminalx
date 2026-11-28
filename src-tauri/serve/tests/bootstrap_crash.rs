@@ -273,25 +273,35 @@ const STEPS: &[&str] = &[
 
 #[test]
 fn kill_9_at_each_step_then_restart() {
-    for step in STEPS {
-        let server = FakeServer::start(false);
-        let vm = Vm::new();
-        assert_killed(&vm.run(&server.origin, Some(step)), step);
-        let key_after_crash = vm.host_key();
-        assert!(vm.token_path.exists() || matches!(*step, "token-removed"), "{step}: the token survives until the identity is stored");
-        let output = vm.run(&server.origin, None);
-        assert_healthy(&vm, &server, &output);
-        if let Some(key) = key_after_crash {
-            assert_eq!(vm.host_key(), Some(key), "{step}: the host key never changes once written");
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = STEPS
+            .iter()
+            .map(|&step| {
+                scope.spawn(move || {
+                    let server = FakeServer::start(false);
+                    let vm = Vm::new();
+                    assert_killed(&vm.run(&server.origin, Some(step)), step);
+                    let key_after_crash = vm.host_key();
+                    assert!(vm.token_path.exists() || matches!(step, "token-removed"), "{step}: the token survives until the identity is stored");
+                    let output = vm.run(&server.origin, None);
+                    assert_healthy(&vm, &server, &output);
+                    if let Some(key) = key_after_crash {
+                        assert_eq!(vm.host_key(), Some(key), "{step}: the host key never changes once written");
+                    }
+                    let redeems = server.state.lock().unwrap().redeem_hosts.len();
+                    let expected = match step {
+                        "after-redeem-response" | "2:temp-written" => 2,
+                        "1:temp-written" | "host-key-persisted" | "before-redeem" | "identity-persisted" | "token-removed" => 1,
+                        _ => unreachable!(),
+                    };
+                    assert_eq!(redeems, expected, "{step}: redeem count");
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().unwrap();
         }
-        let redeems = server.state.lock().unwrap().redeem_hosts.len();
-        let expected = match *step {
-            "after-redeem-response" | "2:temp-written" => 2,
-            "1:temp-written" | "host-key-persisted" | "before-redeem" | "identity-persisted" | "token-removed" => 1,
-            _ => unreachable!(),
-        };
-        assert_eq!(redeems, expected, "{step}: redeem count");
-    }
+    });
 }
 
 #[test]
@@ -320,25 +330,35 @@ fn kill_9_at_every_step_in_one_life() {
 fn kill_9_during_a_fenced_restart_redeem() {
     // The host key exists by now, so the identity is the first durable write.
     const FENCED_STEPS: &[&str] = &["before-redeem", "after-redeem-response", "1:temp-written", "identity-persisted", "token-removed"];
-    for step in FENCED_STEPS {
-        let server = FakeServer::start(false);
-        let vm = Vm::new();
-        assert_healthy(&vm, &server, &vm.run(&server.origin, None));
-        let fenced_credential = {
-            let mut state = server.state.lock().unwrap();
-            state.tokens.insert(FENCED_TOKEN.into(), None);
-            state.credential.take()
-        };
-        std::fs::write(&vm.token_path, FENCED_TOKEN).unwrap();
-        assert_killed(&vm.run(&server.origin, Some(step)), step);
-        assert!(vm.token_path.exists() || *step == "token-removed", "{step}: the token survives until the identity is stored");
-        assert_healthy(&vm, &server, &vm.run(&server.origin, None));
-        let stored = vm.stored().unwrap();
-        assert_ne!(stored["runtimeCredential"].as_str(), fenced_credential.as_deref(), "{step}: the fenced-out credential is replaced");
-        let redeems = server.state.lock().unwrap().redeem_hosts.len();
-        let expected = if matches!(*step, "after-redeem-response" | "1:temp-written") { 3 } else { 2 };
-        assert_eq!(redeems, expected, "{step}: redeem count");
-    }
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = FENCED_STEPS
+            .iter()
+            .map(|&step| {
+                scope.spawn(move || {
+                    let server = FakeServer::start(false);
+                    let vm = Vm::new();
+                    assert_healthy(&vm, &server, &vm.run(&server.origin, None));
+                    let fenced_credential = {
+                        let mut state = server.state.lock().unwrap();
+                        state.tokens.insert(FENCED_TOKEN.into(), None);
+                        state.credential.take()
+                    };
+                    std::fs::write(&vm.token_path, FENCED_TOKEN).unwrap();
+                    assert_killed(&vm.run(&server.origin, Some(step)), step);
+                    assert!(vm.token_path.exists() || step == "token-removed", "{step}: the token survives until the identity is stored");
+                    assert_healthy(&vm, &server, &vm.run(&server.origin, None));
+                    let stored = vm.stored().unwrap();
+                    assert_ne!(stored["runtimeCredential"].as_str(), fenced_credential.as_deref(), "{step}: the fenced-out credential is replaced");
+                    let redeems = server.state.lock().unwrap().redeem_hosts.len();
+                    let expected = if matches!(step, "after-redeem-response" | "1:temp-written") { 3 } else { 2 };
+                    assert_eq!(redeems, expected, "{step}: redeem count");
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+    });
 }
 
 /// While the stored credential still works (a generation-only rotation
@@ -386,7 +406,7 @@ fn an_unreachable_server_is_retried_until_it_answers() {
     let vm = Vm::new();
     let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
     let child = vm.spawn(&format!("http://127.0.0.1:{port}"), None);
-    std::thread::sleep(Duration::from_millis(1500));
+    std::thread::sleep(Duration::from_millis(500));
     assert!(vm.token_path.exists(), "the token is kept while the API is down");
     let server = FakeServer::start_on(TcpListener::bind(("127.0.0.1", port)).unwrap(), false);
     let output = wait_with_timeout(child);

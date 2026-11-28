@@ -345,7 +345,7 @@ fn a_message_that_waited_for_the_home_chat_is_sent_once_its_agent_starts() {
     crate::bots::items::REAL_SENDS_FOR_TESTS.store(true, Ordering::SeqCst);
     crate::bots::items::FAIL_LAUNCHES_FOR_TESTS.store(true, Ordering::SeqCst);
     assert!(service.manager.ensure_started(&chat.id, &tab).is_err(), "the launch fails at its spawn");
-    std::thread::sleep(std::time::Duration::from_millis(500));
+    std::thread::sleep(std::time::Duration::from_millis(150));
     assert_eq!((waiting(), typed()), (1, String::new()));
 
     // The chat starts: the waiting work goes as a message, once, and is cleared.
@@ -353,7 +353,7 @@ fn a_message_that_waited_for_the_home_chat_is_sent_once_its_agent_starts() {
     service.manager.ensure_started(&chat.id, &tab).unwrap();
     until("the waiting work to be sent", &|| waiting() == 0);
     until("the waiting work to be typed", &|| typed().contains("Rotate the deploy keys"));
-    std::thread::sleep(std::time::Duration::from_millis(500));
+    std::thread::sleep(std::time::Duration::from_millis(150));
     assert_eq!(typed().matches("New work for you, item #1").count(), 1, "{:?}", typed());
     let item = runtime("item", json!({"id": atlas, "number": 1})).unwrap();
     assert!(item["activity"].as_array().unwrap().iter().all(|entry| entry["kind"] != "delivered"), "sent as a message, not given in a launch prompt: {item}");
@@ -370,7 +370,7 @@ fn a_message_that_waited_for_the_home_chat_is_sent_once_its_agent_starts() {
     launch.unwrap();
     let sent = sent.unwrap();
     assert_eq!(sent["delivery"]["sent"], true, "{sent}");
-    std::thread::sleep(std::time::Duration::from_millis(1500));
+    std::thread::sleep(std::time::Duration::from_millis(350));
     assert_eq!(typed().matches("About item #1: Keep the old keys a day").count(), 1, "{:?}", typed());
     assert_eq!(waiting(), 0);
 
@@ -416,7 +416,7 @@ fn only_the_home_chats_own_tab_starting_sends_what_waits() {
 
     for (entry, tab) in [(&older, older.tabs[0].id.clone()), (&chat, added.id.clone())] {
         crate::bots::chat::launched(&service.manager, entry, &tab, true);
-        std::thread::sleep(std::time::Duration::from_millis(400));
+        std::thread::sleep(std::time::Duration::from_millis(150));
         assert_eq!(waiting(), 1, "{} / {tab} starting sent nothing", entry.id);
     }
     // The current home chat's own tab starting sends it.

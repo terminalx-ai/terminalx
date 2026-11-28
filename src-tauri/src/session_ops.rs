@@ -1826,7 +1826,6 @@ pub(crate) fn sole_workspace_of(session_id: &str) -> Result<Option<String>> {
 #[cfg(test)]
 mod tests {
     use crate::paths::Canonical;
-    #[test]
     fn pull_request_sessions_require_an_isolated_target() {
         let valid = serde_json::json!({ "projectPath": "/repo", "useWorktree": true, "checkoutPr": 12, "tab": { "harness": "claude" } });
         assert!(super::validate_session_target(&serde_json::from_value(valid.clone()).unwrap()).is_ok());
@@ -1839,7 +1838,6 @@ mod tests {
 
     use super::*;
 
-    #[test]
     fn native_codex_is_for_codex_conversations_a_person_starts_in_a_mode_it_can_serve() {
         let tab = |harness: &str, mode: Option<&str>| NewTab { transport: Default::default(), harness: harness.into(), model: String::new(), effort: None, permission_mode: mode.map(Into::into) };
         let chosen = |mut tab: NewTab, background: bool| { native_codex(&mut tab, background); tab.transport };
@@ -1869,7 +1867,6 @@ mod tests {
     /// A quick chat is kept while the reader has a shell open in it. The
     /// shell that takes an exited agent's place is in the tab's own pane,
     /// and counts as much as a terminal opened beside the tab (#437).
-    #[test]
     fn a_shell_in_a_tab_that_became_a_terminal_is_a_shell_in_use() {
         let session: SessionEntry = serde_json::from_value(serde_json::json!({
             "id": "quick", "projectPath": "/p", "cwd": "/p", "title": "t", "created": "x", "modified": "y",
@@ -1943,7 +1940,6 @@ mod tests {
         session
     }
 
-    #[test]
     fn closing_a_tab_deletes_nothing_of_its_conversation_and_it_reopens_with_it() {
         let _home = crate::store::temp_home();
         two_tab_session();
@@ -1965,7 +1961,6 @@ mod tests {
         assert!(reopen_tab_entry("s", "empty").is_err());
     }
 
-    #[test]
     fn only_a_closed_tab_pushed_out_by_newer_ones_loses_its_log() {
         let _home = crate::store::temp_home();
         two_tab_session();
@@ -1988,7 +1983,6 @@ mod tests {
         assert_eq!(index::tab_state().unwrap().closed.len(), kept);
     }
 
-    #[test]
     fn a_renamed_tab_keeps_the_readers_title_until_it_is_reset() {
         let _home = crate::store::temp_home();
         two_tab_session();
@@ -2016,7 +2010,6 @@ mod tests {
         assert!(rename_tab_entry("s", "no-such-tab", Some("x".into())).is_err());
     }
 
-    #[test]
     fn failed_fetch_warning_survives_session_storage() {
         let _home = crate::store::temp_home();
         let project = repo();
@@ -2037,7 +2030,6 @@ mod tests {
         })).unwrap()
     }
 
-    #[test]
     fn only_a_made_up_title_gives_way_to_the_agents() {
         assert!(super::automatic_title("New session", ""));
         assert!(super::automatic_title("We can work on PRD", "We can work on PRD here\nand more"));
@@ -2062,7 +2054,6 @@ mod tests {
 
     const LONG_PROMPT: &str = "You are the owner's chief of staff for the company.\nPlease triage the support inbox every morning, then report.";
 
-    #[test]
     fn a_session_from_a_long_prompt_gets_a_short_name_for_any_agent() {
         let _home = crate::store::temp_home();
         one_tab_session("You are the owner's chief of staff for the company.", "codex");
@@ -2081,7 +2072,6 @@ mod tests {
         assert_eq!(index::get("n").unwrap().title, "Inbox");
     }
 
-    #[test]
     fn tabs_take_the_name_made_for_them_as_the_phone_is_sent_it() {
         let _home = crate::store::temp_home();
         // A lone tab in a session given its name when it was started.
@@ -2100,7 +2090,6 @@ mod tests {
         assert_eq!(index::get("n").unwrap().tabs[0].title.as_deref(), Some("Mine"));
     }
 
-    #[test]
     fn a_tab_beside_others_is_named_for_the_conversation_it_holds() {
         let _home = crate::store::temp_home();
         two_tab_session();
@@ -2114,7 +2103,6 @@ mod tests {
         assert_eq!(named.tab("empty").unwrap().title.as_deref(), Some("Verifier"));
     }
 
-    #[test]
     fn a_name_the_person_set_is_kept() {
         let _home = crate::store::temp_home();
         one_tab_session("Support triage", "codex");
@@ -2123,7 +2111,6 @@ mod tests {
         assert_eq!(index::get("n").unwrap().title, "Support triage");
     }
 
-    #[test]
     fn a_prompt_of_one_sentence_keeps_its_first_line() {
         let _home = crate::store::temp_home();
         one_tab_session("Fix the login bug", "codex");
@@ -2132,7 +2119,6 @@ mod tests {
         assert_eq!(index::get("n").unwrap().title, "Fix the login bug");
     }
 
-    #[test]
     fn a_ticket_reference_leads_the_name() {
         let _home = crate::store::temp_home();
         one_tab_session("", "codex");
@@ -2140,7 +2126,6 @@ mod tests {
         assert_eq!(adopt_agent_title("n").unwrap().unwrap().title, "ENG-42 Fix login timeout");
     }
 
-    #[test]
     fn setup_persistence_failure_does_not_fail_an_existing_worktree_creation() {
         let _home = crate::store::temp_home();
         let dir = repo();
@@ -2159,7 +2144,6 @@ mod tests {
         assert!(!store::sessions_dir().unwrap().join(&entry.id).join("workspace-setup.json").exists());
     }
 
-    #[test]
     fn creates_named_sessions_and_derives_unique_title_slugs() {
         let _home = crate::store::temp_home();
         let dir = repo();
@@ -2189,7 +2173,6 @@ mod tests {
         assert!(entry.worktree_name.is_none());
     }
 
-    #[test]
     fn explicit_invalid_or_taken_names_create_nothing() {
         let _home = crate::store::temp_home();
         let dir = repo();
@@ -2216,7 +2199,6 @@ mod tests {
         assert!(create_session_entry_with_name(named_request(other.path(), None), Some("fix-203")).is_ok());
     }
 
-    #[test]
     fn explicit_names_require_a_new_git_worktree() {
         let _home = crate::store::temp_home();
         let dir = repo();
@@ -2231,7 +2213,6 @@ mod tests {
         assert!(!git::worktree_root(folder.path()).exists());
     }
 
-    #[test]
     fn concurrent_requests_cannot_claim_the_same_explicit_name() {
         let _home = crate::store::temp_home();
         let dir = repo();
@@ -2250,7 +2231,6 @@ mod tests {
         assert_eq!(index::load().unwrap().len(), 1);
     }
 
-    #[test]
     fn issue_metadata_provides_defaults_and_explicit_choices_win() {
         let _home = crate::store::temp_home();
         let dir = repo();
@@ -2273,7 +2253,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn workspace_rename_rejects_collisions_and_keeps_all_sessions_in_sync() {
         let _home = crate::store::temp_home();
         let dir = repo();
@@ -2396,7 +2375,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn archive_failure_keeps_workspace_and_sessions_until_explicit_consent() {
         let _home = crate::store::temp_home();
         let dir = repo();
@@ -2428,7 +2406,6 @@ mod tests {
         terminals.kill_all();
     }
 
-    #[test]
     fn an_untrusted_committed_setup_script_does_not_hold_up_the_saved_archive_script() {
         let _home = crate::store::temp_home();
         let dir = repo();
@@ -2451,7 +2428,6 @@ mod tests {
         terminals.kill_all();
     }
 
-    #[test]
     fn successful_archive_finishes_before_removal_and_script_changes_invalidate_consent() {
         let _home = crate::store::temp_home();
         let dir = repo();
@@ -2477,7 +2453,6 @@ mod tests {
         terminals.kill_all();
     }
 
-    #[test]
     fn clearing_archive_script_releases_pending_retry_and_bypass_logs() {
         let _home = crate::store::temp_home();
         for retry in [false, true] {
@@ -2544,7 +2519,6 @@ mod tests {
         store::quick::root().unwrap().canonical().unwrap()
     }
 
-    #[test]
     fn a_quick_chat_needs_no_project_and_runs_in_a_scratch_directory_of_its_own() {
         let _home = crate::store::temp_home();
         assert!(projects::list().unwrap().0.is_empty());
@@ -2578,7 +2552,6 @@ mod tests {
         assert_eq!(index::load().unwrap().len(), 3);
     }
 
-    #[test]
     fn a_quick_chat_can_start_in_a_folder_that_does_not_become_a_project() {
         let _home = crate::store::temp_home();
         let folder = tempfile::tempdir().unwrap();
@@ -2598,7 +2571,6 @@ mod tests {
         assert!(projects::list().unwrap().0.is_empty());
     }
 
-    #[test]
     fn a_quick_chat_that_cannot_be_created_leaves_no_session_and_no_directory() {
         let _home = crate::store::temp_home();
         let missing = tempfile::tempdir().unwrap().path().join("gone");
@@ -2608,7 +2580,6 @@ mod tests {
         assert_eq!(std::fs::read_dir(store::quick::root().unwrap()).unwrap().count(), 0);
     }
 
-    #[test]
     fn deleting_a_quick_chat_removes_its_scratch_directory_and_what_the_agent_kept_for_it() {
         let _home = crate::store::temp_home();
         let chat = quick_chat(None);
@@ -2629,7 +2600,6 @@ mod tests {
         assert_eq!(index::load().unwrap().len(), 1);
     }
 
-    #[test]
     fn a_quick_chat_can_be_pointed_at_a_folder_and_back_and_its_conversation_follows() {
         let _home = crate::store::temp_home();
         let chat = quick_chat(None);
@@ -2672,7 +2642,6 @@ mod tests {
         assert_eq!(stopped.get(), 2);
     }
 
-    #[test]
     fn only_a_quick_chat_can_be_pointed_elsewhere_or_moved() {
         let _home = crate::store::temp_home();
         let dir = repo();
@@ -2687,7 +2656,6 @@ mod tests {
         assert_eq!(index::get(&session.id).unwrap(), session);
     }
 
-    #[test]
     fn moving_a_quick_chat_into_a_project_keeps_its_tabs_and_history() {
         let _home = crate::store::temp_home();
         let chat = quick_chat(None);
@@ -2729,7 +2697,6 @@ mod tests {
         assert!(move_quick_chat_to_project(&sink, &chat.id, project.path().to_str().unwrap(), &|_| {}).is_err());
     }
 
-    #[test]
     fn creating_in_an_existing_worktree_preserves_metadata_and_the_source_conversation() {
         let _home = crate::store::temp_home();
         let project = repo();
@@ -2766,7 +2733,6 @@ mod tests {
         assert_eq!(git::list_worktrees(project.path()).unwrap(), trees);
     }
 
-    #[test]
     fn moving_to_a_project_preserves_its_managed_and_external_worktrees() {
         let _home = crate::store::temp_home();
         let project = repo();
@@ -2827,7 +2793,6 @@ mod tests {
         assert_eq!(index::get(&source.id).unwrap(), source);
     }
 
-    #[test]
     fn moving_from_a_subdirectory_of_the_target_checkout_keeps_that_directory() {
         let _home = crate::store::temp_home();
         let project = repo();
@@ -2840,7 +2805,6 @@ mod tests {
         assert!(moved.worktree_name.is_none() && moved.base_ref.is_none() && moved.worktree_base.is_none());
     }
 
-    #[test]
     fn unrelated_folders_and_repositories_do_not_become_target_worktrees() {
         let _home = crate::store::temp_home();
         let project = repo();
@@ -2864,7 +2828,6 @@ mod tests {
         std::fs::remove_dir(boundary).unwrap();
     }
 
-    #[test]
     fn a_moved_quick_chat_keeps_the_files_it_made_until_it_is_deleted() {
         let _home = crate::store::temp_home();
         let chat = quick_chat(None);
@@ -2899,7 +2862,6 @@ mod tests {
         (index::get(&chat.id).unwrap(), copy)
     }
 
-    #[test]
     fn a_fork_that_has_not_started_takes_its_parents_conversation_along_when_it_moves() {
         let _home = crate::store::temp_home();
         let (fork, copy) = unstarted_fork();
@@ -2912,7 +2874,6 @@ mod tests {
         assert!(copy.exists());
     }
 
-    #[test]
     fn deleting_a_forked_quick_chat_removes_the_copy_of_its_parents_transcript() {
         let _home = crate::store::temp_home();
         let (fork, copy) = unstarted_fork();
@@ -2932,7 +2893,6 @@ mod tests {
 
     /// A bot's chats stand as long as their bot (PRO-468): retention takes
     /// none, archived by the idle sweep or not, however long it was quiet.
-    #[test]
     fn retention_never_takes_a_bots_chat() {
         let _home = crate::store::temp_home();
         let home = quick_chat(None);
@@ -2958,7 +2918,6 @@ mod tests {
         assert!(Path::new(&home.cwd).exists());
     }
 
-    #[test]
     fn idle_quick_chats_are_removed_after_the_retention_and_nothing_else_is() {
         let _home = crate::store::temp_home();
         let project = tempfile::tempdir().unwrap();
@@ -3017,7 +2976,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn scratch_directories_no_session_uses_are_removed_once_they_are_old() {
         let _home = crate::store::temp_home();
         let chat = quick_chat(None);
@@ -3034,7 +2992,6 @@ mod tests {
         assert!(Path::new(&chat.cwd).is_dir(), "a directory a session uses is never an orphan");
     }
 
-    #[test]
     fn partial_stop_failure_keeps_every_workspace_session_and_all_history() {
         let _home = crate::store::temp_home();
         let dir = repo();
@@ -3058,7 +3015,6 @@ mod tests {
         assert!(git::run(dir.path(), &["worktree", "list", "--porcelain"]).unwrap().contains(&first.cwd.replace('\\', "/")));
     }
 
-    #[test]
     fn failed_quick_chat_stop_does_not_move_or_delete_its_history() {
         let _home = crate::store::temp_home();
         let chat = quick_chat(None);
@@ -3086,7 +3042,6 @@ mod tests {
     /// The index holds every session of every project, and a panel asks
     /// for a workspace's sessions every 30 seconds: one Git listing per
     /// session kept a dozen running at all times (#1594).
-    #[test]
     fn a_workspace_s_sessions_are_found_with_one_worktree_listing() {
         let _home = crate::store::temp_home();
         let dir = repo();
@@ -3112,7 +3067,6 @@ mod tests {
         assert!(listed <= 2, "{listed} listings");
     }
 
-    #[test]
     fn deleting_a_session_never_deletes_another_session_or_its_workspace() {
         let _home = crate::store::temp_home();
         let dir = repo();
@@ -3133,7 +3087,6 @@ mod tests {
         assert!(index::load().unwrap().is_empty());
     }
 
-    #[test]
     fn a_session_takes_its_workspace_along_only_when_it_is_the_only_one_there() {
         let _home = crate::store::temp_home();
         let dir = repo();
@@ -3150,7 +3103,6 @@ mod tests {
         assert_eq!(sole_workspace_of(&at_root.id).unwrap(), None);
     }
 
-    #[test]
     fn subdirectory_workspace_identity_handles_missing_paths_and_nested_worktrees() {
         let _home = crate::store::temp_home();
         let dir = repo();
@@ -3204,7 +3156,6 @@ mod tests {
         assert!(transcript.exists());
     }
 
-    #[test]
     fn pruned_legacy_shared_checkout_is_not_removed_without_identity() {
         let _home = crate::store::temp_home();
         let dir = repo();
@@ -3258,7 +3209,6 @@ mod tests {
         assert!(index::get(&companion.id).is_err());
     }
 
-    #[test]
     fn recreated_pruned_nested_checkout_does_not_belong_to_parent() {
         let _home = crate::store::temp_home();
         let dir = repo();
@@ -3294,7 +3244,6 @@ mod tests {
         assert!(transcript.exists());
     }
 
-    #[test]
     fn removing_a_session_with_a_missing_cwd_removes_its_checkout() {
         let _home = crate::store::temp_home();
         let dir = repo();
@@ -3312,7 +3261,6 @@ mod tests {
         assert!(index::get(&session.id).is_err());
     }
 
-    #[test]
     fn deleting_a_workspace_deletes_every_session_in_it() {
         let _home = crate::store::temp_home();
         let dir = repo();
@@ -3332,7 +3280,6 @@ mod tests {
         assert_eq!(index::load().unwrap().iter().map(|s| s.id.clone()).collect::<Vec<_>>(), vec![bystander.id]);
     }
 
-    #[test]
     fn settling_removes_the_workspace_and_keeps_its_sessions() {
         let _home = crate::store::temp_home();
         let dir = repo();
@@ -3353,7 +3300,6 @@ mod tests {
         assert!(!transcript.exists());
     }
 
-    #[test]
     fn keeping_workspaces_preserves_both_provider_resume_files_and_original_context() {
         for missing in [false, true] {
             let _home = crate::store::temp_home();
@@ -3398,7 +3344,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn an_unsafe_workspace_is_left_alone_without_the_second_confirmation() {
         let _home = crate::store::temp_home();
         let dir = repo();
@@ -3418,7 +3363,6 @@ mod tests {
         assert!(index::get(&session.id).is_err());
     }
 
-    #[test]
     fn a_second_confirmation_counts_only_for_what_was_shown() {
         let _home = crate::store::temp_home();
         let dir = repo();
@@ -3442,7 +3386,6 @@ mod tests {
         assert!(!cwd.exists());
     }
 
-    #[test]
     fn work_written_while_the_sessions_are_being_stopped_is_not_deleted() {
         let _home = crate::store::temp_home();
         let (dir, _remote) = repo_with_remote();
@@ -3461,7 +3404,6 @@ mod tests {
         assert!(index::get(&session.id).is_ok());
     }
 
-    #[test]
     fn a_session_added_since_the_dialog_opened_is_not_deleted_unnamed() {
         let _home = crate::store::temp_home();
         let dir = repo();
@@ -3493,7 +3435,6 @@ mod tests {
         assert!(!Path::new(&session.cwd).exists());
     }
 
-    #[test]
     fn a_session_started_while_the_workspace_was_being_checked_stops_the_removal() {
         let _home = crate::store::temp_home();
         let dir = repo();
@@ -3514,7 +3455,6 @@ mod tests {
         assert_eq!(index::load().unwrap().len(), 2, "neither session is deleted");
     }
 
-    #[test]
     fn a_session_running_in_a_subdirectory_belongs_to_the_workspace() {
         let _home = crate::store::temp_home();
         let dir = repo();
@@ -3542,7 +3482,6 @@ mod tests {
         assert!(index::get(&at_root.id).is_ok());
     }
 
-    #[test]
     fn a_clean_merged_workspace_needs_no_second_confirmation_and_its_branch_goes() {
         let _home = crate::store::temp_home();
         let (dir, _remote) = repo_with_remote();
@@ -3556,7 +3495,6 @@ mod tests {
         assert!(!git::worktree_branch_names(dir.path()).contains(&name));
     }
 
-    #[test]
     fn an_unmerged_branch_is_kept_even_after_the_second_confirmation() {
         let _home = crate::store::temp_home();
         let (dir, _remote) = repo_with_remote();
@@ -3579,7 +3517,6 @@ mod tests {
         assert_eq!(git::run(dir.path(), &["rev-parse", &branch]).unwrap().trim(), commit);
     }
 
-    #[test]
     fn a_workspace_with_an_initialised_submodule_can_be_removed_after_the_second_confirmation() {
         let _home = crate::store::temp_home();
         let dir = repo();
@@ -3613,7 +3550,6 @@ mod tests {
         assert!(index::get(&session.id).is_err());
     }
 
-    #[test]
     fn a_folder_that_is_not_on_disk_cannot_be_checked_and_needs_the_second_confirmation() {
         let _home = crate::store::temp_home();
         let dir = repo();
@@ -3629,7 +3565,6 @@ mod tests {
         assert!(index::get(&session.id).is_err());
     }
 
-    #[test]
     fn the_projects_own_checkout_is_never_removed() {
         let _home = crate::store::temp_home();
         let dir = repo();
@@ -3641,7 +3576,6 @@ mod tests {
         assert!(index::get(&at_root.id).is_ok());
     }
 
-    #[test]
     fn deleting_a_workspace_removes_its_sessions_agent_data_and_settling_does_not() {
         let _home = crate::store::temp_home();
         let dir = repo();
@@ -3652,7 +3586,6 @@ mod tests {
         assert!(!transcript.parent().unwrap().exists());
     }
 
-    #[test]
     fn a_failed_removal_leaves_the_sessions_and_their_agent_data_alone() {
         let _home = crate::store::temp_home();
         let dir = repo();
@@ -3677,7 +3610,6 @@ mod tests {
         assert!(index::load().unwrap().is_empty());
     }
 
-    #[test]
     fn a_workspace_made_under_an_older_worktree_folder_is_removed_by_its_own_path() {
         let _home = crate::store::temp_home();
         let dir = repo();
@@ -3695,7 +3627,6 @@ mod tests {
         assert!(look_alike.join("not-the-sessions.txt").exists());
     }
 
-    #[test]
     fn a_workspace_already_gone_takes_nothing_else_by_name() {
         let _home = crate::store::temp_home();
         let dir = repo();
@@ -3715,7 +3646,6 @@ mod tests {
         assert!(git::worktree_branch_names(dir.path()).contains(&name), "nor is a branch removed by name");
     }
 
-    #[test]
     fn a_caller_that_showed_nothing_never_deletes_a_broken_worktree_directly() {
         let _home = crate::store::temp_home();
         let dir = repo();
@@ -3730,5 +3660,103 @@ mod tests {
         // The desktop, after its confirmation, may.
         remove(&session, SessionsFate::Delete, git::DirectDelete::Allowed, &|_| {}).unwrap();
         assert!(!Path::new(&session.cwd).exists());
+    }
+
+    #[test]
+    fn session_ops_batch_1() {
+        pull_request_sessions_require_an_isolated_target();
+        native_codex_is_for_codex_conversations_a_person_starts_in_a_mode_it_can_serve();
+        a_shell_in_a_tab_that_became_a_terminal_is_a_shell_in_use();
+        closing_a_tab_deletes_nothing_of_its_conversation_and_it_reopens_with_it();
+        only_a_closed_tab_pushed_out_by_newer_ones_loses_its_log();
+        a_renamed_tab_keeps_the_readers_title_until_it_is_reset();
+        failed_fetch_warning_survives_session_storage();
+        only_a_made_up_title_gives_way_to_the_agents();
+        a_session_from_a_long_prompt_gets_a_short_name_for_any_agent();
+        tabs_take_the_name_made_for_them_as_the_phone_is_sent_it();
+    }
+
+    #[test]
+    fn session_ops_batch_2() {
+        a_tab_beside_others_is_named_for_the_conversation_it_holds();
+        a_name_the_person_set_is_kept();
+        a_prompt_of_one_sentence_keeps_its_first_line();
+        a_ticket_reference_leads_the_name();
+        setup_persistence_failure_does_not_fail_an_existing_worktree_creation();
+        creates_named_sessions_and_derives_unique_title_slugs();
+        explicit_invalid_or_taken_names_create_nothing();
+        explicit_names_require_a_new_git_worktree();
+        concurrent_requests_cannot_claim_the_same_explicit_name();
+        issue_metadata_provides_defaults_and_explicit_choices_win();
+    }
+
+    #[test]
+    fn session_ops_batch_3() {
+        workspace_rename_rejects_collisions_and_keeps_all_sessions_in_sync();
+        archive_failure_keeps_workspace_and_sessions_until_explicit_consent();
+        an_untrusted_committed_setup_script_does_not_hold_up_the_saved_archive_script();
+        successful_archive_finishes_before_removal_and_script_changes_invalidate_consent();
+        clearing_archive_script_releases_pending_retry_and_bypass_logs();
+        a_quick_chat_needs_no_project_and_runs_in_a_scratch_directory_of_its_own();
+        a_quick_chat_can_start_in_a_folder_that_does_not_become_a_project();
+        a_quick_chat_that_cannot_be_created_leaves_no_session_and_no_directory();
+        deleting_a_quick_chat_removes_its_scratch_directory_and_what_the_agent_kept_for_it();
+        a_quick_chat_can_be_pointed_at_a_folder_and_back_and_its_conversation_follows();
+    }
+
+    #[test]
+    fn session_ops_batch_4() {
+        only_a_quick_chat_can_be_pointed_elsewhere_or_moved();
+        moving_a_quick_chat_into_a_project_keeps_its_tabs_and_history();
+        creating_in_an_existing_worktree_preserves_metadata_and_the_source_conversation();
+        moving_to_a_project_preserves_its_managed_and_external_worktrees();
+        moving_from_a_subdirectory_of_the_target_checkout_keeps_that_directory();
+        unrelated_folders_and_repositories_do_not_become_target_worktrees();
+        a_moved_quick_chat_keeps_the_files_it_made_until_it_is_deleted();
+        a_fork_that_has_not_started_takes_its_parents_conversation_along_when_it_moves();
+        deleting_a_forked_quick_chat_removes_the_copy_of_its_parents_transcript();
+        retention_never_takes_a_bots_chat();
+    }
+
+    #[test]
+    fn session_ops_batch_5() {
+        idle_quick_chats_are_removed_after_the_retention_and_nothing_else_is();
+        scratch_directories_no_session_uses_are_removed_once_they_are_old();
+        partial_stop_failure_keeps_every_workspace_session_and_all_history();
+        failed_quick_chat_stop_does_not_move_or_delete_its_history();
+        a_workspace_s_sessions_are_found_with_one_worktree_listing();
+        deleting_a_session_never_deletes_another_session_or_its_workspace();
+        a_session_takes_its_workspace_along_only_when_it_is_the_only_one_there();
+        subdirectory_workspace_identity_handles_missing_paths_and_nested_worktrees();
+        pruned_legacy_shared_checkout_is_not_removed_without_identity();
+        recreated_pruned_nested_checkout_does_not_belong_to_parent();
+    }
+
+    #[test]
+    fn session_ops_batch_6() {
+        removing_a_session_with_a_missing_cwd_removes_its_checkout();
+        deleting_a_workspace_deletes_every_session_in_it();
+        settling_removes_the_workspace_and_keeps_its_sessions();
+        keeping_workspaces_preserves_both_provider_resume_files_and_original_context();
+        an_unsafe_workspace_is_left_alone_without_the_second_confirmation();
+        a_second_confirmation_counts_only_for_what_was_shown();
+        work_written_while_the_sessions_are_being_stopped_is_not_deleted();
+        a_session_added_since_the_dialog_opened_is_not_deleted_unnamed();
+        a_session_started_while_the_workspace_was_being_checked_stops_the_removal();
+        a_session_running_in_a_subdirectory_belongs_to_the_workspace();
+    }
+
+    #[test]
+    fn session_ops_batch_7() {
+        a_clean_merged_workspace_needs_no_second_confirmation_and_its_branch_goes();
+        an_unmerged_branch_is_kept_even_after_the_second_confirmation();
+        a_workspace_with_an_initialised_submodule_can_be_removed_after_the_second_confirmation();
+        a_folder_that_is_not_on_disk_cannot_be_checked_and_needs_the_second_confirmation();
+        the_projects_own_checkout_is_never_removed();
+        deleting_a_workspace_removes_its_sessions_agent_data_and_settling_does_not();
+        a_failed_removal_leaves_the_sessions_and_their_agent_data_alone();
+        a_workspace_made_under_an_older_worktree_folder_is_removed_by_its_own_path();
+        a_workspace_already_gone_takes_nothing_else_by_name();
+        a_caller_that_showed_nothing_never_deletes_a_broken_worktree_directly();
     }
 }

@@ -257,7 +257,6 @@ fn v2_safe_witness() -> crate::remote::collab::v2::TabWitness {
     }
 }
 
-#[test]
 fn phase2_collaboration_v2_encrypted_mailbox_manager_false_never_approves_or_configures_via_manage_stamp() {
     let h = harness();
     let collab = v2_collaboration(&h, v2_snapshot("9007199254740993", "manager", false, json!("explicit")));
@@ -280,7 +279,6 @@ fn phase2_collaboration_v2_encrypted_mailbox_manager_false_never_approves_or_con
     assert_eq!(stamped_lease_fixture(&h.agents, &lease(&h.agents, "v2-slash", "steer", json!({"v": 1, "text": "/model opus"}))).outcome, "rejected");
 }
 
-#[test]
 fn phase2_collaboration_v2_everyone_drive_is_per_tab_and_explicit_approval_is_independent() {
     let h = harness();
     v2_collaboration(&h, v2_snapshot("1", "driver", true, json!("everyone")));
@@ -307,7 +305,6 @@ fn phase2_collaboration_v2_everyone_drive_is_per_tab_and_explicit_approval_is_in
     assert_eq!(stamped_lease_fixture(&h.agents, &lease(&h.agents, "raw-command", "steer", json!({"v": 1, "text": "/permissions"}))).outcome, "rejected");
 }
 
-#[test]
 fn phase2_collaboration_v2_encrypted_mailbox_requires_stored_pending_and_raw_actual_mode_witness() {
     use crate::harness::settings::Stance;
     let mut cases = vec![("safe Claude", v2_safe_witness(), true)];
@@ -356,7 +353,6 @@ fn phase2_collaboration_v2_encrypted_mailbox_requires_stored_pending_and_raw_act
     }
 }
 
-#[test]
 fn phase2_collaboration_v2_followups_fence_same_role_source_revision_generation_and_restart() {
     for transition in ["source", "revision", "generation", "restart"] {
         let h = harness();
@@ -398,7 +394,6 @@ fn phase2_collaboration_v2_followups_fence_same_role_source_revision_generation_
     }
 }
 
-#[test]
 fn phase2_collaboration_v2_stale_conflicting_and_failed_durable_policy_never_admit_encrypted_lease_input() {
     for next in [v2_snapshot("9", "manager", true, json!("explicit")), v2_snapshot("10", "manager", true, json!("explicit"))] {
         let h = harness();
@@ -420,7 +415,6 @@ fn phase2_collaboration_v2_stale_conflicting_and_failed_durable_policy_never_adm
     assert!(h.ops.sent.lock().unwrap().is_empty());
 }
 
-#[test]
 fn phase2_collaboration_v2_policy_replacement_cannot_cross_native_command_mark_and_synchronous_apply() {
     use std::sync::mpsc;
     let h = harness();
@@ -456,7 +450,6 @@ fn phase2_collaboration_v2_policy_replacement_cannot_cross_native_command_mark_a
     assert_eq!(h.ops.sent.lock().unwrap().len(), 1);
 }
 
-#[test]
 fn unknown_claude_models_are_rejected_before_settings_or_sends_even_when_busy() {
     crate::harness::claude::models::with_test_models(json!({ "response": { "models": [{ "value": "opus", "resolvedModel": "claude-opus-5" }] } }), || {
         for busy in [false, true] {
@@ -483,7 +476,6 @@ fn unknown_claude_models_are_rejected_before_settings_or_sends_even_when_busy() 
     assert_eq!(handle(&h.agents, &command).outcome, "applied");
 }
 
-#[test]
 fn a_send_is_applied_once_and_a_redelivery_answers_from_its_receipt() {
     let h = harness();
     let first = lease(&h.agents, "c1", "send", json!({ "v": 1, "text": "hello", "model": "opus" }));
@@ -499,7 +491,6 @@ fn a_send_is_applied_once_and_a_redelivery_answers_from_its_receipt() {
     assert_eq!(h.ops.sent.lock().unwrap().len(), 1, "never sent twice");
 }
 
-#[test]
 fn a_send_while_busy_is_queued_durably_and_goes_out_when_the_turn_ends() {
     let h = harness();
     *h.ops.busy.lock().unwrap() = true;
@@ -524,7 +515,6 @@ fn a_send_while_busy_is_queued_durably_and_goes_out_when_the_turn_ends() {
     assert_eq!(*h.ops.sent.lock().unwrap(), vec!["next", "after"]);
 }
 
-#[test]
 fn steer_goes_into_the_running_turn_now() {
     let h = harness();
     *h.ops.busy.lock().unwrap() = true;
@@ -532,7 +522,6 @@ fn steer_goes_into_the_running_turn_now() {
     assert_eq!(*h.ops.sent.lock().unwrap(), vec!["use tabs"]);
 }
 
-#[test]
 fn a_command_interrupted_mid_apply_is_never_applied_again_except_stop() {
     let h = harness();
     let send = lease(&h.agents, "c1", "send", json!({ "v": 1, "text": "hi" }));
@@ -546,7 +535,6 @@ fn a_command_interrupted_mid_apply_is_never_applied_again_except_stop() {
     assert_eq!(*h.ops.stops.lock().unwrap(), 1);
 }
 
-#[test]
 fn stop_drops_queued_follow_ups_and_lists_them_in_its_receipt() {
     let h = harness();
     *h.ops.busy.lock().unwrap() = true;
@@ -559,7 +547,6 @@ fn stop_drops_queued_follow_ups_and_lists_them_in_its_receipt() {
 }
 
 // PRO-84: a transcript showed the restart notice three times.
-#[test]
 fn a_turn_interrupted_by_a_restart_is_noted_once_until_something_else_is_said() {
     let h = harness();
     let tabs = [("s1".to_string(), "tab-1".to_string())];
@@ -573,7 +560,6 @@ fn a_turn_interrupted_by_a_restart_is_noted_once_until_something_else_is_said() 
     assert_eq!(h.ops.notes.lock().unwrap().len(), 3);
 }
 
-#[test]
 fn permission_decisions_apply_once_and_a_settled_request_is_rejected() {
     let h = harness();
     h.ops.pending.lock().unwrap().push("req-1".into());
@@ -586,7 +572,6 @@ fn permission_decisions_apply_once_and_a_settled_request_is_rejected() {
     assert_eq!((late.outcome.as_str(), late.category.as_deref()), ("rejected", Some("request-not-pending")));
 }
 
-#[test]
 fn unreadable_misrouted_unauthorized_or_unknown_commands_are_rejected_untouched() {
     let h = harness();
     let mut unknown_key = lease(&h.agents, "c1", "send", json!({ "v": 1, "text": "x" }));
@@ -604,7 +589,6 @@ fn unreadable_misrouted_unauthorized_or_unknown_commands_are_rejected_untouched(
     assert!(h.ops.sent.lock().unwrap().is_empty());
 }
 
-#[test]
 fn a_rotated_key_still_opens_queued_commands_within_its_grace() {
     let h = harness();
     let queued = lease(&h.agents, "c1", "send", json!({ "v": 1, "text": "before rotation" }));
@@ -612,7 +596,6 @@ fn a_rotated_key_still_opens_queued_commands_within_its_grace() {
     assert_eq!(handle(&h.agents, &queued).outcome, "applied");
 }
 
-#[test]
 fn a_lost_ack_is_retried_with_the_same_token_and_bytes_and_stale_generation_polls_again() {
     let h = harness();
     let first = lease(&h.agents, "c1", "send", json!({ "v": 1, "text": "hi" }));
@@ -634,7 +617,6 @@ fn a_lost_ack_is_retried_with_the_same_token_and_bytes_and_stale_generation_poll
     assert!(h.agents.poll.wait(std::time::Duration::ZERO), "a stale generation asks for another lease round");
 }
 
-#[test]
 fn checkpoints_are_sealed_for_the_workspace_and_move_to_a_new_epoch_when_stale() {
     let h = harness();
     checkpoints::upload(&h.agents, "tab-1").unwrap();
@@ -661,7 +643,6 @@ fn checkpoints_are_sealed_for_the_workspace_and_move_to_a_new_epoch_when_stale()
     assert!(crypto::open_raw(&key, &crypto::unb64(&second.iv).unwrap(), &ciphertext, &other).is_err());
 }
 
-#[test]
 fn a_projection_keeps_the_newest_whole_events_within_its_budget() {
     let h = harness();
     let full = checkpoints::projection(&h.agents, "tab-1", 1 << 20).unwrap();
@@ -677,7 +658,6 @@ fn a_projection_keeps_the_newest_whole_events_within_its_budget() {
     assert!(empty["lastMessageAt"].is_null());
 }
 
-#[test]
 fn a_removed_tab_never_uploads_again_and_its_delete_is_retried() {
     let h = harness();
     h.agents.checkpoints.remove("tab-1");
@@ -687,7 +667,6 @@ fn a_removed_tab_never_uploads_again_and_its_delete_is_retried() {
     assert!(h.api.checkpoints.lock().unwrap().is_empty(), "late events of a removed tab upload nothing");
 }
 
-#[test]
 fn a_final_checkpoint_quiesces_then_uploads_every_tab() {
     let h = harness();
     // A follow-up waiting for the turn to end, and a command in the mailbox.
@@ -721,7 +700,6 @@ fn a_final_checkpoint_quiesces_then_uploads_every_tab() {
     assert!(h.agents.dispatch_follow_ups() >= 1);
 }
 
-#[test]
 fn a_final_checkpoint_that_cannot_upload_reports_failure_by_its_deadline() {
     let h = harness();
     *h.api.failing_puts.lock().unwrap() = u32::MAX;
@@ -730,7 +708,6 @@ fn a_final_checkpoint_that_cannot_upload_reports_failure_by_its_deadline() {
     assert!(started.elapsed() < std::time::Duration::from_secs(10), "bounded by the deadline");
 }
 
-#[test]
 fn work_resumes_when_the_archive_never_stopped_this_runtime() {
     use crate::cloud_bootstrap::QuiesceRequest;
     let h = harness();
@@ -755,7 +732,6 @@ fn work_resumes_when_the_archive_never_stopped_this_runtime() {
     assert!(!h.agents.quiesced());
 }
 
-#[test]
 fn work_resumes_at_once_when_a_device_attaches_after_the_archive() {
     use crate::cloud_bootstrap::QuiesceRequest;
     let h = harness();
@@ -788,7 +764,6 @@ fn shared(h: &Harness, members: serde_json::Value) -> Arc<crate::remote::collab:
     collab
 }
 
-#[test]
 fn a_viewer_cannot_send_but_an_approving_viewer_decides_permissions() {
     let h = harness();
     shared(&h, json!([{ "userId": "bob", "role": "viewer", "canApprove": true }, { "userId": "cat", "role": "viewer" }]));
@@ -804,7 +779,6 @@ fn a_viewer_cannot_send_but_an_approving_viewer_decides_permissions() {
     assert!(h.ops.sent.lock().unwrap().is_empty());
 }
 
-#[test]
 fn the_runtime_list_narrows_a_role_stamped_at_lease_time() {
     let h = harness();
     // Leased while Alice drove; the refresh since says she only views.
@@ -818,7 +792,6 @@ fn the_runtime_list_narrows_a_role_stamped_at_lease_time() {
     assert_eq!(*h.ops.stops.lock().unwrap(), 0);
 }
 
-#[test]
 fn one_driver_at_a_time_and_the_other_is_told_who_drives() {
     let h = harness();
     let collab = shared(&h, json!([{ "userId": "alice", "role": "driver" }, { "userId": "bob", "role": "driver" }, { "userId": "boss", "role": "manager" }]));
@@ -846,7 +819,6 @@ fn one_driver_at_a_time_and_the_other_is_told_who_drives() {
     assert_eq!(*h.ops.sent.lock().unwrap(), vec!["alice's task"]);
 }
 
-#[test]
 fn a_queued_follow_up_is_dropped_when_its_sender_loses_driver_access() {
     let h = harness();
     let collab = shared(&h, json!([{ "userId": "alice", "role": "driver" }]));
@@ -865,7 +837,6 @@ fn a_queued_follow_up_is_dropped_when_its_sender_loses_driver_access() {
     assert!(collab.lease("tab-1", now_ms(), true).is_none(), "the lease went with the role");
 }
 
-#[test]
 fn an_idle_lease_that_expired_does_not_block_the_next_driver() {
     let h = harness();
     let collab = shared(&h, json!([{ "userId": "alice", "role": "driver" }, { "userId": "bob", "role": "driver" }]));
@@ -885,7 +856,6 @@ fn an_idle_lease_that_expired_does_not_block_the_next_driver() {
 /// manager or an approver; a plain driver's send is applied without them, so
 /// nobody without approval rights can switch a tab to bypassPermissions
 /// through the mailbox while the workspace sleeps.
-#[test]
 fn a_drivers_queued_settings_are_not_applied_but_an_approvers_are() {
     let h = harness();
     let collab = shared(
@@ -920,7 +890,6 @@ fn a_drivers_queued_settings_are_not_applied_but_an_approvers_are() {
 /// `/permissions` from a plain driver would change what the mailbox's
 /// settings rule (above) keeps from them. The runtime refuses it, with the
 /// reason in the receipt, and types nothing.
-#[test]
 fn a_plain_drivers_slash_command_is_refused_with_the_reason_and_an_approvers_goes_through() {
     let h = harness();
     let collab = shared(
@@ -1009,7 +978,6 @@ fn a_plain_drivers_slash_command_is_refused_with_the_reason_and_an_approvers_goe
 
 /// The allowed commands are the tab's CLI's own: Codex has no `/help`, and
 /// an agent nobody checked has none at all.
-#[test]
 fn the_allowed_commands_follow_the_tabs_agent() {
     let h = harness();
     shared(&h, json!([{ "userId": "alice", "role": "driver", "canApprove": false }]));
@@ -1027,7 +995,6 @@ fn the_allowed_commands_follow_the_tabs_agent() {
 /// The route the ticket names: a command left in the mailbox while the
 /// workspace was stopped is leased when the runtime wakes, and is judged by
 /// what its sender may do then.
-#[test]
 fn a_slash_command_queued_while_the_workspace_slept_is_refused_when_it_is_leased() {
     let h = harness();
     shared(&h, json!([{ "userId": "alice", "role": "driver", "canApprove": false }]));
@@ -1047,7 +1014,6 @@ fn a_slash_command_queued_while_the_workspace_slept_is_refused_when_it_is_leased
 /// A follow-up waits for the running turn. If its sender stops being an
 /// approver meanwhile, a queued slash command is dropped before it is typed;
 /// their ordinary messages still go.
-#[test]
 fn a_queued_slash_command_is_dropped_when_its_sender_can_no_longer_approve() {
     let h = harness();
     let collab = shared(&h, json!([{ "userId": "bob", "role": "driver", "canApprove": true }]));
@@ -1073,7 +1039,6 @@ fn a_queued_slash_command_is_dropped_when_its_sender_can_no_longer_approve() {
 /// that queue. A slash or `!` command is therefore never steered into a
 /// running turn, whoever sends it; it would still run after its sender lost
 /// the right to send it.
-#[test]
 fn a_command_is_never_steered_into_a_running_turn() {
     let h = harness();
     shared(
@@ -1119,7 +1084,6 @@ fn upload(agents: &CloudAgents, owner: &str, id: &str, bytes: &[u8]) {
     agents.attach_part(owner, id, 0, bytes, "image/png", Some("shot.png"), false, true).unwrap();
 }
 
-#[test]
 fn a_message_carries_the_images_its_sender_uploaded_and_they_are_gone_once_typed() {
     let h = harness();
     upload(&h.agents, "u1", "attach-0001", b"abc");
@@ -1142,7 +1106,6 @@ fn a_message_carries_the_images_its_sender_uploaded_and_they_are_gone_once_typed
     assert_eq!(h.ops.sent.lock().unwrap().last().map(String::as_str), Some(""));
 }
 
-#[test]
 fn a_message_naming_an_image_that_is_not_there_is_refused_untouched() {
     let h = harness();
     upload(&h.agents, "u-alice", "attach-0001", b"abc");
@@ -1171,7 +1134,6 @@ fn a_message_naming_an_image_that_is_not_there_is_refused_untouched() {
     assert!(h.agents.attachments.load("u-alice", &["attach-0001".into()]).is_ok(), "its owner can still send it");
 }
 
-#[test]
 fn a_queued_message_keeps_its_images_until_it_is_typed_or_dropped() {
     let h = harness();
     *h.ops.busy.lock().unwrap() = true;
@@ -1194,7 +1156,6 @@ fn a_queued_message_keeps_its_images_until_it_is_typed_or_dropped() {
     assert_eq!(h.ops.sent.lock().unwrap().len(), 1);
 }
 
-#[test]
 fn a_queued_message_whose_images_are_gone_is_not_sent_without_them() {
     let h = harness();
     *h.ops.busy.lock().unwrap() = true;
@@ -1214,7 +1175,6 @@ fn upload_file(agents: &CloudAgents, owner: &str, id: &str, name: &str, bytes: &
     agents.attach_part(owner, id, 0, bytes, "text/markdown", Some(name), true, true).unwrap();
 }
 
-#[test]
 fn a_message_carries_its_files_stored_in_the_sessions_attachments_folder_here() {
     let _home = crate::store::temp_home();
     let h = harness();
@@ -1238,7 +1198,6 @@ fn a_message_carries_its_files_stored_in_the_sessions_attachments_folder_here() 
     assert_eq!(h.ops.files.lock().unwrap()[1][0].name, "notes.txt");
 }
 
-#[test]
 fn a_queued_message_takes_its_files_into_the_session_and_types_them_later() {
     let _home = crate::store::temp_home();
     let h = harness();
@@ -1258,7 +1217,6 @@ fn a_queued_message_takes_its_files_into_the_session_and_types_them_later() {
     assert_eq!(h.ops.files.lock().unwrap()[0], queued[0].files);
 }
 
-#[test]
 fn a_message_naming_a_file_that_is_not_there_or_too_many_is_refused_untouched() {
     let _home = crate::store::temp_home();
     let h = harness();
@@ -1286,7 +1244,6 @@ fn a_message_naming_a_file_that_is_not_there_or_too_many_is_refused_untouched() 
 
 /// Review of #309: a refused message must not leave its uploads behind, or
 /// retries fill the store until nobody can attach.
-#[test]
 fn a_refused_message_gives_up_its_senders_uploads_and_nobody_elses() {
     let h = harness();
     shared(&h, json!([{ "userId": "alice", "role": "driver", "canApprove": false }, { "userId": "bob", "role": "driver", "canApprove": false }]));
@@ -1321,7 +1278,6 @@ fn stamped_lease_fixture(agents: &CloudAgents, lease: &Lease) -> Receipt {
     handle(agents, &lease)
 }
 
-#[test]
 fn phase2_collaboration_v2_role_only_mailbox_actor_never_inherits_explicit_authority_from_bootstrap() {
     for source in ["explicit", "everyone", "implicit"] {
         let h = harness();
@@ -1340,7 +1296,6 @@ fn phase2_collaboration_v2_role_only_mailbox_actor_never_inherits_explicit_autho
 }
 
 
-#[test]
 fn phase2_collaboration_v2_encrypted_lease_requires_exact_authoritative_revision_role_approval_and_source() {
     for (revision, role, approve, source) in [
         ("11","driver",false,json!("everyone")), // stale explicit bootstrap, fresh Everyone actor
@@ -1361,7 +1316,6 @@ fn phase2_collaboration_v2_encrypted_lease_requires_exact_authoritative_revision
     }
 }
 
-#[test]
 fn phase2_collaboration_v2_required_nullable_actor_source_and_independent_viewer_approval() {
     let h = harness();
     v2_collaboration(&h,v2_snapshot("1","viewer",true,Value::Null));
@@ -1384,7 +1338,6 @@ fn phase2_collaboration_v2_required_nullable_actor_source_and_independent_viewer
 
 /// #1328: a held follow-up is edited, released or withdrawn by a
 /// `follow-up` command naming its id; its text is typed as edited.
-#[test]
 fn a_held_follow_up_is_edited_released_and_withdrawn_through_the_mailbox() {
     let h = harness();
     *h.ops.busy.lock().unwrap() = true;
@@ -1418,7 +1371,6 @@ fn a_held_follow_up_is_edited_released_and_withdrawn_through_the_mailbox() {
     assert_eq!(handle(&h.agents, &edit).outcome, "applied", "answered from its receipt");
 }
 
-#[test]
 fn a_follow_up_command_that_is_malformed_or_empty_changes_nothing() {
     let h = harness();
     *h.ops.busy.lock().unwrap() = true;
@@ -1445,7 +1397,6 @@ fn a_follow_up_command_that_is_malformed_or_empty_changes_nothing() {
 
 /// A held follow-up is its sender's, or a manager's, to change; another
 /// driver's change, or a slash command a plain driver may not type, is refused.
-#[test]
 fn only_the_sender_or_a_manager_changes_a_held_follow_up() {
     let h = harness();
     shared(&h, json!([{ "userId": "alice", "role": "driver" }, { "userId": "bob", "role": "driver" }, { "userId": "boss", "role": "manager" }]));
@@ -1480,7 +1431,6 @@ fn only_the_sender_or_a_manager_changes_a_held_follow_up() {
     assert!(h.agents.follow_ups.list("tab-1").is_empty());
 }
 
-#[test]
 fn another_drivers_held_follow_up_is_refused_as_not_theirs() {
     let h = harness();
     *h.ops.busy.lock().unwrap() = true;
@@ -1491,4 +1441,74 @@ fn another_drivers_held_follow_up_is_refused_as_not_theirs() {
     assert_eq!(refused.category.as_deref(), Some("forbidden"));
     assert_eq!(open_receipt(&h.agents, &bob, &refused)["message"], FOLLOW_UP_NOT_YOURS_MESSAGE);
     assert_eq!(*h.ops.interrupts.lock().unwrap(), 0, "nothing was interrupted");
+}
+
+#[test]
+fn mailbox_batch_1() {
+    phase2_collaboration_v2_encrypted_mailbox_manager_false_never_approves_or_configures_via_manage_stamp();
+    phase2_collaboration_v2_everyone_drive_is_per_tab_and_explicit_approval_is_independent();
+    phase2_collaboration_v2_encrypted_mailbox_requires_stored_pending_and_raw_actual_mode_witness();
+    phase2_collaboration_v2_followups_fence_same_role_source_revision_generation_and_restart();
+    phase2_collaboration_v2_stale_conflicting_and_failed_durable_policy_never_admit_encrypted_lease_input();
+    phase2_collaboration_v2_policy_replacement_cannot_cross_native_command_mark_and_synchronous_apply();
+    unknown_claude_models_are_rejected_before_settings_or_sends_even_when_busy();
+    a_send_is_applied_once_and_a_redelivery_answers_from_its_receipt();
+    a_send_while_busy_is_queued_durably_and_goes_out_when_the_turn_ends();
+    steer_goes_into_the_running_turn_now();
+}
+
+#[test]
+fn mailbox_batch_2() {
+    a_command_interrupted_mid_apply_is_never_applied_again_except_stop();
+    stop_drops_queued_follow_ups_and_lists_them_in_its_receipt();
+    a_turn_interrupted_by_a_restart_is_noted_once_until_something_else_is_said();
+    permission_decisions_apply_once_and_a_settled_request_is_rejected();
+    unreadable_misrouted_unauthorized_or_unknown_commands_are_rejected_untouched();
+    a_rotated_key_still_opens_queued_commands_within_its_grace();
+    a_lost_ack_is_retried_with_the_same_token_and_bytes_and_stale_generation_polls_again();
+    checkpoints_are_sealed_for_the_workspace_and_move_to_a_new_epoch_when_stale();
+    a_projection_keeps_the_newest_whole_events_within_its_budget();
+    a_removed_tab_never_uploads_again_and_its_delete_is_retried();
+}
+
+#[test]
+fn mailbox_batch_3() {
+    a_final_checkpoint_quiesces_then_uploads_every_tab();
+    a_final_checkpoint_that_cannot_upload_reports_failure_by_its_deadline();
+    work_resumes_when_the_archive_never_stopped_this_runtime();
+    work_resumes_at_once_when_a_device_attaches_after_the_archive();
+    a_viewer_cannot_send_but_an_approving_viewer_decides_permissions();
+    the_runtime_list_narrows_a_role_stamped_at_lease_time();
+    one_driver_at_a_time_and_the_other_is_told_who_drives();
+    a_queued_follow_up_is_dropped_when_its_sender_loses_driver_access();
+    an_idle_lease_that_expired_does_not_block_the_next_driver();
+    a_drivers_queued_settings_are_not_applied_but_an_approvers_are();
+}
+
+#[test]
+fn mailbox_batch_4() {
+    a_plain_drivers_slash_command_is_refused_with_the_reason_and_an_approvers_goes_through();
+    the_allowed_commands_follow_the_tabs_agent();
+    a_slash_command_queued_while_the_workspace_slept_is_refused_when_it_is_leased();
+    a_queued_slash_command_is_dropped_when_its_sender_can_no_longer_approve();
+    a_command_is_never_steered_into_a_running_turn();
+    a_message_carries_the_images_its_sender_uploaded_and_they_are_gone_once_typed();
+    a_message_naming_an_image_that_is_not_there_is_refused_untouched();
+    a_queued_message_keeps_its_images_until_it_is_typed_or_dropped();
+    a_queued_message_whose_images_are_gone_is_not_sent_without_them();
+    a_message_carries_its_files_stored_in_the_sessions_attachments_folder_here();
+}
+
+#[test]
+fn mailbox_batch_5() {
+    a_queued_message_takes_its_files_into_the_session_and_types_them_later();
+    a_message_naming_a_file_that_is_not_there_or_too_many_is_refused_untouched();
+    a_refused_message_gives_up_its_senders_uploads_and_nobody_elses();
+    phase2_collaboration_v2_role_only_mailbox_actor_never_inherits_explicit_authority_from_bootstrap();
+    phase2_collaboration_v2_encrypted_lease_requires_exact_authoritative_revision_role_approval_and_source();
+    phase2_collaboration_v2_required_nullable_actor_source_and_independent_viewer_approval();
+    a_held_follow_up_is_edited_released_and_withdrawn_through_the_mailbox();
+    a_follow_up_command_that_is_malformed_or_empty_changes_nothing();
+    only_the_sender_or_a_manager_changes_a_held_follow_up();
+    another_drivers_held_follow_up_is_refused_as_not_theirs();
 }

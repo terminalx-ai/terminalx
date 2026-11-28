@@ -241,7 +241,6 @@ impl Checkouts for Repo {
     fn changed(&self, _run: &Run) {}
 }
 
-#[test]
 fn pieces_merge_in_dependency_order_one_commit_range_each_and_nothing_else_moves() {
     let _home = crate::store::temp_home();
     let repo = Repo::new();
@@ -290,7 +289,6 @@ fn pieces_merge_in_dependency_order_one_commit_range_each_and_nothing_else_moves
     assert_eq!(std::fs::read_to_string(&log).unwrap().lines().count(), 3);
 }
 
-#[test]
 fn a_conflict_leaves_the_leads_branch_as_it_was_and_stops_the_merge_there() {
     let _home = crate::store::temp_home();
     let repo = Repo::new();
@@ -344,7 +342,6 @@ fn a_conflict_leaves_the_leads_branch_as_it_was_and_stops_the_merge_there() {
     assert_eq!(repo.elsewhere(), elsewhere);
 }
 
-#[test]
 fn a_failed_integration_check_undoes_that_merge_only_and_names_the_piece() {
     let _home = crate::store::temp_home();
     let repo = Repo::new();
@@ -392,7 +389,6 @@ fn a_failed_integration_check_undoes_that_merge_only_and_names_the_piece() {
     assert_eq!(repo.elsewhere(), elsewhere);
 }
 
-#[test]
 fn undoing_a_merge_never_discards_uncommitted_work() {
     let _home = crate::store::temp_home();
     let repo = Repo::new();
@@ -421,7 +417,6 @@ fn undoing_a_merge_never_discards_uncommitted_work() {
     assert!(note.contains("the merge was not undone") && note.contains("with the merge in it"), "{note}");
 }
 
-#[test]
 fn a_done_check_that_fails_on_the_merged_result_keeps_the_run_from_done() {
     let _home = crate::store::temp_home();
     let repo = Repo::new();
@@ -447,7 +442,6 @@ fn a_done_check_that_fails_on_the_merged_result_keeps_the_run_from_done() {
     assert_eq!((run.state, run.reason, run.merge.unwrap().final_head), (RunState::Done, None, Some(repo.head())));
 }
 
-#[test]
 fn the_project_check_is_the_integration_check_of_a_plan_that_names_none() {
     let _home = crate::store::temp_home();
     let repo = Repo::new();
@@ -459,7 +453,6 @@ fn the_project_check_is_the_integration_check_of_a_plan_that_names_none() {
     assert!(store::get("run-1").unwrap().piece("a").unwrap().merge.as_ref().unwrap().check.as_ref().unwrap().project);
 }
 
-#[test]
 fn a_merge_is_refused_before_anything_moves_when_the_checkout_is_not_free() {
     let _home = crate::store::temp_home();
     let repo = Repo::new();
@@ -511,7 +504,6 @@ fn a_merge_is_refused_before_anything_moves_when_the_checkout_is_not_free() {
     assert_eq!(merge::merge(&repo, &id, &Options { skip: vec!["nope".into()], ..repo.options(By::Cli, &[], false) }).unwrap_err().code, "piece_not_found");
 }
 
-#[test]
 fn a_merge_whose_check_never_finished_is_taken_back_and_made_again() {
     let _home = crate::store::temp_home();
     let repo = Repo::new();
@@ -536,7 +528,6 @@ fn a_merge_whose_check_never_finished_is_taken_back_and_made_again() {
     assert_eq!(store::get(&id).unwrap().merge.unwrap().pending, None);
 }
 
-#[test]
 fn cleanup_removes_only_worktrees_whose_work_is_committed_and_merged() {
     let _home = crate::store::temp_home();
     let repo = Repo::new();
@@ -599,7 +590,6 @@ fn cleanup_removes_only_worktrees_whose_work_is_committed_and_merged() {
     assert!(again.refused.iter().all(|fate| fate.reason.as_ref().unwrap().contains("final worker")));
 }
 
-#[test]
 fn a_piece_the_lead_merged_itself_is_not_undone_and_its_worker_is_told_so() {
     let _home = crate::store::temp_home();
     let repo = Repo::new();
@@ -619,7 +609,6 @@ fn a_piece_the_lead_merged_itself_is_not_undone_and_its_worker_is_told_so() {
     assert!(brief.contains("the lead merged it into `lead` itself") && brief.contains("That merge was not undone") && !brief.contains("so the merge was undone") && brief.contains("a.txt breaks the build"), "{brief}");
 }
 
-#[test]
 fn a_lead_on_the_projects_base_branch_is_refused_and_the_base_branch_does_not_move() {
     let _home = crate::store::temp_home();
     let repo = Repo::new();
@@ -657,7 +646,6 @@ fn a_lead_on_the_projects_base_branch_is_refused_and_the_base_branch_does_not_mo
     assert_eq!(git(&repo.lead(), &["rev-list", "--parents", "-1", "lead-own"]), format!("{} {main} {a}", repo.head()));
 }
 
-#[test]
 fn a_branch_others_build_on_is_refused_and_a_pushed_branch_of_the_leads_own_is_not() {
     let _home = crate::store::temp_home();
     let repo = Repo::new();
@@ -706,7 +694,6 @@ fn a_branch_others_build_on_is_refused_and_a_pushed_branch_of_the_leads_own_is_n
     assert_eq!(git(&repo.lead(), &["rev-parse", "origin/lead-two"]), start, "nothing was pushed");
 }
 
-#[test]
 fn a_run_paused_on_its_budget_is_merged_and_skipped_by_hand_since_merging_asks_no_model() {
     let _home = crate::store::temp_home();
     let repo = Repo::new();
@@ -759,7 +746,6 @@ fn a_run_paused_on_its_budget_is_merged_and_skipped_by_hand_since_merging_asks_n
     assert_eq!(merge::merge(&repo, &id, &repo.options(By::Cli, &[], false)).unwrap_err().code, "run_ended");
 }
 
-#[test]
 fn a_piece_being_sent_back_and_a_pass_hold_the_same_lock() {
     let _home = crate::store::temp_home();
     let repo = Repo::new();
@@ -795,7 +781,6 @@ fn a_piece_being_sent_back_and_a_pass_hold_the_same_lock() {
 }
 
 
-#[test]
 fn nothing_is_merged_while_a_piece_is_with_the_lead_so_its_work_is_its_own() {
     let _home = crate::store::temp_home();
     let repo = Repo::new();
@@ -814,7 +799,6 @@ fn nothing_is_merged_while_a_piece_is_with_the_lead_so_its_work_is_its_own() {
     assert_eq!(repo.head(), start, "a was not merged into the lead's branch");
 }
 
-#[test]
 fn a_run_that_is_done_stops_finished_workers_but_cleanup_only_removes_superseded_ones() {
     let _home = crate::store::temp_home();
     let repo = Repo::new();
@@ -855,7 +839,6 @@ fn a_run_that_is_done_stops_finished_workers_but_cleanup_only_removes_superseded
     assert_eq!(repo.stopped.lock().unwrap().len(), 3);
 }
 
-#[test]
 fn with_the_leads_session_gone_cleanup_measures_each_worktree_against_the_base_branch() {
     let _home = crate::store::temp_home();
     let repo = Repo::new();
@@ -923,7 +906,6 @@ fn add_superseded(repo: &Repo, id: &str) -> (String, String) {
     (first, second)
 }
 
-#[test]
 fn three_try_run_archives_only_superseded_workers_and_requires_merge_and_exact_tip_for_deletion() {
     let _home = crate::store::temp_home();
     let repo = Repo::new();
@@ -964,7 +946,6 @@ fn three_try_run_archives_only_superseded_workers_and_requires_merge_and_exact_t
     assert!(merge::cleanup(&repo, &id, true).unwrap().removed.is_empty(), "retry is harmless");
 }
 
-#[test]
 fn failed_run_cleanup_archives_but_keeps_worktrees_even_when_commits_are_integrated() {
     let _home = crate::store::temp_home();
     let repo = Repo::new();
@@ -984,7 +965,6 @@ fn failed_run_cleanup_archives_but_keeps_worktrees_even_when_commits_are_integra
     assert!(repo.busy.lock().unwrap().is_empty());
 }
 
-#[test]
 fn superseded_cleanup_preserves_dirty_and_stashed_worktrees() {
     let _home = crate::store::temp_home();
     let repo = Repo::new();
@@ -1005,7 +985,6 @@ fn superseded_cleanup_preserves_dirty_and_stashed_worktrees() {
 }
 
 
-#[test]
 fn missing_or_unreadable_lead_checkout_cleans_legacy_workers_against_the_projects_base_branch() {
     let _home = crate::store::temp_home();
     let repo = Repo::new();
@@ -1026,7 +1005,6 @@ fn missing_or_unreadable_lead_checkout_cleans_legacy_workers_against_the_project
     assert!(cleaned.refused.is_empty());
 }
 
-#[test]
 fn superseded_cleanup_refuses_files_hidden_from_status() {
     let _home = crate::store::temp_home();
     let repo = Repo::new();
@@ -1044,7 +1022,6 @@ fn superseded_cleanup_refuses_files_hidden_from_status() {
 }
 
 
-#[test]
 fn a_tip_moving_during_preservation_is_retained_then_preserved_again_on_retry() {
     let _home = crate::store::temp_home();
     let repo = Repo::new();
@@ -1066,7 +1043,6 @@ fn a_tip_moving_during_preservation_is_retained_then_preserved_again_on_retry() 
     assert!(repo.preserved_tips.lock().unwrap().contains(&("first".into(), current)));
 }
 
-#[test]
 fn lifecycle_failures_block_deletion_even_when_exact_tip_preservation_would_succeed() {
     let _home = crate::store::temp_home();
     let repo = Repo::new();
@@ -1098,7 +1074,6 @@ fn lifecycle_failures_block_deletion_even_when_exact_tip_preservation_would_succ
     assert!(repo.worker("final").is_dir());
 }
 
-#[test]
 fn cleanup_preview_has_no_lifecycle_side_effects_and_completed_legacy_finals_stay_visible() {
     let _home = crate::store::temp_home();
     let repo = Repo::new();
@@ -1129,7 +1104,6 @@ fn cleanup_preview_has_no_lifecycle_side_effects_and_completed_legacy_finals_sta
     assert!(repo.worker("final").is_dir());
 }
 
-#[test]
 fn removal_guard_preserves_the_latest_tip_and_keeps_the_worktree_when_that_backup_fails() {
     let _home = crate::store::temp_home();
     let repo = Repo::new();
@@ -1154,7 +1128,6 @@ fn removal_guard_preserves_the_latest_tip_and_keeps_the_worktree_when_that_backu
     assert!(repo.worker("final").is_dir());
 }
 
-#[test]
 fn a_stash_created_during_exact_tip_preservation_also_blocks_removal() {
     let _home = crate::store::temp_home();
     let repo = Repo::new();
@@ -1172,7 +1145,6 @@ fn a_stash_created_during_exact_tip_preservation_also_blocks_removal() {
     assert!(!git(&repo.worker("first"), &["stash", "list"]).is_empty());
 }
 
-#[test]
 fn legacy_process_stop_cannot_authorize_archival_without_cleanup_stop_handling() {
     // A host which only implements the old process stop API cannot claim to
     // have cleared idle turn state, even when it returns Ok(false).
@@ -1201,7 +1173,6 @@ fn legacy_process_stop_cannot_authorize_archival_without_cleanup_stop_handling()
     assert!(failures.values().all(|reason| reason.contains("cleanup stop handling is not configured")));
 }
 
-#[test]
 fn production_retirement_backs_up_three_tries_and_cleans_them_with_the_lead_session_gone() {
     use crate::store::index;
     use std::sync::Arc;
@@ -1245,7 +1216,6 @@ fn production_retirement_backs_up_three_tries_and_cleans_them_with_the_lead_sess
     manager.closing();
 }
 
-#[test]
 fn production_retirement_proof_rejects_failed_runs_new_commits_and_missing_backups() {
     use super::retirement;
     use crate::store::index;
@@ -1285,7 +1255,6 @@ fn production_cleanup_host(repo: &Repo, names: &[&str]) -> (super::host::Manager
     (super::host::ManagerHost::new(sink, manager.clone()), manager)
 }
 
-#[test]
 fn bulk_cleanup_keeps_a_recovered_try_and_its_ignored_files() {
     use crate::store::index;
     let _home = crate::store::temp_home();
@@ -1313,7 +1282,6 @@ fn bulk_cleanup_keeps_a_recovered_try_and_its_ignored_files() {
     manager.closing();
 }
 
-#[test]
 fn cleanup_reports_an_unverifiable_rebased_or_unfetched_pr_head() {
     let _home = crate::store::temp_home();
     let repo = Repo::new();
@@ -1333,7 +1301,6 @@ fn cleanup_reports_an_unverifiable_rebased_or_unfetched_pr_head() {
     manager.closing();
 }
 
-#[test]
 fn removing_the_lead_can_clean_final_workers_offline_without_an_archive_script() {
     let _home = crate::store::temp_home();
     let repo = Repo::new();
@@ -1352,4 +1319,53 @@ fn removing_the_lead_can_clean_final_workers_offline_without_an_archive_script()
     assert_eq!(cleanup.removed.len(), 1, "{:?}", cleanup.refused);
     assert!(!repo.worker("final").exists());
     manager.closing();
+}
+
+#[test]
+fn orchestration_merge_batch_1() {
+    pieces_merge_in_dependency_order_one_commit_range_each_and_nothing_else_moves();
+    a_conflict_leaves_the_leads_branch_as_it_was_and_stops_the_merge_there();
+    a_failed_integration_check_undoes_that_merge_only_and_names_the_piece();
+    undoing_a_merge_never_discards_uncommitted_work();
+    a_done_check_that_fails_on_the_merged_result_keeps_the_run_from_done();
+    the_project_check_is_the_integration_check_of_a_plan_that_names_none();
+    a_merge_is_refused_before_anything_moves_when_the_checkout_is_not_free();
+    a_merge_whose_check_never_finished_is_taken_back_and_made_again();
+    cleanup_removes_only_worktrees_whose_work_is_committed_and_merged();
+}
+
+#[test]
+fn orchestration_merge_batch_2() {
+    a_piece_the_lead_merged_itself_is_not_undone_and_its_worker_is_told_so();
+    a_lead_on_the_projects_base_branch_is_refused_and_the_base_branch_does_not_move();
+    a_branch_others_build_on_is_refused_and_a_pushed_branch_of_the_leads_own_is_not();
+    a_run_paused_on_its_budget_is_merged_and_skipped_by_hand_since_merging_asks_no_model();
+    a_piece_being_sent_back_and_a_pass_hold_the_same_lock();
+    nothing_is_merged_while_a_piece_is_with_the_lead_so_its_work_is_its_own();
+    a_run_that_is_done_stops_finished_workers_but_cleanup_only_removes_superseded_ones();
+    with_the_leads_session_gone_cleanup_measures_each_worktree_against_the_base_branch();
+    three_try_run_archives_only_superseded_workers_and_requires_merge_and_exact_tip_for_deletion();
+}
+
+#[test]
+fn orchestration_merge_batch_3() {
+    failed_run_cleanup_archives_but_keeps_worktrees_even_when_commits_are_integrated();
+    superseded_cleanup_preserves_dirty_and_stashed_worktrees();
+    missing_or_unreadable_lead_checkout_cleans_legacy_workers_against_the_projects_base_branch();
+    superseded_cleanup_refuses_files_hidden_from_status();
+    a_tip_moving_during_preservation_is_retained_then_preserved_again_on_retry();
+    lifecycle_failures_block_deletion_even_when_exact_tip_preservation_would_succeed();
+    cleanup_preview_has_no_lifecycle_side_effects_and_completed_legacy_finals_stay_visible();
+    removal_guard_preserves_the_latest_tip_and_keeps_the_worktree_when_that_backup_fails();
+    a_stash_created_during_exact_tip_preservation_also_blocks_removal();
+}
+
+#[test]
+fn orchestration_merge_batch_4() {
+    legacy_process_stop_cannot_authorize_archival_without_cleanup_stop_handling();
+    production_retirement_backs_up_three_tries_and_cleans_them_with_the_lead_session_gone();
+    production_retirement_proof_rejects_failed_runs_new_commits_and_missing_backups();
+    bulk_cleanup_keeps_a_recovered_try_and_its_ignored_files();
+    cleanup_reports_an_unverifiable_rebased_or_unfetched_pr_head();
+    removing_the_lead_can_clean_final_workers_offline_without_an_archive_script();
 }

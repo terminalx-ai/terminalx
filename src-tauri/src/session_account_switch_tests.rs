@@ -180,7 +180,7 @@ fn wait(what: &str, done: impl Fn() -> bool) {
 
 /// Long enough for anything a turn's end starts (it looks a moment later).
 fn settle() {
-    std::thread::sleep(AFTER_TURN + Duration::from_secs(2));
+    std::thread::sleep(AFTER_TURN + Duration::from_millis(300));
 }
 
 /// A limit hit in a turn: when the turn is over the tab moves once, says so,
@@ -193,7 +193,7 @@ fn a_limit_hit_in_a_turn_switches_once_and_continues_once() {
     assert_eq!(rig.account(), LOCAL, "below the threshold the tab starts where it asked");
 
     rig.agent_says(Payload::RateLimited { status: Some("rejected".into()), resets_at: None, window: Some("five_hour".into()), message: None });
-    settle();
+    std::thread::sleep(Duration::from_millis(250));
     assert_eq!(rig.account(), LOCAL, "never in a turn");
     assert!(rig.log().is_empty());
 
