@@ -207,7 +207,7 @@ pub struct SpawnPlan {
 /// A free loopback port, a high-entropy per-launch secret, and the server pinned to it.
 pub fn spawn_plan() -> Option<SpawnPlan> {
     let program = crate::binpath::resolve("opencode")?;
-    Some(spawn_plan_for_program(program)?)
+    spawn_plan_for_program(program)
 }
 
 fn spawn_plan_for_program(program: std::path::PathBuf) -> Option<SpawnPlan> {

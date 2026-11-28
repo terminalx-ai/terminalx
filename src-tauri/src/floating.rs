@@ -271,7 +271,7 @@ fn build(app: &AppHandle) -> tauri::Result<WebviewWindow> {
         // Shown once it exists and its saved place has been restored, not at
         // a default place first.
         .visible(false)
-        .on_navigation(|url| crate::is_allowed_webview_navigation(url))
+        .on_navigation(crate::is_allowed_webview_navigation)
         .on_new_window(|_url, _features| tauri::webview::NewWindowResponse::Deny);
     // The same chrome as the main window: our own title bar strip over the
     // sidebar material.

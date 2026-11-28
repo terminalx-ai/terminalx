@@ -6427,6 +6427,7 @@ pub fn experimental_unsupported() -> ExperimentalUnsupported {
 /// Each switch is optional: the one the reader flipped is changed and the
 /// others are left as they are.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn set_experimental_settings(
     window: tauri::WebviewWindow,
     state: State<'_, AppState>,

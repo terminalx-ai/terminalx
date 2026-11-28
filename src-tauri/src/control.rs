@@ -3948,16 +3948,13 @@ impl Caller {
         }
         // Only for in-process callers (no socket peer and no scoped token) may
         // `params["caller"]["session"]` further tighten limits.
-        if self.peer.is_none() && self.cap.is_none() && self.placed.is_none() {
-            if params["caller"]["session"]
+        self.peer.is_none()
+            && self.cap.is_none()
+            && self.placed.is_none()
+            && params["caller"]["session"]
                 .as_str()
                 .and_then(|id| index::get(id).ok())
                 .is_some_and(|entry| crate::orchestration::guard::limited(&entry))
-            {
-                return true;
-            }
-        }
-        false
     }
 
     /// Whether the caller cryptographically or via OS kernel placement proves
@@ -4268,8 +4265,8 @@ impl Caller {
                 if is_verifier { "verifier" } else { cap.permission_mode.as_str() }
             )));
         }
-        if is_worker {
-            if matches!(
+        if is_worker
+            && (matches!(
                 command,
                 "projects.add"
                     | "projects.remove"
@@ -4296,10 +4293,9 @@ impl Caller {
                     | "pipelines.resolveConflicts"
                     | "pipelines.act"
             ) || command.starts_with("share.")
-                || command.strip_prefix("machine.").is_some_and(|a| LIMITED_MACHINE_ACTIONS.contains(&a))
-            {
-                return Err(deny(format!("An orchestration worker tab cannot invoke `{command}`.")));
-            }
+                || command.strip_prefix("machine.").is_some_and(|a| LIMITED_MACHINE_ACTIONS.contains(&a)))
+        {
+            return Err(deny(format!("An orchestration worker tab cannot invoke `{command}`.")));
         }
         Ok(())
     }
