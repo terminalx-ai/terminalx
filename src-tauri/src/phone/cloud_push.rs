@@ -22,13 +22,15 @@ fn push_agent() -> &'static ureq::Agent {
     static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
     AGENT.get_or_init(|| {
         crate::data_privacy::http_agent()
-            .timeout(PUSH_NOTIFY_TIMEOUT)
+            .timeout_connect(PUSH_NOTIFY_TIMEOUT)
+            .timeout_read(PUSH_NOTIFY_TIMEOUT)
+            .timeout_write(PUSH_NOTIFY_TIMEOUT)
             .redirects(0)
             .build()
     })
 }
 
-fn discard_body(response: ureq::Response) {
+fn discard_response_body(response: ureq::Response) {
     let _ = std::io::copy(&mut response.into_reader().take(64 * 1024), &mut std::io::sink());
 }
 
@@ -152,11 +154,11 @@ pub(crate) fn send_push_notify(
         .send_json(body)
     {
         Ok(response) => {
-            discard_body(response);
+            discard_response_body(response);
             true
         }
         Err(ureq::Error::Status(_, response)) => {
-            discard_body(response);
+            discard_response_body(response);
             false
         }
         Err(ureq::Error::Transport(_)) => false,

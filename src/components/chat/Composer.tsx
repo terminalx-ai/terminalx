@@ -42,7 +42,7 @@ import { files as filesApi, type FileHit, type FileInput, type ImageInput, type 
 import type { TabEntry } from "@/types/session";
 import { DictationStatus, MicButton, useDictationInto, useDictationShortcuts } from "./Dictation";
 import { PickerMenu, type PickerItem } from "./PickerMenu";
-import { AttachButton, DropHint, useAttachments } from "./useImageAttachments";
+import { AttachButton, DropHint, useAttachments, type AttachmentDraft } from "./useImageAttachments";
 import { AttachmentChips } from "./ComposerAttachments";
 import { ComposerAiEditor } from "./ComposerAiEditor";
 import { ComposerHistorySearch } from "./ComposerHistorySearch";
@@ -104,6 +104,7 @@ const shortMode = (mode: string | null | undefined) => (mode === "manual" ? "Ask
  */
 
 export function Composer({
+  attachmentDraft,
   tab,
   sendScope = tab.id,
   cwd,
@@ -150,6 +151,7 @@ export function Composer({
   aiEditor = null,
   aiEditorUnavailable = null,
 }: {
+  attachmentDraft?: AttachmentDraft;
   /** Fixes, restyles or translates the draft. Null where this tab can't use it. */
   aiEditor?: AiEditorBackend | null;
   /** Why this tab has no AI Editor. */
@@ -289,7 +291,7 @@ export function Composer({
   const textProps = usePromptTextProps();
   // A file dropped from this computer can be mentioned only to an agent that runs here.
   const mentionDropped = !remote;
-  const attach = useAttachments({ textareaRef: ref, draft, onDraftChange, mentionFiles: mentionDropped, anyFile: attachFiles ?? !remote });
+  const attach = useAttachments({ sharedDraft: attachmentDraft, textareaRef: ref, draft, onDraftChange, mentionFiles: mentionDropped, anyFile: attachFiles ?? !remote });
   // Refused chips stay above the draft but are never sent, and alone do not make a message.
   const sendable = useMemo(() => attach.attachments.filter((a) => !a.refused), [attach.attachments]);
 

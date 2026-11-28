@@ -29,6 +29,7 @@ import { SETTINGS_IGNORED_REASON, SETTINGS_LOCKED_REASON, SETTINGS_WITH_NEXT_MES
 import { usePeople } from "@/lib/cloudPeople";
 import { Chat } from "@/components/chat/Chat";
 import { FirstMessage } from "@/components/chat/FirstMessage";
+import { useAttachmentDraft } from "@/components/chat/useImageAttachments";
 import { Composer, type Handoff } from "@/components/chat/Composer";
 import { AlsoSendsTo } from "@/components/bots/BotChatApps";
 import { goalCommand, goalCommandProblem } from "@/lib/goalCommand";
@@ -174,6 +175,7 @@ export function TabView({
   const isGit = useSessionIsGit(session, local);
   const forge = useProjectForge(local && isGit ? session.projectPath || session.cwd : null);
   const log = useTabLog(backend.logSessionId, tab.id);
+  const attachmentDraft = useAttachmentDraft();
   const safeError = (e: unknown) => RECOVERY_MESSAGES[classifyRecovery(String(e))];
   // A cloud command's refusal says what happened to it (queued, view only, no key yet).
   const commandError = (e: unknown) => {
@@ -1098,6 +1100,7 @@ export function TabView({
           heldTray={backend.changeHeldQueue ? <div className="mx-auto w-full max-w-3xl px-6"><HeldQueueTray key={tab.id} scope={tab.id} queue={heldQueue} onChange={changeHeldQueue} disabled={!!gate?.blocked} busy={live}
             unavailable={local ? undefined : { move: backend.unavailable?.moveHeld, pause: backend.unavailable?.pauseHeld }} row={local ? undefined : heldRow} /></div> : null}
           composerProps={{
+            attachmentDraft,
             beforeSend: local && session.bot?.home && typeof session.bot.id === "string" ? <AlsoSendsTo botId={session.bot.id} /> : undefined,
             aiEditor: local && tab.harness === "claude" ? localAiEditor(session.id, tab.id) : null,
             aiEditorUnavailable: local ? "The AI Editor works in Claude Code tabs for now" : "The AI Editor works in local tabs for now",

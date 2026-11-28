@@ -89,6 +89,28 @@ afterEach(() => {
 });
 
 describe("sending a message (#727)", () => {
+  it("keeps an unsent screenshot through a round trip to terminal view", async () => {
+    runtime(false);
+    vi.stubGlobal("URL", Object.assign(class extends URL {}, { createObjectURL: () => "blob:shot", revokeObjectURL: vi.fn() }));
+    const view = render(<Tab />);
+    const screenshot = new File(["png"], "screenshot.png", { type: "image/png" });
+    fireEvent.change(view.container.querySelector('input[type="file"]')!, { target: { files: [screenshot] } });
+    await screen.findByRole("button", { name: "View screenshot.png" });
+
+    mocks.views.views[session.tabs[0].id] = "terminal";
+    view.rerender(<Tab />);
+    expect(field()).toBeNull();
+    delete mocks.views.views[session.tabs[0].id];
+    view.rerender(<Tab />);
+    expect(screen.getByRole("button", { name: "View screenshot.png" })).toBeTruthy();
+    fireEvent.keyDown(field(), { key: "Enter" });
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("send_message", expect.objectContaining({
+      images: [{ name: "screenshot.png", mediaType: "image/png", data: "cG5n" }],
+    })));
+    await waitFor(() => expect(shown).toHaveLength(1));
+    expect(screen.queryByRole("button", { name: "Remove screenshot.png" })).toBeNull();
+  });
+
   it("draws it in the chat as sending at once, and as sent once the runtime has it", async () => {
     runtime(true);
     render(<Tab />);

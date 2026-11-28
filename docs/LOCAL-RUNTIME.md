@@ -22,8 +22,8 @@ recovery. Transport loss is reported as unavailable rather than false idle state
 
 Normal quit defaults to keeping work, with a first-choice dialog and saved policy.
 Explicit stop-all confirms process termination and retains recoverable state on
-failure. A single accessory tray remains with the owner, shows live counts and
-routes Open, Quick Chat and quit actions through the registered window. Local
+failure. The owner keeps a single menu-bar logo. Its tooltip shows live counts, and
+its menu routes Open, Quick Chat and quit actions through the registered window. Local
 notifications and automations continue there; dictation, computer use, the browser
 and mobile connection transport remain window-owned. An unattached owner exits
 after its idle grace only when no live shell, active turn, permission, queued work,

@@ -9,10 +9,8 @@ import { tabViewIn } from "@/lib/tabFront";
 import { toggleTabView, useTabViews } from "@/lib/tabViews";
 import { isTerminalTab } from "@/lib/tabFront";
 import { useShortcutKeys } from "@/lib/hotkeys";
-import { useSessionStore } from "@/lib/sessions";
 import { Kbd } from "@/components/ui/tooltip";
 import { MessageSquare, SquareTerminal } from "@/icons";
-import { cloudAgentLabel } from "@/lib/cloudAgentLabel";
 import type { TabEntry } from "@/types/session";
 import { localRemovableWorkspace } from "@/lib/workspaceRemoval";
 import type { SelectedSessionTab } from "@/lib/terminal";
@@ -33,14 +31,12 @@ const ReviewTab = lazy(() => import("@/components/editor/EditorSplit").then((m) 
  * composer or xterm. Both visible terminals observe their own changing boxes. */
 /**
  * The switch at the right end of a pane's tab strip (PRO-381, screen 03.14):
- * "⇧⌘T terminal view" over a chat, and over its terminal view which agent
- * runs there ("Claude Code · same process"), which switches back. A tab that
+ * "⇧⌘T terminal view" over a chat, and a chat icon to switch back. A tab that
  * is a terminal (#437) offers it only when it held a conversation.
  */
 export function TerminalViewSwitch({ session, tab, onToggle }: { session: SessionEntry; tab: TabEntry; /** A remote tab's switch, through its runtime (`RemoteTabs.terminalView`); a local tab's is `toggleTabView`. */ onToggle?: () => void }) {
   const views = useTabViews();
   const keys = useShortcutKeys("session.toggleTerminalView");
-  const agent = useSessionStore().harnesses.find((harness) => harness.id === tab.harness)?.name ?? cloudAgentLabel(tab.harness);
   const terminal = isTerminalTab(tab);
   if (terminal && !tab.providerSessionId && !tab.history?.length) return null;
   const on = tabViewIn(views.views, tab) === "terminal";
@@ -50,7 +46,7 @@ export function TerminalViewSwitch({ session, tab, onToggle }: { session: Sessio
       onClick={() => (onToggle ? onToggle() : void toggleTabView(session, tab))}
       className={cn("flex h-7 items-center gap-1.5 whitespace-nowrap rounded-md px-1.5 text-[12px] text-faint outline-none hover:bg-veil-strong hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40 disabled:opacity-60")}>
       {/* A narrow strip keeps its room for the tabs: the switch is then its keys, or an icon, alone. */}
-      {on ? <><MessageSquare className="size-3.5 @[560px]/strip:hidden" aria-hidden /><span className="hidden @[560px]/strip:inline">{agent} · same process</span></>
+      {on ? <MessageSquare className="size-3.5" aria-hidden />
         : <>{keys.length ? <Kbd>{joinKeycaps(keys)}</Kbd> : <SquareTerminal className="size-3.5 @[560px]/strip:hidden" aria-hidden />}<span className="hidden @[560px]/strip:inline">terminal view</span></>}
     </button>
   );
