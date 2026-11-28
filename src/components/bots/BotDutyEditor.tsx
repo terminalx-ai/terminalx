@@ -193,7 +193,7 @@ export function BotDutyEditor({ bot, bots, duty, home, initial, start = "schedul
                   {target.id === "lead" ? reportsToLabel("lead", bot, bots) : target.label}
                 </button>
               );
-              return target.ready ? chip : <WithTooltip key={target.id} label="Coming with the channels a bot can report to">{chip}</WithTooltip>;
+              return target.ready ? chip : <WithTooltip key={target.id} label="Coming with the channels a bot can report to"><span className="inline-flex">{chip}</span></WithTooltip>;
             })}
             {unknownTarget && <span className="flex h-7 items-center rounded-md border border-primary bg-primary/10 px-2.5 text-[12px] text-foreground">{input.reportsTo}</span>}
           </div>

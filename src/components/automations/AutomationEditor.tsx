@@ -30,6 +30,37 @@ function splitLabels(value: string): string[] {
   return value.split(",").map((label) => label.trim()).filter(Boolean);
 }
 
+/**
+ * A comma-separated list typed as text. Keeps the raw text as typed so trailing
+ * commas and spaces stay while typing; the parsed list is emitted on each change.
+ */
+function LabelListInput({ value, onChange, placeholder }: { value: string[]; onChange: (next: string[]) => void; placeholder?: string }) {
+  const [text, setText] = useState(() => value.join(", "));
+  const serialized = value.join("\n");
+  useEffect(() => {
+    if (splitLabels(text).join("\n") !== serialized) setText(value.join(", "));
+  }, [serialized]);
+  return (
+    <input
+      value={text}
+      onChange={(event) => {
+        setText(event.target.value);
+        onChange(splitLabels(event.target.value));
+      }}
+      className={INPUT}
+      placeholder={placeholder}
+    />
+  );
+}
+
+function toLocalDateTimeValue(iso: string): string {
+  if (!iso) return "";
+  const date = new Date(iso);
+  if (!Number.isFinite(date.getTime())) return "";
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
 type TriggerKind = "schedule" | "issues" | "linear" | "pullRequests";
 
 export interface AutomationEditorPrefill {
@@ -299,6 +330,7 @@ export function AutomationEditor({
     && !selection.unavailableModel
     && (input.workspace === "newWorktree" || !!input.sessionId)
     && precheckReady(input.precheck)
+    && (polled || Number.isFinite(new Date(input.schedule.dtstart).getTime()))
     && (!input.issueTrigger || (!!input.issueTrigger.repo.trim() && !!input.issueTrigger.query.trim() && runsPerDayValid(input.issueTrigger.maxRunsPerDay)))
     && (!input.eventTrigger || eventTriggerReady(input.eventTrigger));
 
@@ -425,16 +457,16 @@ export function AutomationEditor({
               <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={input.issueTrigger.report.openPr} onChange={(event) => patchIssueReport({ openPr: event.target.checked })} /> Open a PR when commits exist</label>
               <label className={LABEL}>
                 Add labels
-                <input value={input.issueTrigger.report.addLabels.join(", ")} onChange={(event) => patchIssueReport({ addLabels: splitLabels(event.target.value) })} className={INPUT} placeholder="raccoon-done" />
+                <LabelListInput value={input.issueTrigger.report.addLabels} onChange={(addLabels) => patchIssueReport({ addLabels })} placeholder="raccoon-done" />
               </label>
               <label className={LABEL}>
                 Remove labels
-                <input value={input.issueTrigger.report.removeLabels.join(", ")} onChange={(event) => patchIssueReport({ removeLabels: splitLabels(event.target.value) })} className={INPUT} placeholder="raccoon" />
+                <LabelListInput value={input.issueTrigger.report.removeLabels} onChange={(removeLabels) => patchIssueReport({ removeLabels })} placeholder="raccoon" />
               </label>
               <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={input.issueTrigger.report.onFailure.comment} onChange={(event) => patchIssueReport({ onFailure: { ...input.issueTrigger!.report.onFailure, comment: event.target.checked } })} /> Comment when a run fails</label>
               <label className={LABEL}>
                 Failure labels
-                <input value={input.issueTrigger.report.onFailure.addLabels.join(", ")} onChange={(event) => patchIssueReport({ onFailure: { ...input.issueTrigger!.report.onFailure, addLabels: splitLabels(event.target.value) } })} className={INPUT} placeholder="raccoon-failed" />
+                <LabelListInput value={input.issueTrigger.report.onFailure.addLabels} onChange={(addLabels) => patchIssueReport({ onFailure: { ...input.issueTrigger!.report.onFailure, addLabels } })} placeholder="raccoon-failed" />
               </label>
             </>
           ) : (
@@ -465,7 +497,25 @@ export function AutomationEditor({
                 </>
               ) : <label className={`${LABEL} col-span-2`}>Five-field cron expression<input value={input.schedule.cron ?? ""} onChange={(event) => patchSchedule({ cron: event.target.value })} className={`${INPUT} font-mono`} placeholder="*/5 * * * *" /></label>}
               <label className={LABEL}>Timezone<input value={input.schedule.timezone} onChange={(event) => patchSchedule({ timezone: event.target.value })} className={INPUT} placeholder="America/New_York" /></label>
-              <label className={LABEL}>Starts<input type="datetime-local" value={input.schedule.dtstart.slice(0, 16)} onChange={(event) => patchSchedule({ dtstart: new Date(event.target.value).toISOString() })} className={INPUT} /></label>
+              <label className={LABEL}>
+                Starts
+                <input
+                  type="datetime-local"
+                  value={toLocalDateTimeValue(input.schedule.dtstart)}
+                  onChange={(event) => {
+                    const raw = event.target.value;
+                    if (!raw) {
+                      patchSchedule({ dtstart: "" });
+                      return;
+                    }
+                    const parsed = new Date(raw);
+                    if (Number.isFinite(parsed.getTime())) {
+                      patchSchedule({ dtstart: parsed.toISOString() });
+                    }
+                  }}
+                  className={INPUT}
+                />
+              </label>
             </>
           )}
 

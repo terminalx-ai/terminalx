@@ -329,6 +329,19 @@ describe("a work item's page, after the review", () => {
     fireEvent.click(screen.getByTestId("bot-item-reopen"));
     await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("bot_item_reopen", { id: "b1", number: 9 }));
   });
+
+  it("shows an error with Retry and a not-found state instead of spinning forever (U-52)", async () => {
+    const baseImpl = mocks.invoke.getMockImplementation();
+    mocks.invoke.mockImplementationOnce(async (cmd: string) => {
+      if (cmd === "bot_item") throw new Error("item storage offline");
+      return baseImpl ? baseImpl(cmd, {}) : undefined;
+    });
+    render(<BotItemPage bot={atlas} number={999} onBack={() => {}} />);
+    expect((await screen.findByTestId("bot-item-error")).textContent).toContain("item storage offline");
+    mocks.invoke.mockImplementationOnce(async (cmd: string) => (cmd === "bot_item" ? null : undefined));
+    fireEvent.click(screen.getByTestId("bot-item-retry"));
+    expect((await screen.findByTestId("bot-item-not-found")).textContent).toContain("Item #999 was not found.");
+  });
 });
 
 describe("Needs you across the bots", () => {

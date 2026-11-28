@@ -59,7 +59,7 @@ export function mayDoHere(bot: Bot): string {
  * with the owner's note (PRO-475).
  */
 export function BotItemPage({ bot, number, onBack }: { bot: Bot; number: number; onBack: () => void }) {
-  const item = useBotItem(bot.id, number);
+  const { item, loading, error: loadError, reload } = useBotItem(bot.id, number);
   const store = useSessionStore();
   const { bots } = useBotStore();
   const [busy, setBusy] = useState(false);
@@ -75,7 +75,19 @@ export function BotItemPage({ bot, number, onBack }: { bot: Bot; number: number;
     return (
       <div className="flex min-h-0 flex-1 flex-col px-6 py-4" data-testid="bot-item-page">
         <Back bot={bot} number={number} onBack={onBack} />
-        <p className="mt-6 flex items-center gap-2 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" /> Reading item #{number}…</p>
+        {loadError ? (
+          <div role="alert" className="mt-6 flex flex-wrap items-center gap-3 rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive" data-testid="bot-item-error">
+            <span className="min-w-0 flex-1">Couldn't read item #{number}: {loadError}</span>
+            <Button size="xs" variant="outline" onClick={reload} data-testid="bot-item-retry">Retry</Button>
+          </div>
+        ) : loading ? (
+          <p className="mt-6 flex items-center gap-2 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" /> Reading item #{number}…</p>
+        ) : (
+          <div className="mt-6 flex flex-wrap items-center gap-3 text-sm text-muted-foreground" data-testid="bot-item-not-found">
+            <span>Item #{number} was not found.</span>
+            <Button size="xs" variant="outline" onClick={onBack}>Back to Home</Button>
+          </div>
+        )}
       </div>
     );
   }

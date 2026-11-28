@@ -404,8 +404,8 @@ export function DutiesCalendar({ bots, single, lead, onAdd, onOpenDuty, onOpenSe
         </div>
       </div>
 
-      <div className="flex min-h-0 flex-1">
-        <div className="flex min-h-0 min-w-0 flex-1 flex-col px-6 pt-3 pb-3" data-testid="calendar-main">
+      <div className="@container/calendar flex min-h-0 flex-1 flex-col @4xl/calendar:flex-row">
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-x-auto px-6 pt-3 pb-3 scrollbar-thin" data-testid="calendar-main">
           {error && <WeekError error={error} onRestarted={() => { setError(null); setTick((value) => value + 1); }} />}
           {moveError && pending && (
             <MachineHostError error={moveError} onRestarted={() => { setMoveError(null); move(pending); }} onFailed={setMoveError} className="mb-2" />
@@ -620,7 +620,7 @@ export function DutiesCalendar({ bots, single, lead, onAdd, onOpenDuty, onOpenSe
           )}
         </div>
 
-        <aside className="w-[288px] shrink-0 overflow-y-auto border-l border-hairline px-5 py-4 scrollbar-thin" aria-label="This week" data-testid="calendar-aside">
+        <aside className="max-h-[35%] w-full shrink-0 overflow-y-auto border-t border-hairline px-5 py-4 scrollbar-thin @4xl/calendar:max-h-none @4xl/calendar:w-[288px] @4xl/calendar:border-t-0 @4xl/calendar:border-l" aria-label="This week" data-testid="calendar-aside">
           <h3 className="mb-1 text-[11px] font-medium tracking-[.06em] text-faint uppercase">Next today</h3>
           {data && data.nextToday.length > 0 && today >= 0 ? (
             <ul data-testid="calendar-next">

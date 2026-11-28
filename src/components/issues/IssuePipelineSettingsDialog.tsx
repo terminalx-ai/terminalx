@@ -101,7 +101,7 @@ export function IssuePipelineSettingsDialog({ project, open, onOpenChange }: { p
     setError(null);
   }, [open, project.path]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const save = (patch: Partial<IssuePipelineSettings>) => {
+  const save = async (patch: Partial<IssuePipelineSettings>): Promise<boolean> => {
     const next = { ...(intent.current ?? stored), ...patch };
     intent.current = next;
     setDraft(next);
@@ -111,29 +111,40 @@ export function IssuePipelineSettingsDialog({ project, open, onOpenChange }: { p
       intent.current = null;
       setDraft(null);
     };
-    void updateProject(project.path, { issuePipeline: next }).then(settled, (cause) => {
+    try {
+      await updateProject(project.path, { issuePipeline: next });
+      settled();
+      return true;
+    } catch (cause) {
       settled();
       setError(errorMessage(cause));
-    });
+      return false;
+    }
   };
   // The two lists are saved when their box loses focus, and when the dialog
   // closes with the cursor still in one: Escape must not drop what was typed.
-  const saveLists = () => {
+  const saveLists = async (): Promise<boolean> => {
     const current = intent.current ?? stored;
     const nextPaths = lines(paths, false);
     const nextIgnored = lines(ignored, true);
     const same = (a: string[], b: string[]) => a.length === b.length && a.every((value, index) => value === b[index]);
-    if (same(nextPaths, current.protected.paths) && same(nextIgnored, current.ignoredChecks) && localCommand.trim() === (current.localCheckCommand ?? "")) return;
-    save({ protected: { ...current.protected, paths: nextPaths }, ignoredChecks: nextIgnored, ...(localCommand.trim() !== (current.localCheckCommand ?? "") ? { localCheckCommand: localCommand.trim() || null } : {}) });
+    if (same(nextPaths, current.protected.paths) && same(nextIgnored, current.ignoredChecks) && localCommand.trim() === (current.localCheckCommand ?? "")) return true;
+    return save({ protected: { ...current.protected, paths: nextPaths }, ignoredChecks: nextIgnored, ...(localCommand.trim() !== (current.localCheckCommand ?? "") ? { localCheckCommand: localCommand.trim() || null } : {}) });
   };
   const off = !settings.enabled;
+  const hasLocalCommand = localCommand.trim().length > 0;
 
   return (
     <Dialog
       open={open}
       onOpenChange={(next) => {
-        if (!next) saveLists();
-        onOpenChange(next);
+        if (next) {
+          onOpenChange(true);
+          return;
+        }
+        void saveLists().then((ok) => {
+          if (ok) onOpenChange(false);
+        });
       }}
     >
       <DialogContent width="max-w-[36rem]">
@@ -148,22 +159,22 @@ export function IssuePipelineSettingsDialog({ project, open, onOpenChange }: { p
           <SettingRow
             label="Open a pull request and review it"
             description="Off leaves a session started from an issue as it was: the agent writes code and nothing follows."
-            control={<Switch aria-label="Open a pull request and review it" checked={settings.enabled} onCheckedChange={(enabled) => save({ enabled })} />}
+            control={<Switch aria-label="Open a pull request and review it" checked={settings.enabled} onCheckedChange={(enabled) => void save({ enabled })} />}
           />
           <SettingRow disabled={off} label="Resolve conflicts automatically by default" description="Wait for idle conversations, merge the base, run checks and review the new head. Which new sessions start with it on."
-            control={<SwitchDefaultControl aria-label="Resolve conflicts automatically by default" disabled={off} choice={settings.resolveConflicts} onChange={(resolveConflicts) => save({ resolveConflicts })} />} />
-          <SettingRow label="Conflict resolution limit" description="Stop for a person after this many attempts per pull request."
-            control={<Segmented aria-label="Conflict resolution limit" value={String(settings.maxResolutions ?? 3)} options={ROUNDS.map((value) => ({ value, label: value }))} onChange={(value) => save({ maxResolutions: Number(value) })} />} />
+            control={<SwitchDefaultControl aria-label="Resolve conflicts automatically by default" disabled={off} choice={settings.resolveConflicts} onChange={(resolveConflicts) => void save({ resolveConflicts })} />} />
+          <SettingRow disabled={off} label="Conflict resolution limit" description="Stop for a person after this many attempts per pull request."
+            control={<Segmented aria-label="Conflict resolution limit" disabled={off} value={String(settings.maxResolutions ?? 3)} options={ROUNDS.map((value) => ({ value, label: value }))} onChange={(value) => void save({ maxResolutions: Number(value) })} />} />
           <SettingRow
             disabled={off}
             label="Merge automatically by default"
             description="Which new sessions start with “Merge when green” on. Each keeps its own switch."
-            control={<SwitchDefaultControl aria-label="Merge automatically by default" disabled={off || settings.requirePerson} choice={settings.requirePerson ? false : settings.autoMerge} onChange={(autoMerge) => save({ autoMerge })} />}
+            control={<SwitchDefaultControl aria-label="Merge automatically by default" disabled={off || settings.requirePerson} choice={settings.requirePerson ? false : settings.autoMerge} onChange={(autoMerge) => void save({ autoMerge })} />}
           />
-          <SettingRow label="Local check command" description="TerminalX runs this command on the final reviewed head, with a 30-minute timeout. Leave empty to use hosted checks."
-            control={<input aria-label="Local check command" className="rounded bg-well px-2 py-1 text-xs" value={localCommand} onChange={(event) => setLocalCommand(event.target.value)} onBlur={saveLists} />} />
-          <SettingRow label="Use local checks instead of optional hosted checks" description="Required GitHub checks and repository rules still apply. Requires a local check command."
-            control={<Switch aria-label="Use local checks instead of optional hosted checks" disabled={!settings.localCheckCommand} checked={settings.localChecksOnly ?? false} onCheckedChange={(localChecksOnly) => save({ localChecksOnly })} />} />
+          <SettingRow disabled={off} label="Local check command" description="TerminalX runs this command on the final reviewed head, with a 30-minute timeout. Leave empty to use hosted checks."
+            control={<input aria-label="Local check command" disabled={off} className="rounded bg-well px-2 py-1 text-xs disabled:opacity-60" value={localCommand} onChange={(event) => setLocalCommand(event.target.value)} onBlur={() => void saveLists()} />} />
+          <SettingRow disabled={off || !hasLocalCommand} label="Use local checks instead of optional hosted checks" description="Required GitHub checks and repository rules still apply. Requires a local check command."
+            control={<Switch aria-label="Use local checks instead of optional hosted checks" disabled={off || !hasLocalCommand} checked={settings.localChecksOnly ?? false} onCheckedChange={(localChecksOnly) => void save({ localChecksOnly, ...(localCommand.trim() !== (settings.localCheckCommand ?? "") ? { localCheckCommand: localCommand.trim() || null } : {}) })} />} />
           <SettingRow
             disabled={off}
             label="A person does the merge"
@@ -328,12 +339,12 @@ export function CloudIssuePipelineSettingsDialog({ project, open, onOpenChange }
           />
           <SettingRow disabled={off} label="Resolve conflicts automatically by default" description="A resolver waits for idle conversations and reviews each changed head. Cloud merges still require a person. Which new sessions start with it on."
             control={<SwitchDefaultControl aria-label="Resolve conflicts automatically by default" disabled={off} choice={settings.resolveConflicts} onChange={(resolveConflicts) => save({ resolveConflicts })} />} />
-          <SettingRow label="Conflict resolution limit" description="Stop for a person after this many attempts."
-            control={<Segmented aria-label="Conflict resolution limit" value={String(settings.maxResolutions ?? 3)} options={ROUNDS.map((value) => ({ value, label: value }))} onChange={(value) => save({ maxResolutions: Number(value) })} />} />
-          <SettingRow label="Local check command" description="The runtime runs this command on the final reviewed head with a 30-minute timeout."
-            control={<input aria-label="Local check command" className="rounded bg-well px-2 py-1 text-xs" value={localCommand} onChange={(event) => setLocalCommand(event.target.value)} onBlur={saveIgnored} />} />
-          <SettingRow label="Use local checks instead of optional hosted checks" description="Required hosted checks and repository rules still apply."
-            control={<Switch aria-label="Use local checks instead of optional hosted checks" disabled={!settings.localCheckCommand} checked={settings.localChecksOnly ?? false} onCheckedChange={(localChecksOnly) => save({ localChecksOnly })} />} />
+          <SettingRow disabled={off} label="Conflict resolution limit" description="Stop for a person after this many attempts."
+            control={<Segmented aria-label="Conflict resolution limit" disabled={off} value={String(settings.maxResolutions ?? 3)} options={ROUNDS.map((value) => ({ value, label: value }))} onChange={(value) => save({ maxResolutions: Number(value) })} />} />
+          <SettingRow disabled={off} label="Local check command" description="The runtime runs this command on the final reviewed head with a 30-minute timeout."
+            control={<input aria-label="Local check command" disabled={off} className="rounded bg-well px-2 py-1 text-xs disabled:opacity-60" value={localCommand} onChange={(event) => setLocalCommand(event.target.value)} onBlur={saveIgnored} />} />
+          <SettingRow disabled={off || !localCommand.trim()} label="Use local checks instead of optional hosted checks" description="Required hosted checks and repository rules still apply."
+            control={<Switch aria-label="Use local checks instead of optional hosted checks" disabled={off || !localCommand.trim()} checked={settings.localChecksOnly ?? false} onCheckedChange={(localChecksOnly) => save({ localChecksOnly, ...(localCommand.trim() !== (settings.localCheckCommand ?? "") ? { localCheckCommand: localCommand.trim() || null } : {}) })} />} />
           <SettingRow
             disabled={off}
             label="Review rounds"
