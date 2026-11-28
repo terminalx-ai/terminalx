@@ -162,3 +162,33 @@ fn the_listing_splits_what_cannot_be_read_and_an_older_record_has_no_parent() {
     assert_eq!(saved["handoffs"][1]["parent"], json!(1));
     assert_eq!(saved["handoffs"].as_array().unwrap().len(), 4, "what cannot be read is kept");
 }
+
+#[test]
+fn trim_bytes_to_drops_oldest_sent_messages_then_closed_bot_handoffs_in_one_pass() {
+    let mut store = Store::default();
+    let pad = "x".repeat(400);
+    for i in 0..12u64 {
+        store.messages.push(Message {
+            id: format!("m-{i:02}"),
+            at: format!("2026-11-{:02}T10:00:00Z", i + 1),
+            from: "bot-a".into(),
+            to: "bot-b".into(),
+            kind: "tell".into(),
+            handoff: None,
+            text: pad.clone(),
+            label: String::new(),
+            card: None,
+            session: None,
+            pending: i == 11, // Keep pending message untrimmed.
+            delivered: None,
+            tries: 0,
+            error: String::new(),
+            unknown: BTreeMap::new(),
+        });
+    }
+    assert!(trim_bytes_to(&mut store, 2000));
+    // Pending message must survive; oldest sent messages were dropped first.
+    assert!(store.messages.iter().any(|m| m.id == "m-11" && m.pending));
+    assert!(!store.messages.iter().any(|m| m.id == "m-00"));
+    assert!(store.messages.len() < 12);
+}

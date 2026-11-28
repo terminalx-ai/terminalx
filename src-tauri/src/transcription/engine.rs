@@ -46,10 +46,15 @@ impl Engine {
     }
 
     /// The model for `id`, loading `path` first if it is not the one already
-    /// in hand. Blocking; call from a worker thread.
+    /// in hand. Verifies regular-file status (`O_NOFOLLOW`), size, and pinned
+    /// SHA-256 before passing weights to native `transcribe-cpp` (S-34).
+    /// Blocking; call from a worker thread.
     fn model(&self, id: &str, path: &Path) -> Result<transcribe_cpp::Model> {
         let mut guard = self.loaded.lock().unwrap();
         if guard.as_ref().map(|l| l.id != id).unwrap_or(true) {
+            let spec = super::catalog::find(id).ok_or_else(|| anyhow!("unknown model {id}"))?;
+            super::download::verify_model_file(spec, path)
+                .map_err(|e| anyhow!("model integrity check failed: {e}"))?;
             let model = transcribe_cpp::Model::load(path).map_err(|e| anyhow!("could not load the model: {e}"))?;
             *guard = Some(Loaded { id: id.into(), model });
         }
@@ -215,6 +220,36 @@ mod tests {
         assert_eq!(options.language.as_deref(), Some("en"));
         context.data.options.language = Some("ja".into());
         assert!(run_options("canary-180m-flash", &context).is_err());
+    }
+
+    #[test]
+    fn engine_rejects_unverified_or_symlinked_model_before_native_load() {
+        let temp = tempfile::tempdir().unwrap();
+        let fake = temp.path().join("fake.gguf");
+        std::fs::write(&fake, b"not-a-valid-model").unwrap();
+        let engine = Engine::default();
+        let err = engine
+            .open("canary-180m-flash", &fake, &RunContext::default())
+            .err()
+            .expect("tampered model must be rejected")
+            .to_string();
+        assert!(err.contains("model integrity check failed"), "{err}");
+
+        let link = temp.path().join("link.gguf");
+        std::os::unix::fs::symlink(&fake, &link).unwrap();
+        let err = engine
+            .open("canary-180m-flash", &link, &RunContext::default())
+            .err()
+            .expect("symlink model must be rejected")
+            .to_string();
+        assert!(err.contains("model integrity check failed"), "{err}");
+
+        let err = engine
+            .open("unknown-model", &fake, &RunContext::default())
+            .err()
+            .expect("unknown model must be rejected")
+            .to_string();
+        assert!(err.contains("unknown model"), "{err}");
     }
 
     // ---- real weights, opt in (#754)

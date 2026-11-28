@@ -1339,24 +1339,49 @@ pub fn pump(manager: &SessionManager) {
     send_outbox(&logins);
 }
 
+enum DeliverOutcome {
+    PausedNotice {
+        id: String,
+        bot: String,
+        notice: Box<Outgoing>,
+    },
+    Delivered {
+        id: String,
+        bot: String,
+        session: String,
+        tab: String,
+        after: u64,
+        head: String,
+        delivered_at: String,
+    },
+    Failed {
+        id: String,
+        bot: String,
+        why: String,
+    },
+}
+
 /// Hand each waiting message to its bot's chat, oldest first: the owner's direct message to the home chat, any
 /// other to the chat its thread or group has, or a new one. None goes to a paused bot (the chat is told once), nor
 /// past [`PER_HOUR`] a bot.
 fn deliver(manager: &SessionManager) {
     let Ok(store) = read() else { return };
     let waiting: Vec<Inbound> = store.messages().filter(|message| message.state == WAITING).cloned().collect();
+    if waiting.is_empty() {
+        return;
+    }
     let mut reached: BTreeMap<String, usize> = BTreeMap::new();
+    let mut opened_places: BTreeMap<(String, String), String> = BTreeMap::new();
+    let mut updates: Vec<DeliverOutcome> = Vec::new();
     for message in waiting {
         let Ok(Some(bot)) = crate::store::bots::get(&message.bot) else { continue };
         if bot.paused.is_some() {
             if !message.held_noted {
                 let text = format!("{} is paused: it reads this when you resume it.", bot.name);
-                let _ = change(|store| {
-                    store.outbox.push(Kept::Known(outgoing(&bot.id, &message.service, &message.chat, "notice", text, &message.message, &message.thread)));
-                    if let Some(kept) = store.messages.iter_mut().filter_map(Kept::known_mut).find(|kept| kept.id == message.id && kept.bot == message.bot) {
-                        kept.held_noted = true;
-                    }
-                    Ok(())
+                updates.push(DeliverOutcome::PausedNotice {
+                    id: message.id.clone(),
+                    bot: bot.id.clone(),
+                    notice: Box::new(outgoing(&bot.id, &message.service, &message.chat, "notice", text, &message.message, &message.thread)),
                 });
             }
             continue;
@@ -1366,42 +1391,79 @@ fn deliver(manager: &SessionManager) {
             continue;
         }
         let text = agent_text(&bot, &message);
-        let result = chat_for(manager, &bot, &message).and_then(|entry| {
+        let result = chat_for_in(manager, &store, &opened_places, &bot, &message).and_then(|entry| {
             let tab = entry.tabs.iter().find(|tab| !tab.is_terminal()).context("the chat has no agent tab")?.id.clone();
             let author = crate::local_sharing::Person { user_id: APP_AUTHOR.into(), display_name: transcript_label(&message), email: String::new(), email_verified: false, organization_ids: Vec::new() };
             let outcome = manager.send_from_bot(&entry.id, &tab, text.clone(), author, Some(card(&bot, &message)))?;
             let after = outcome.events.iter().filter(|event| matches!(event.payload, Payload::UserMessage { .. })).map(|event| event.seq).min().or_else(|| outcome.events.iter().map(|event| event.seq).min()).unwrap_or(0);
             Ok((entry.id, tab, after))
         });
-        let outcome = change(|store| {
-            let Some(kept) = store.messages.iter_mut().filter_map(Kept::known_mut).find(|kept| kept.id == message.id && kept.bot == message.bot && kept.state == WAITING) else { return Ok(()) };
-            match &result {
-                Ok((session, tab, after)) => {
-                    kept.state = DELIVERED.into();
-                    kept.session = Some(session.clone());
-                    kept.tab = Some(tab.clone());
-                    kept.after = Some(*after);
-                    kept.head = head_of(&text);
-                    kept.delivered = Some(index::now());
-                    kept.text.clear();
+        match result {
+            Ok((session, tab, after)) => {
+                if !message.direct {
+                    opened_places.insert((bot.id.clone(), place_key(&message)), session.clone());
                 }
-                Err(error) => {
-                    kept.tries += 1;
-                    if kept.tries >= MAX_DELIVERY_TRIES {
-                        kept.state = FAILED.into();
-                        kept.why = one_line(&format!("It could not reach {}'s chat: {error:#}", bot.name));
+                updates.push(DeliverOutcome::Delivered {
+                    id: message.id.clone(),
+                    bot: bot.id.clone(),
+                    session,
+                    tab,
+                    after,
+                    head: head_of(&text),
+                    delivered_at: index::now(),
+                });
+                *count += 1;
+            }
+            Err(error) => {
+                updates.push(DeliverOutcome::Failed {
+                    id: message.id.clone(),
+                    bot: bot.id.clone(),
+                    why: one_line(&format!("It could not reach {}'s chat: {error:#}", bot.name)),
+                });
+            }
+        }
+    }
+    if updates.is_empty() {
+        return;
+    }
+    // Batch all message state transitions for this cycle into one atomic write (P-38).
+    if let Err(error) = change(|store| {
+        for update in updates {
+            match update {
+                DeliverOutcome::PausedNotice { id, bot, notice } => {
+                    if let Some(kept) = store.messages.iter_mut().filter_map(Kept::known_mut).find(|kept| kept.id == id && kept.bot == bot) {
+                        if !kept.held_noted {
+                            kept.held_noted = true;
+                            store.outbox.push(Kept::Known(*notice));
+                        }
+                    }
+                }
+                DeliverOutcome::Delivered { id, bot, session, tab, after, head, delivered_at } => {
+                    if let Some(kept) = store.messages.iter_mut().filter_map(Kept::known_mut).find(|kept| kept.id == id && kept.bot == bot && kept.state == WAITING) {
+                        kept.state = DELIVERED.into();
+                        kept.session = Some(session);
+                        kept.tab = Some(tab);
+                        kept.after = Some(after);
+                        kept.head = head;
+                        kept.delivered = Some(delivered_at);
                         kept.text.clear();
                     }
                 }
+                DeliverOutcome::Failed { id, bot, why } => {
+                    if let Some(kept) = store.messages.iter_mut().filter_map(Kept::known_mut).find(|kept| kept.id == id && kept.bot == bot && kept.state == WAITING) {
+                        kept.tries += 1;
+                        if kept.tries >= MAX_DELIVERY_TRIES {
+                            kept.state = FAILED.into();
+                            kept.why = why;
+                            kept.text.clear();
+                        }
+                    }
+                }
             }
-            Ok(())
-        });
-        if let Err(error) = outcome {
-            log::warn!("bot chat apps: record a message to {}: {error:#}", bot.id);
         }
-        if result.is_ok() {
-            *count += 1;
-        }
+        Ok(())
+    }) {
+        log::warn!("bot chat apps: record delivered messages: {error:#}");
     }
 }
 
@@ -1416,13 +1478,25 @@ fn place_key(message: &Inbound) -> String {
 
 /// The chat a message goes to: the home chat for the owner's direct message; else the chat its thread or group
 /// already has with the bot, while it is still one of its chats, or a new one.
-fn chat_for(manager: &SessionManager, bot: &Bot, message: &Inbound) -> Result<SessionEntry> {
+fn chat_for_in(
+    manager: &SessionManager,
+    store: &Store,
+    opened_places: &BTreeMap<(String, String), String>,
+    bot: &Bot,
+    message: &Inbound,
+) -> Result<SessionEntry> {
     let sink = manager.sink();
     if message.direct && message.from == OWNER {
         return chat::home_chat(sink.as_ref(), &bot.id);
     }
-    let store = read()?;
     let key = place_key(message);
+    if let Some(existing_id) = opened_places.get(&(bot.id.clone(), key.clone())) {
+        if let Ok(entry) = index::get(existing_id) {
+            if !entry.archived && chat::session_bot(&entry).is_some_and(|reference| reference.id == bot.id && !reference.home) {
+                return Ok(entry);
+            }
+        }
+    }
     let mut sessions: Vec<&String> = store.messages().filter(|known| known.bot == bot.id && !known.direct && place_key(known) == key).filter_map(|known| known.session.as_ref()).collect();
     sessions.dedup();
     if let Some(entry) = sessions.into_iter().rev().find_map(|id| index::get(id).ok().filter(|entry| !entry.archived && chat::session_bot(entry).is_some_and(|reference| reference.id == bot.id && !reference.home))) {
@@ -1527,10 +1601,27 @@ pub(crate) fn scrub_secrets_with(text: &str, secrets: &[String]) -> String {
 fn collect_replies(manager: &SessionManager) {
     let Ok(store) = read() else { return };
     let open: Vec<Inbound> = store.messages().filter(|message| message.state == DELIVERED && message.replied.is_none()).cloned().collect();
+    if open.is_empty() {
+        return;
+    }
+    // Cache loaded transcripts per (session, tab) within this pump cycle and
+    // skip events below each message's `after` seq offset (P-38).
+    let mut loaded_events: BTreeMap<(String, String), Option<Vec<crate::events::AgentEvent>>> = BTreeMap::new();
+    let mut queued: Vec<(String, String, Outgoing)> = Vec::new();
     for message in open {
         let (Some(session), Some(tab), Some(after)) = (message.session.as_deref(), message.tab.as_deref(), message.after) else { continue };
         let stale = message.delivered.as_deref().and_then(parse_time).is_none_or(|at| Utc::now() - at > chrono::TimeDelta::hours(REPLY_HOURS));
-        let reply = if manager.turn_open(session, tab) { None } else { manager.load_events(session, tab).ok().and_then(|events| reply_in(&events, after, &message.head)) };
+        let reply = if manager.turn_open(session, tab) {
+            None
+        } else {
+            let events = loaded_events
+                .entry((session.to_owned(), tab.to_owned()))
+                .or_insert_with(|| manager.load_events(session, tab).ok());
+            events.as_deref().and_then(|events| {
+                let start = events.partition_point(|e| e.seq < after);
+                reply_in(&events[start..], after, &message.head)
+            })
+        };
         let text = match (reply, stale) {
             (Some(Reply::Text(text)), _) => Some(scrub_secrets(&text)),
             (Some(Reply::None(why)), _) => Some(scrub_secrets(&format!("({why})"))),
@@ -1538,18 +1629,26 @@ fn collect_replies(manager: &SessionManager) {
             (None, false) => None,
         };
         let Some(text) = text else { continue };
-        let done = change(|store| {
-            let Some(kept) = store.messages.iter_mut().filter_map(Kept::known_mut).find(|kept| kept.id == message.id && kept.bot == message.bot) else { return Ok(()) };
+        let out = outgoing(&message.bot, &message.service, &message.chat, "reply", text, &message.message, &message.thread);
+        queued.push((message.id, message.bot, out));
+    }
+    if queued.is_empty() {
+        return;
+    }
+    let now = index::now();
+    // Batch all collected replies into one atomic write (P-38).
+    if let Err(error) = change(|store| {
+        for (id, bot, out) in queued {
+            let Some(kept) = store.messages.iter_mut().filter_map(Kept::known_mut).find(|kept| kept.id == id && kept.bot == bot) else { continue };
             if kept.replied.is_some() {
-                return Ok(());
+                continue;
             }
-            kept.replied = Some(index::now());
-            store.outbox.push(Kept::Known(outgoing(&message.bot, &message.service, &message.chat, "reply", text, &message.message, &message.thread)));
-            Ok(())
-        });
-        if let Err(error) = done {
-            log::warn!("bot chat apps: queue a reply of {}: {error:#}", message.bot);
+            kept.replied = Some(now.clone());
+            store.outbox.push(Kept::Known(out));
         }
+        Ok(())
+    }) {
+        log::warn!("bot chat apps: queue replies: {error:#}");
     }
 }
 
@@ -1561,6 +1660,7 @@ fn forward_owner_turns(manager: &SessionManager) {
         return;
     }
     let Ok(store) = read() else { return };
+    let mut batched: Vec<(String, u64, Vec<Outgoing>)> = Vec::new();
     for (bot, session, tab) in turns {
         let services = also_sends(&store, &bot);
         if services.is_empty() {
@@ -1573,23 +1673,37 @@ fn forward_owner_turns(manager: &SessionManager) {
         let Ok(events) = manager.load_events(&session, &tab) else { continue };
         let Some((seq, asked, reply)) = owner_turn(&events) else { continue };
         let key = format!("{session}:{tab}");
+        if store.forwarded.get(&key).is_some_and(|known| *known >= seq) {
+            continue;
+        }
         let Ok(Some(named)) = crate::store::bots::get(&bot) else { continue };
         let asked: String = one_line(&asked).chars().take(160).collect();
         let text = scrub_secrets(&format!("You wrote to {} in TerminalX: “{asked}”\n\n{reply}", named.name));
-        let links: Vec<Link> = store.direct_links(&bot).into_iter().filter(|link| services.contains(&link.service)).collect();
-        let queued = change(|store| {
+        let outs: Vec<Outgoing> = store
+            .direct_links(&bot)
+            .into_iter()
+            .filter(|link| services.contains(&link.service))
+            .map(|link| outgoing(&bot, &link.service, &link.chat, "reply", text.clone(), "", ""))
+            .collect();
+        batched.push((key, seq, outs));
+    }
+    if batched.is_empty() {
+        return;
+    }
+    // Batch all forwarded owner turns into one atomic write (P-38).
+    if let Err(error) = change(|store| {
+        for (key, seq, outs) in batched {
             if store.forwarded.get(&key).is_some_and(|known| *known >= seq) {
-                return Ok(());
+                continue;
             }
-            store.forwarded.insert(key.clone(), seq);
-            for link in &links {
-                store.outbox.push(Kept::Known(outgoing(&bot, &link.service, &link.chat, "reply", text.clone(), "", "")));
+            store.forwarded.insert(key, seq);
+            for out in outs {
+                store.outbox.push(Kept::Known(out));
             }
-            Ok(())
-        });
-        if let Err(error) = queued {
-            log::warn!("bot chat apps: queue {bot}'s reply for Also sends to: {error:#}");
         }
+        Ok(())
+    }) {
+        log::warn!("bot chat apps: queue replies for Also sends to: {error:#}");
     }
 }
 
@@ -1598,22 +1712,30 @@ fn send_outbox(logins: &Logins) {
     let Ok(store) = read() else { return };
     let now = Utc::now();
     let waiting: Vec<Outgoing> = store.outbox().filter(|out| out.state == WAITING && out.after.as_deref().and_then(parse_time).is_none_or(|after| after <= now)).cloned().collect();
+    if waiting.is_empty() {
+        return;
+    }
     // A service that asked to wait is not asked again on this pass.
     let mut held: Vec<(String, String)> = Vec::new();
+    let mut results: Vec<(String, std::result::Result<String, SendError>)> = Vec::new();
     for out in waiting {
         if held.contains(&(out.bot.clone(), out.service.clone())) {
             continue;
         }
         let Some(login) = logins.get(&out.bot, &out.service) else {
-            finish(&out, Err(SendError { why: format!("{} is not connected any more.", service_name(&out.service)), retry_after: None, lasting: true }));
+            results.push((out.id, Err(SendError { why: format!("{} is not connected any more.", service_name(&out.service)), retry_after: None, lasting: true })));
             continue;
         };
         let result = send_one(login, &out);
         if result.as_ref().err().is_some_and(|error| error.retry_after.is_some()) {
             held.push((out.bot.clone(), out.service.clone()));
         }
-        finish(&out, result);
+        results.push((out.id, result));
     }
+    if results.is_empty() {
+        return;
+    }
+    finish_batch(results);
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1696,31 +1818,33 @@ fn send_one(login: &Login, out: &Outgoing) -> std::result::Result<String, SendEr
     }
 }
 
-/// Record how sending `out` went: sent (a question keeps the message it went as), to be tried again, or failed.
-fn finish(out: &Outgoing, result: std::result::Result<String, SendError>) {
+/// Record how sending a batch of outbox messages went in one atomic write (P-38).
+fn finish_batch(results: Vec<(String, std::result::Result<String, SendError>)>) {
     let recorded = change(|store| {
-        let Some(kept) = store.outbox.iter_mut().filter_map(Kept::known_mut).find(|kept| kept.id == out.id && kept.state == WAITING) else { return Ok(()) };
-        match &result {
-            Ok(message) => {
-                kept.state = SENT.into();
-                if let Some(asked) = kept.question.as_mut() {
-                    asked.message = message.clone();
+        for (id, result) in results {
+            let Some(kept) = store.outbox.iter_mut().filter_map(Kept::known_mut).find(|kept| kept.id == id && kept.state == WAITING) else { continue };
+            match result {
+                Ok(message) => {
+                    kept.state = SENT.into();
+                    if let Some(asked) = kept.question.as_mut() {
+                        asked.message = message;
+                    }
                 }
-            }
-            Err(error) => {
-                kept.tries += 1;
-                kept.why = one_line(&error.why);
-                if let Some(wait) = error.retry_after {
-                    kept.after = Some(stamp(Utc::now() + chrono::TimeDelta::seconds(wait.min(3600) as i64)));
-                } else if error.lasting || kept.tries >= MAX_TRIES {
-                    kept.state = FAILED.into();
+                Err(error) => {
+                    kept.tries += 1;
+                    kept.why = one_line(&error.why);
+                    if let Some(wait) = error.retry_after {
+                        kept.after = Some(stamp(Utc::now() + chrono::TimeDelta::seconds(wait.min(3600) as i64)));
+                    } else if error.lasting || kept.tries >= MAX_TRIES {
+                        kept.state = FAILED.into();
+                    }
                 }
             }
         }
         Ok(())
     });
     if let Err(error) = recorded {
-        log::warn!("bot chat apps: record a message sent for {}: {error:#}", out.bot);
+        log::warn!("bot chat apps: record outbox sends: {error:#}");
     }
 }
 
@@ -1935,6 +2059,34 @@ fn offset_of_bot(bot: &str, key: &str) -> bool {
 
 /// A Slack user's name, email and whether they are a bot, read at most every half hour.
 type People = BTreeMap<String, (std::time::Instant, String, Option<String>, bool)>;
+const SLACK_PEOPLE_TTL: Duration = Duration::from_secs(1800);
+/// Hard cap on the Slack user lookup cache so long-lived Socket Mode workers
+/// do not grow memory unboundedly (P-84).
+const MAX_SLACK_PEOPLE: usize = 512;
+
+fn cache_slack_person(
+    people: &mut People,
+    id: String,
+    name: String,
+    email: Option<String>,
+    is_bot: bool,
+    now: std::time::Instant,
+) {
+    if people.len() >= MAX_SLACK_PEOPLE && !people.contains_key(&id) {
+        people.retain(|_, (at, ..)| now.saturating_duration_since(*at) < SLACK_PEOPLE_TTL);
+        while people.len() >= MAX_SLACK_PEOPLE {
+            let Some(oldest) = people
+                .iter()
+                .min_by_key(|(_, (at, ..))| *at)
+                .map(|(key, _)| key.clone())
+            else {
+                break;
+            };
+            people.remove(&oldest);
+        }
+    }
+    people.insert(id, (now, name, email, is_bot));
+}
 
 /// Slack's connector: one Socket Mode connection after another until the login changes, the bot goes, or Bots is
 /// switched off.
@@ -1996,12 +2148,12 @@ fn slack_person(client: &super::slack::Client, people: &mut People, mut sender: 
     if sender.automated || sender.id.is_empty() {
         return sender;
     }
-    let fresh = people.get(&sender.id).filter(|(at, ..)| at.elapsed() < Duration::from_secs(1800)).cloned();
+    let fresh = people.get(&sender.id).filter(|(at, ..)| at.elapsed() < SLACK_PEOPLE_TTL).cloned();
     let (name, email, is_bot) = match fresh {
         Some((_, name, email, is_bot)) => (name, email, is_bot),
         None => match client.user_info(&sender.id) {
             Ok((name, email, is_bot)) => {
-                people.insert(sender.id.clone(), (std::time::Instant::now(), name.clone(), email.clone(), is_bot));
+                cache_slack_person(people, sender.id.clone(), name.clone(), email.clone(), is_bot, std::time::Instant::now());
                 (name, email, is_bot)
             }
             Err(error) => {

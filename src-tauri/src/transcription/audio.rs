@@ -10,10 +10,18 @@
 //! are probed, and none of it belongs on the thread that services the
 //! webview's IPC.
 
+#[cfg(any(target_os = "macos", test))]
+use std::cell::UnsafeCell;
+#[cfg(any(target_os = "macos", test))]
+use std::sync::atomic::{AtomicUsize, Ordering};
+#[cfg(any(target_os = "macos", test))]
+use std::sync::Arc;
 #[cfg(target_os = "macos")]
 use std::sync::mpsc::{self, Receiver, Sender};
 #[cfg(target_os = "macos")]
 use std::thread::JoinHandle;
+#[cfg(target_os = "macos")]
+use std::time::Duration;
 
 #[cfg(any(target_os = "macos", test))]
 use anyhow::{anyhow, Result};
@@ -92,8 +100,120 @@ fn pick_device(name: Option<&str>) -> Result<cpal::Device> {
     host.default_input_device().ok_or_else(|| anyhow!("no microphone is available"))
 }
 
+/// Lock-free single-producer single-consumer ring buffer for CoreAudio
+/// real-time callbacks: zero heap allocations, zero locks, and zero syscalls
+/// on the audio thread (P-35).
+#[cfg(any(target_os = "macos", test))]
+struct SpscRing {
+    buf: Box<[UnsafeCell<f32>]>,
+    mask: usize,
+    channels: usize,
+    write: AtomicUsize,
+    read: AtomicUsize,
+}
+
+// SAFETY: Single producer owns slots in `[write, read + cap)` and single
+// consumer owns slots in `[read, write)`, synchronized via Acquire/Release
+// atomics on `write` and `read`.
+#[cfg(any(target_os = "macos", test))]
+unsafe impl Sync for SpscRing {}
+
+#[cfg(any(target_os = "macos", test))]
+struct RingProducer(Arc<SpscRing>);
+
+#[cfg(any(target_os = "macos", test))]
+struct RingConsumer(Arc<SpscRing>);
+
+#[cfg(any(target_os = "macos", test))]
+fn spsc_ring(capacity_pow2: usize, channels: u16) -> (RingProducer, RingConsumer) {
+    debug_assert!(capacity_pow2.is_power_of_two() && capacity_pow2 >= 2);
+    let mut storage = Vec::with_capacity(capacity_pow2);
+    for _ in 0..capacity_pow2 {
+        storage.push(UnsafeCell::new(0.0));
+    }
+    let ring = Arc::new(SpscRing {
+        buf: storage.into_boxed_slice(),
+        mask: capacity_pow2 - 1,
+        channels: channels.max(1) as usize,
+        write: AtomicUsize::new(0),
+        read: AtomicUsize::new(0),
+    });
+    (RingProducer(Arc::clone(&ring)), RingConsumer(ring))
+}
+
+#[cfg(any(target_os = "macos", test))]
+impl RingProducer {
+    /// Push whole interleaved frames without allocating or blocking. Drops tail
+    /// frames if the consumer falls behind.
+    #[cfg(test)]
+    fn push_f32(&self, data: &[f32]) {
+        let mut w = self.0.write.load(Ordering::Relaxed);
+        let r = self.0.read.load(Ordering::Acquire);
+        let avail = self.0.buf.len().saturating_sub(w.wrapping_sub(r));
+        let channels = self.0.channels;
+        let count = (data.len().min(avail) / channels) * channels;
+        for &sample in &data[..count] {
+            let slot = w & self.0.mask;
+            // SAFETY: Single producer owns slots in `[write, read + cap)`.
+            unsafe {
+                *self.0.buf[slot].get() = sample;
+            }
+            w = w.wrapping_add(1);
+        }
+        if count > 0 {
+            self.0.write.store(w, Ordering::Release);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn push_samples<T>(&self, data: &[T])
+    where
+        T: SizedSample,
+        f32: FromSample<T>,
+    {
+        let mut w = self.0.write.load(Ordering::Relaxed);
+        let r = self.0.read.load(Ordering::Acquire);
+        let avail = self.0.buf.len().saturating_sub(w.wrapping_sub(r));
+        let channels = self.0.channels;
+        let count = (data.len().min(avail) / channels) * channels;
+        for sample in &data[..count] {
+            let slot = w & self.0.mask;
+            // SAFETY: Single producer owns slots in `[write, read + cap)`.
+            unsafe {
+                *self.0.buf[slot].get() = sample.to_sample::<f32>();
+            }
+            w = w.wrapping_add(1);
+        }
+        if count > 0 {
+            self.0.write.store(w, Ordering::Release);
+        }
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+impl RingConsumer {
+    fn drain_into(&self, out: &mut Vec<f32>) -> usize {
+        let mut r = self.0.read.load(Ordering::Relaxed);
+        let w = self.0.write.load(Ordering::Acquire);
+        let count = w.wrapping_sub(r);
+        if count == 0 {
+            return 0;
+        }
+        out.reserve(count);
+        for _ in 0..count {
+            let slot = r & self.0.mask;
+            // SAFETY: Single consumer owns slots in `[read, write)`.
+            out.push(unsafe { *self.0.buf[slot].get() });
+            r = r.wrapping_add(1);
+        }
+        self.0.read.store(r, Ordering::Release);
+        count
+    }
+}
+
 /// Linear resampling with channel averaging. Speech tolerates it well and it
-/// keeps the dependency list short.
+/// keeps the dependency list short. Reuses internal scratch buffers across
+/// calls so steady-state resampling does not churn heap allocations.
 // macOS captures audio in production; all platforms run the resampling tests.
 #[cfg(any(target_os = "macos", test))]
 pub struct Resampler {
@@ -103,46 +223,56 @@ pub struct Resampler {
     pos: f64,
     /// The last source frame from the previous call, for interpolation across chunks.
     carry: Option<f32>,
+    mono_buf: Vec<f32>,
+    src_buf: Vec<f32>,
 }
 
 #[cfg(any(target_os = "macos", test))]
 impl Resampler {
     pub fn new(src_rate: u32, channels: u16) -> Self {
-        Self { src_rate: src_rate as f64, channels: channels.max(1) as usize, pos: 0.0, carry: None }
+        Self {
+            src_rate: src_rate as f64,
+            channels: channels.max(1) as usize,
+            pos: 0.0,
+            carry: None,
+            mono_buf: Vec::new(),
+            src_buf: Vec::new(),
+        }
     }
 
     pub fn push(&mut self, interleaved: &[f32]) -> Vec<f32> {
         let frames = interleaved.len() / self.channels;
-        let mono: Vec<f32> = (0..frames)
-            .map(|i| {
-                let s = &interleaved[i * self.channels..(i + 1) * self.channels];
-                s.iter().sum::<f32>() / self.channels as f32
-            })
-            .collect();
+        self.mono_buf.clear();
+        self.mono_buf.reserve(frames);
+        let inv_channels = 1.0 / self.channels as f32;
+        for chunk in interleaved.chunks_exact(self.channels) {
+            self.mono_buf.push(chunk.iter().sum::<f32>() * inv_channels);
+        }
         let step = self.src_rate / TARGET_RATE as f64;
         // A device that reports a nonsensical rate (zero, or a NaN out of a
         // half-initialised format) would otherwise spin here forever building
         // an unbounded output buffer. Hand the frames through untouched.
         if !step.is_finite() || step <= 0.0 || (self.src_rate - TARGET_RATE as f64).abs() < 1.0 {
-            return mono;
+            return self.mono_buf.clone();
         }
         let mut out = Vec::with_capacity((frames as f64 / step) as usize + 2);
         // Prepend the carried frame so interpolation at the seam is continuous.
-        let mut src: Vec<f32> = Vec::with_capacity(mono.len() + 1);
+        self.src_buf.clear();
+        self.src_buf.reserve(self.mono_buf.len() + 1);
         if let Some(c) = self.carry {
-            src.push(c);
+            self.src_buf.push(c);
         }
-        src.extend_from_slice(&mono);
+        self.src_buf.extend_from_slice(&self.mono_buf);
         let mut pos = self.pos;
-        while pos + 1.0 < src.len() as f64 {
+        while pos + 1.0 < self.src_buf.len() as f64 {
             let i = pos as usize;
             let frac = (pos - i as f64) as f32;
-            out.push(src[i] + (src[i + 1] - src[i]) * frac);
+            out.push(self.src_buf[i] + (self.src_buf[i + 1] - self.src_buf[i]) * frac);
             pos += step;
         }
         // Keep the last frame and the position relative to it.
-        let last = src.len().saturating_sub(1);
-        self.carry = src.last().copied();
+        let last = self.src_buf.len().saturating_sub(1);
+        self.carry = self.src_buf.last().copied();
         self.pos = pos - last as f64;
         out
     }
@@ -189,15 +319,14 @@ impl Drop for Capture {
     }
 }
 
-/// Build an input stream for one sample format, converting every sample to
-/// `f32` on the way through. CoreAudio hands back `f32` or `i16` today, but the
-/// format is the device's to choose and the list grows with every cpal release.
+/// Build an input stream for one sample format, pushing converted `f32`
+/// samples into the pre-allocated lock-free ring buffer with zero heap
+/// allocations on CoreAudio's real-time callback thread (P-35).
 #[cfg(target_os = "macos")]
 fn build_stream<T>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
-    mut resampler: Resampler,
-    out: Sender<Vec<f32>>,
+    producer: RingProducer,
 ) -> Result<cpal::Stream, cpal::BuildStreamError>
 where
     T: SizedSample,
@@ -206,8 +335,7 @@ where
     device.build_input_stream(
         config,
         move |data: &[T], _: &cpal::InputCallbackInfo| {
-            let frames: Vec<f32> = data.iter().map(|s| s.to_sample::<f32>()).collect();
-            let _ = out.send(resampler.push(&frames));
+            producer.push_samples(data);
         },
         |e: cpal::StreamError| log::warn!("microphone stream: {e}"),
         None,
@@ -215,8 +343,9 @@ where
 }
 
 /// Everything the capture thread does: pick the device, read its format, open
-/// the stream, then sit until told to stop. Every failure is reported through
-/// `ready` as a sentence the reader can act on.
+/// the stream, then drain the lock-free ring buffer and resample off the
+/// real-time audio callback until told to stop. Every failure is reported
+/// through `ready` as a sentence the reader can act on.
 #[cfg(target_os = "macos")]
 fn run(device_name: Option<String>, out: Sender<Vec<f32>>, stop: Receiver<()>, ready: Sender<Result<(), String>>) {
     macro_rules! fail {
@@ -243,20 +372,22 @@ fn run(device_name: Option<String>, out: Sender<Vec<f32>>, stop: Receiver<()>, r
         fail!("The microphone reported an unusable format ({rate} Hz, {channels} channels). Pick a different input under Settings → Transcription.");
     }
     let stream_config: cpal::StreamConfig = config.into();
-    let resampler = Resampler::new(rate, channels);
+    let mut resampler = Resampler::new(rate, channels);
+    // 131,072 samples (~1.36s at 48 kHz stereo): pre-allocated once off the audio thread.
+    let (producer, consumer) = spsc_ring(1 << 17, channels);
 
     use cpal::SampleFormat as F;
     let stream = match format {
-        F::F32 => build_stream::<f32>(&device, &stream_config, resampler, out),
-        F::F64 => build_stream::<f64>(&device, &stream_config, resampler, out),
-        F::I8 => build_stream::<i8>(&device, &stream_config, resampler, out),
-        F::I16 => build_stream::<i16>(&device, &stream_config, resampler, out),
-        F::I32 => build_stream::<i32>(&device, &stream_config, resampler, out),
-        F::I64 => build_stream::<i64>(&device, &stream_config, resampler, out),
-        F::U8 => build_stream::<u8>(&device, &stream_config, resampler, out),
-        F::U16 => build_stream::<u16>(&device, &stream_config, resampler, out),
-        F::U32 => build_stream::<u32>(&device, &stream_config, resampler, out),
-        F::U64 => build_stream::<u64>(&device, &stream_config, resampler, out),
+        F::F32 => build_stream::<f32>(&device, &stream_config, producer),
+        F::F64 => build_stream::<f64>(&device, &stream_config, producer),
+        F::I8 => build_stream::<i8>(&device, &stream_config, producer),
+        F::I16 => build_stream::<i16>(&device, &stream_config, producer),
+        F::I32 => build_stream::<i32>(&device, &stream_config, producer),
+        F::I64 => build_stream::<i64>(&device, &stream_config, producer),
+        F::U8 => build_stream::<u8>(&device, &stream_config, producer),
+        F::U16 => build_stream::<u16>(&device, &stream_config, producer),
+        F::U32 => build_stream::<u32>(&device, &stream_config, producer),
+        F::U64 => build_stream::<u64>(&device, &stream_config, producer),
         other => fail!("The microphone uses a sample format TerminalX cannot read ({other}). Pick a different input under Settings → Transcription."),
     };
     let stream = match stream {
@@ -267,8 +398,32 @@ fn run(device_name: Option<String>, out: Sender<Vec<f32>>, stop: Receiver<()>, r
         fail!("The microphone would not start ({e}).");
     }
     let _ = ready.send(Ok(()));
-    let _ = stop.recv();
-    drop(stream);
+    let mut scratch = Vec::with_capacity(4096);
+    loop {
+        let stopping = match stop.recv_timeout(Duration::from_millis(10)) {
+            Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => true,
+            Err(mpsc::RecvTimeoutError::Timeout) => false,
+        };
+        if stopping {
+            drop(stream);
+            scratch.clear();
+            if consumer.drain_into(&mut scratch) > 0 {
+                let resampled = resampler.push(&scratch);
+                if !resampled.is_empty() {
+                    let _ = out.send(resampled);
+                }
+            }
+            break;
+        }
+        scratch.clear();
+        if consumer.drain_into(&mut scratch) > 0 {
+            let resampled = resampler.push(&scratch);
+            if !resampled.is_empty() && out.send(resampled).is_err() {
+                drop(stream);
+                break;
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -307,6 +462,22 @@ mod tests {
         assert!(empty.push(&[]).is_empty());
         // A partial frame at the end of a chunk is dropped, not read past.
         assert_eq!(empty.push(&[1.0]).len(), 0);
+    }
+
+    #[test]
+    fn spsc_ring_preserves_frame_alignment_across_wraparound_and_overflow() {
+        let (producer, consumer) = spsc_ring(8, 2);
+        // Push 3 stereo frames (6 samples), drain 2 frames (4 samples) -> wraps on next push.
+        producer.push_f32(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        let mut out = Vec::new();
+        assert_eq!(consumer.drain_into(&mut out), 6);
+        assert_eq!(out, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+
+        // Overflow drops excess whole frames, keeping stereo alignment intact.
+        producer.push_f32(&[10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 18.0, 19.0]);
+        out.clear();
+        assert_eq!(consumer.drain_into(&mut out), 8);
+        assert_eq!(out, vec![10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0]);
     }
 
     /// Walks the same CoreAudio property calls the mic button walks. A release
