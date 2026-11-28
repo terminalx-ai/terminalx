@@ -1420,6 +1420,7 @@ mod tests {
         assert!(folder.join(".git").exists() && folder.join("todo.txt").exists());
     }
 
+    #[cfg(feature = "desktop")]
     #[test]
     fn a_fresh_repository_on_the_unborn_branch_gets_a_new_branch_name() {
         let temp = tempfile::tempdir().unwrap();
