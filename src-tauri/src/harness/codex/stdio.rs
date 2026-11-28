@@ -157,6 +157,11 @@ pub(crate) fn supported(version: &str) -> bool {
 }
 
 impl Stdio {
+    /// The tab's permission mode this launch runs in.
+    pub(crate) fn mode(&self) -> &str {
+        &self.mode
+    }
+
     pub(crate) fn validate_mode(mode: &str) -> Result<()> {
         ensure!(matches!(mode, "plan" | "auto" | "acceptEdits" | "bypassPermissions" | ""),
             "Experimental Codex stdio does not support Ask every time. Choose plan, auto, or bypass for a new experimental session.");

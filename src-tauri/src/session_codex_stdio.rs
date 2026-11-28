@@ -635,6 +635,7 @@ impl SessionManager {
                 engine.hook_token = token.clone();
             }
         }
+        let launch_token = token.clone();
         env.extend([
             ("RACCOON_SESSION_ID".into(), session.to_owned()), ("RACCOON_TAB_ID".into(), tab.to_owned()),
             ("RACCOON_HOOK_TOKEN".into(), token),
@@ -668,6 +669,15 @@ impl SessionManager {
         };
         let note = crate::bots::chat::join_notes(&[sparse.as_deref(), bot.as_deref()]);
         let mut native = native_launch(&grant, &config, &computer, note.as_deref());
+        // The cloud desktop's browser, only while the workspace offers it
+        // (PRO-209): its server ahead of `app-server`, and the hook socket its
+        // calls reach this tab through.
+        // Without this binary's path the launch goes on without the tool.
+        let browser = std::env::current_exe().map(|exe| crate::cloud_browser::codex_stdio_args(&exe.to_string_lossy(), &launch_token, session, tab)).unwrap_or_default();
+        if !browser.is_empty() {
+            with_server(&mut native.args, browser);
+            env.push((crate::hooks::SOCKET_ENV.into(), self.control.socket.to_string_lossy().into_owned()));
+        }
         // In a workspace Codex signs in with the workspace's credential, in a
         // home of its own with no Raccoon hooks; on a Mac, the reader's home.
         if grant.codex_auth.is_some() {
@@ -1421,6 +1431,13 @@ fn same_launch(rt: &TabRuntime, launch: &Arc<()>) -> bool {
 /// Whether `launch` is the connection being let go after a refused turn.
 fn retiring(rt: &TabRuntime, launch: &Arc<()>) -> bool {
     rt.stdio_retiring.as_ref().is_some_and(|retiring| Arc::ptr_eq(retiring, launch))
+}
+
+/// A server's `-c` arguments go ahead of `app-server`: Codex reads options
+/// only there.
+pub(super) fn with_server(args: &mut Vec<String>, server: Vec<String>) {
+    let at = args.iter().position(|arg| arg == "app-server").unwrap_or(args.len());
+    args.splice(at..at, server);
 }
 
 #[cfg(test)]
