@@ -954,13 +954,21 @@ fn read_identity(dir: &Path) -> Result<Option<StoredIdentity>> {
 }
 
 pub(crate) fn ensure_private_dir(dir: &Path) -> Result<()> {
-    fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
-    #[cfg(unix)]
+    #[cfg(windows)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).with_context(|| format!("restrict {}", dir.display()))?;
+        crate::win::fs::create_private_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+        return Ok(());
     }
-    Ok(())
+    #[cfg(not(windows))]
+    {
+        fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).with_context(|| format!("restrict {}", dir.display()))?;
+        }
+        Ok(())
+    }
 }
 
 /// Replace `path` so that after a crash at any instant it holds either the
@@ -969,14 +977,19 @@ pub(crate) fn ensure_private_dir(dir: &Path) -> Result<()> {
 pub(crate) fn write_durable(path: &Path, bytes: &[u8]) -> Result<()> {
     let tmp = path.with_extension("json.tmp");
     {
-        let mut options = fs::OpenOptions::new();
-        options.write(true).create(true).truncate(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let mut file = options.open(&tmp).with_context(|| format!("create {}", tmp.display()))?;
+        #[cfg(windows)]
+        let mut file = crate::win::fs::create_private(&tmp, true).with_context(|| format!("create {}", tmp.display()))?;
+        #[cfg(not(windows))]
+        let mut file = {
+            let mut options = fs::OpenOptions::new();
+            options.write(true).create(true).truncate(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            options.open(&tmp).with_context(|| format!("create {}", tmp.display()))?
+        };
         file.write_all(bytes)?;
         file.sync_all()?;
     }

@@ -175,19 +175,30 @@ fn validate_install(tool: &Tool, dir: &Path) -> Result<()> {
 /// Materialize only immutable verified bytes. Interrupted preparation can read
 /// its cache again; it never runs an installer or creates/replays a VM.
 pub fn prepare(tool: &Tool) -> Result<PathBuf> {
+    prepare_with(
+        tool,
+        crate::data_privacy::require_network,
+        || crate::data_privacy::http_agent().timeout(Duration::from_secs(90)).build(),
+    )
+}
+
+fn prepare_with(
+    tool: &Tool,
+    check_network: impl FnOnce() -> Result<()>,
+    build_agent: impl FnOnce() -> ureq::Agent,
+) -> Result<PathBuf> {
     ensure_running()?;
     let target = base(tool)?;
     if target.try_exists()? {
         validate_install(tool, &target)?;
         return Ok(target);
     }
+    check_network()?;
     let parent = target.parent().context("Tool cache unavailable")?;
     journal::private_directory(parent)?;
     let stage = tempfile::tempdir_in(parent)?;
     let archive = stage.path().join("download.tar.gz");
-    let response = ureq::AgentBuilder::new()
-        .timeout(Duration::from_secs(90))
-        .build()
+    let response = build_agent()
         .get(tool.archive)
         .call()
         .context("Download the disclosed pinned tool; check networking and retry setup")?;
@@ -286,5 +297,29 @@ mod tests {
         };
         assert!(verify_download(&exact, b"abc").is_ok());
         assert!(verify_download(&exact, b"abcd").is_err());
+    }
+
+    #[test]
+    fn prepare_refuses_network_download_under_data_privacy_mode() {
+        let _home = crate::store::temp_home();
+        let dummy = Tool {
+            name: "privacy-test",
+            version: "1",
+            archive: "https://example.invalid/never-reached.tar.gz",
+            sha256: "0000000000000000000000000000000000000000000000000000000000000001",
+            bytes: 4,
+            signed_path: "x",
+            executable: "x",
+            executable_sha256: "0000000000000000000000000000000000000000000000000000000000000001",
+            publisher_team: "TEAM",
+            identifier: "id",
+        };
+        let err = prepare_with(
+            &dummy,
+            || anyhow::bail!(crate::data_privacy::MESSAGE),
+            || panic!("must not build HTTP agent when data privacy mode blocks network"),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains(crate::data_privacy::MESSAGE), "{err:#}");
     }
 }

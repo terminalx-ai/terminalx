@@ -92,14 +92,56 @@ fn save(saved: &Saved) -> Result<()> {
     Ok(())
 }
 
-/// The saved password, made on first use. VNC authentication reads eight characters.
+/// Maximum screenshot payload accepted from the container (32 MiB).
+const MAX_SCREENSHOT_BYTES: usize = 32 * 1024 * 1024;
+const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
+
+/// Generate a high-entropy (128-bit) VNC password using the OS CSPRNG.
+fn generate_password() -> String {
+    use base64::{engine::general_purpose, Engine};
+    use rand_core::{OsRng, RngCore};
+    let mut bytes = [0u8; 16];
+    OsRng.fill_bytes(&mut bytes);
+    general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+}
+
+/// The saved password, made on first use with 128 bits of CSPRNG entropy.
 fn password() -> Result<String> {
     let mut saved = load();
     if saved.password.len() < 8 {
-        saved.password = uuid::Uuid::new_v4().simple().to_string()[..8].to_string();
+        saved.password = generate_password();
         save(&saved)?;
     }
     Ok(saved.password)
+}
+
+/// Write `VNC_PW=<password>` into a short-lived `0600` (owner-only) env file
+/// so the VNC password never appears in `docker run` / `podman run` argv (`ps`).
+fn write_vnc_env_file(password: &str) -> Result<tempfile::NamedTempFile> {
+    use std::io::Write;
+    let dir = crate::store::ensure_dir(crate::store::root()?.join("computer"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+    }
+    #[cfg(windows)]
+    {
+        let _ = crate::win::fs::create_private_dir_all(&dir);
+    }
+    let mut builder = tempfile::Builder::new();
+    builder.prefix(".vnc-env-").suffix(".env");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        builder.permissions(std::fs::Permissions::from_mode(0o600));
+    }
+    let mut file = builder.tempfile_in(&dir).context("create private VNC env file")?;
+    #[cfg(windows)]
+    crate::win::security::restrict_handle(file.as_file()).context("restrict private VNC env file")?;
+    writeln!(file, "VNC_PW={password}")?;
+    file.as_file().sync_all()?;
+    Ok(file)
 }
 
 fn set_enabled(enabled: bool) -> Result<()> {
@@ -135,6 +177,87 @@ impl std::error::Error for Exited {}
 #[cfg(unix)]
 fn exited<T>(result: &Result<T>) -> bool {
     result.as_ref().err().is_none_or(|error| error.downcast_ref::<Exited>().is_some())
+}
+
+/// Run `program args`, reading stdout as raw bytes capped at `max_bytes`.
+fn run_bytes_capped(program: &Path, args: &[&str], timeout: Duration, max_bytes: usize) -> Result<Vec<u8>> {
+    let mut child = Command::new(program)
+        .args(args)
+        .env("PATH", crate::binpath::login_path())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("run {}", program.display()))?;
+    let (out, err) = (child.stdout.take().unwrap(), child.stderr.take().unwrap());
+    let limit = (max_bytes as u64).saturating_add(1);
+    let out_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = out.take(limit).read_to_end(&mut buf);
+        buf
+    });
+    let err_reader = std::thread::spawn(move || {
+        let mut stderr = String::new();
+        let _ = err.take(64 * 1024).read_to_string(&mut stderr);
+        stderr
+    });
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!("{} {} took too long", runtime_name(program), args.first().unwrap_or(&""));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let stdout = out_reader.join().map_err(|_| anyhow!("read command stdout"))?;
+    let stderr = err_reader.join().map_err(|_| anyhow!("read command stderr"))?;
+    if !status.success() {
+        let reason = stderr.lines().rev().find(|line| !line.trim().is_empty()).unwrap_or("failed").trim().to_string();
+        return Err(Exited(reason).into());
+    }
+    if stdout.len() > max_bytes {
+        bail!("screenshot exceeded maximum allowed size ({max_bytes} bytes)");
+    }
+    Ok(stdout)
+}
+
+fn validate_png(bytes: &[u8]) -> Result<()> {
+    if bytes.len() > MAX_SCREENSHOT_BYTES {
+        bail!("screenshot exceeded maximum allowed size ({MAX_SCREENSHOT_BYTES} bytes)");
+    }
+    if bytes.len() < 24 || !bytes.starts_with(PNG_SIGNATURE) {
+        bail!("container did not return a valid PNG screenshot");
+    }
+    Ok(())
+}
+
+/// Atomically write verified PNG bytes to `out`, refusing symlink destinations.
+fn write_screenshot_atomic(out: &Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+    validate_png(bytes)?;
+    if let Ok(meta) = std::fs::symlink_metadata(out) {
+        if meta.file_type().is_symlink() || meta.is_dir() {
+            bail!("refusing to write screenshot to symlink or directory {}", out.display());
+        }
+    }
+    let parent = out.parent().context("screenshot destination has no parent directory")?;
+    std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    let mut builder = tempfile::Builder::new();
+    builder.prefix(".screen-").suffix(".png.tmp");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        builder.permissions(std::fs::Permissions::from_mode(0o600));
+    }
+    let mut tmp = builder.tempfile_in(parent).context("stage screenshot file")?;
+    tmp.write_all(bytes)?;
+    tmp.as_file().sync_all()?;
+    tmp.persist(out).map_err(|e| anyhow!("save screenshot to {}: {}", out.display(), e.error))?;
+    Ok(())
 }
 
 /// Run `program args`, failing after `timeout` with what it printed to stderr.
@@ -314,8 +437,9 @@ pub fn status() -> VmStatus {
 
 /// The arguments the container is created with: loopback-only viewer, no
 /// mounts, capped resources, every capability dropped but the two its
-/// supervisor needs to step down to the desktop user.
-pub fn run_args(runtime: &str, password: &str) -> Vec<String> {
+/// supervisor needs to step down to the desktop user. `env_file` carries
+/// `VNC_PW` inside an owner-only file so the password never appears in argv.
+pub fn run_args(runtime: &str, env_file: &Path) -> Vec<String> {
     let mut args: Vec<String> = ["run", "-d", "--name", CONTAINER, "--hostname", CONTAINER, "--label"].map(String::from).to_vec();
     args.push(format!("{LABEL}=1"));
     args.extend(
@@ -331,8 +455,8 @@ pub fn run_args(runtime: &str, password: &str) -> Vec<String> {
         args.extend(["--cap-add", "SYS_CHROOT"].map(String::from));
     }
     // Dev servers on this machine, reached from the VM's browser.
-    args.extend(["--add-host", "host.docker.internal:host-gateway", "-e"].map(String::from));
-    args.push(format!("VNC_PW={password}"));
+    args.extend(["--add-host", "host.docker.internal:host-gateway", "--env-file"].map(String::from));
+    args.push(env_file.to_string_lossy().into_owned());
     args.push("-p".into());
     args.push(format!("127.0.0.1::{VIEWER_PORT}"));
     args.push(IMAGE.into());
@@ -359,7 +483,8 @@ pub fn start() -> Result<VmStatus> {
     match container_running(&path) {
         None => {
             let password = password()?;
-            let args = run_args(&name, &password);
+            let env_file = write_vnc_env_file(&password)?;
+            let args = run_args(&name, env_file.path());
             run(&path, &args.iter().map(String::as_str).collect::<Vec<_>>(), QUICK).context("create the Local VM")?;
         }
         Some(running) => {
@@ -491,35 +616,33 @@ pub fn tools(target: &Target, tool: Option<&str>) -> Result<String> {
 }
 
 /// The VM's whole screen as a PNG on this machine, at `out` or in `~/.raccoon/computer/screens`.
+/// Streams PNG bytes directly from container stdout with a strict size cap and
+/// PNG magic-header check instead of staging in container `/tmp` + `docker cp`.
 pub fn screenshot(target: &Target, out: Option<PathBuf>) -> Result<PathBuf> {
     let path = selected_runtime(target)?;
     let Target::LinuxContainer { id, .. } = target else { bail!("An exact Linux desktop container is required; no OS fallback") };
     let out = match out {
-        // Absolute, so `docker cp` never reads it as `container:path` or `-` (stdout).
         Some(out) => std::path::absolute(&out).context("where to save the screenshot")?,
         None => crate::store::ensure_dir(crate::store::root()?.join("computer").join("screens"))?.join(format!("screen-{}.png", chrono::Utc::now().format("%Y%m%d-%H%M%S%3f"))),
     };
-    // Its capture, its copy and its cleanup, each with its own QUICK.
     #[cfg(unix)]
-    let admission = call_admission(target, QUICK * 3)?;
-    // Screenshots share the container's lock (#978), so each has its own
-    // file: two at once never return each other's or a half-written image.
-    let inside = screen_path(&uuid::Uuid::new_v4().to_string());
-    let copied = run(&path, &["exec", "-u", "cua", id, "ffmpeg", "-loglevel", "error", "-f", "x11grab", "-i", ":1", "-frames:v", "1", "-y", &inside], QUICK)
-        .context("capture the screen")
-        .and_then(|_| run(&path, &["cp", &format!("{id}:{inside}"), &out.to_string_lossy()], QUICK).context("copy the screenshot out"));
-    // Removed whether or not the copy worked; a failed removal leaves one
-    // small file in the container's /tmp and does not fail the screenshot.
-    let _ = run(&path, &["exec", "-u", "cua", id, "rm", "-f", "--", &inside], QUICK);
+    let admission = call_admission(target, QUICK)?;
+    let captured = run_bytes_capped(
+        &path,
+        &[
+            "exec", "-u", "cua", id,
+            "ffmpeg", "-loglevel", "error", "-f", "x11grab", "-i", ":1",
+            "-frames:v", "1", "-f", "image2pipe", "-vcodec", "png", "pipe:1",
+        ],
+        QUICK,
+        MAX_SCREENSHOT_BYTES,
+    )
+    .context("capture the screen");
     #[cfg(unix)]
-    if exited(&copied) { admission.completed()?; }
-    copied?;
+    if exited(&captured) { admission.completed()?; }
+    let bytes = captured?;
+    write_screenshot_atomic(&out, &bytes)?;
     Ok(out)
-}
-
-/// The in-container file one screenshot captures to.
-fn screen_path(operation: &str) -> String {
-    format!("/tmp/terminalx-screen-{operation}.png")
 }
 
 fn shell_quote(s: &str) -> String {
@@ -770,15 +893,17 @@ mod tests {
 
     #[test]
     fn the_container_is_loopback_only_locked_down_and_mounts_nothing() {
-        let args = run_args("docker", "secret12");
+        let env_path = Path::new("/tmp/vnc.env");
+        let args = run_args("docker", env_path);
         let joined = args.join(" ");
         assert!(joined.contains("-p 127.0.0.1::6901"), "{joined}");
         assert!(joined.contains("--cap-drop ALL"));
-        assert!(joined.contains("VNC_PW=secret12"));
+        assert!(joined.contains("--env-file /tmp/vnc.env"), "{joined}");
+        assert!(!joined.contains("VNC_PW="), "VNC password must never appear in CLI argv: {joined}");
         assert!(joined.contains(&format!("--label {LABEL}=1")));
         assert!(!joined.contains("--mount") && !joined.contains(" -v "));
         assert!(!joined.contains("SYS_CHROOT"));
-        assert!(run_args("podman", "x").contains(&"SYS_CHROOT".to_string()));
+        assert!(run_args("podman", env_path).contains(&"SYS_CHROOT".to_string()));
         assert_eq!(args.last().map(String::as_str), Some(IMAGE));
     }
 
@@ -830,12 +955,43 @@ mod tests {
         assert!(abandoned.is_err() && !exited(&abandoned));
     }
 
-    /// #978 review: screenshots run concurrently, so they never share a file.
     #[test]
-    fn each_screenshot_captures_to_its_own_file() {
-        let (a, b) = (screen_path(&uuid::Uuid::new_v4().to_string()), screen_path(&uuid::Uuid::new_v4().to_string()));
+    fn generated_vnc_password_has_full_entropy_and_writes_private_env_file() {
+        let _home = crate::store::temp_home();
+        let a = generate_password();
+        let b = generate_password();
         assert_ne!(a, b);
-        assert!(a.starts_with("/tmp/terminalx-screen-") && a.ends_with(".png"));
+        assert!(a.len() >= 22, "expected 128-bit base64url password, got len {}", a.len());
+        let env_file = write_vnc_env_file(&a).unwrap();
+        let content = std::fs::read_to_string(env_file.path()).unwrap();
+        assert_eq!(content.trim(), format!("VNC_PW={a}"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(env_file.path()).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+    }
+
+    #[test]
+    fn screenshot_validation_rejects_non_png_and_symlink_targets() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("shot.png");
+        assert!(validate_png(b"not a png at all 12345678901234567890").is_err());
+        assert!(validate_png(b"\x89PNG\r\n\x1a\nshort").is_err());
+        let mut valid = PNG_SIGNATURE.to_vec();
+        valid.extend_from_slice(&[0u8; 32]);
+        write_screenshot_atomic(&dest, &valid).unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), valid);
+        #[cfg(unix)]
+        {
+            let target = dir.path().join("victim");
+            std::fs::write(&target, b"keep").unwrap();
+            let link = dir.path().join("link.png");
+            std::os::unix::fs::symlink(&target, &link).unwrap();
+            assert!(write_screenshot_atomic(&link, &valid).is_err());
+            assert_eq!(std::fs::read(&target).unwrap(), b"keep");
+        }
     }
 
     #[test]
@@ -900,7 +1056,7 @@ mod tests {
         let up = start().expect("start");
         assert_eq!(up.state, VmState::Running);
         let viewer = up.viewer.expect("viewer");
-        assert_eq!(viewer.password.len(), 8);
+        assert!(viewer.password.len() >= 8);
         assert!(std::net::TcpStream::connect(("127.0.0.1", viewer.port)).is_ok());
         assert!(launch_args("claude").args.contains("cua-driver"));
         let docker = runtime().unwrap();

@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::orchestration::routing::{Overrides as RoutingOverrides, Table as RoutingTable};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Settings {
     /// User-facing webview preferences. Missing keys inherit app defaults.
@@ -853,13 +853,98 @@ pub(crate) fn writes() -> u64 {
     file::WRITES.load(std::sync::atomic::Ordering::Acquire)
 }
 
+impl std::fmt::Debug for Settings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Settings")
+            .field("preferences", &self.preferences)
+            .field("preferences_migrated", &self.preferences_migrated)
+            .field("loaded_configuration", &self.loaded_configuration)
+            .field("worktree_dir", &self.worktree_dir)
+            .field("branch_prefix", &self.branch_prefix)
+            .field("extra_bin_dirs", &self.extra_bin_dirs)
+            .field("notifications", &self.notifications)
+            .field("quit_behavior", &self.quit_behavior)
+            .field("linear_api_key", &self.linear_api_key.as_ref().map(|_| "[REDACTED]"))
+            .field("linear_viewer", &self.linear_viewer)
+            .field("transcription_model", &self.transcription_model)
+            .field("transcription_input_device", &self.transcription_input_device)
+            .field("transcription_mute", &self.transcription_mute)
+            .field("status_bar", &self.status_bar)
+            .field("floating", &self.floating)
+            .field("merged_cleanup", &self.merged_cleanup)
+            .field("work_status", &self.work_status)
+            .field("machine_name", &self.machine_name)
+            .field("agents", &self.agents)
+            .field("conversations", &self.conversations)
+            .field("experimental", &self.experimental)
+            .field("diagnostics", &self.diagnostics)
+            .field("orchestrator", &self.orchestrator)
+            .field("pairing", &self.pairing)
+            .field("machines", &self.machines)
+            .finish()
+    }
+}
+
+const LINEAR_SECRET_SERVICE: &str = "com.terminalx.next.integrations";
+const LINEAR_SECRET_ACCOUNT: &str = "linear-api-key";
+
+#[cfg(any(test, target_os = "macos", windows, all(target_os = "linux", feature = "desktop")))]
+fn load_linear_key_with_secrets(
+    settings: &mut Settings,
+    secrets: &dyn crate::keychain::SecretStore,
+    persist_scrubbed: impl FnOnce(&Settings) -> Result<()>,
+) {
+    if let Some(legacy) = settings.linear_api_key.as_deref().map(str::trim).filter(|k| !k.is_empty()) {
+        if secrets.set(LINEAR_SECRET_SERVICE, LINEAR_SECRET_ACCOUNT, legacy.as_bytes()).is_ok() {
+            let mut scrubbed = settings.clone();
+            scrubbed.linear_api_key = None;
+            let _ = persist_scrubbed(&scrubbed);
+        }
+        return;
+    }
+    if let Ok(Some(bytes)) = secrets.get(LINEAR_SECRET_SERVICE, LINEAR_SECRET_ACCOUNT) {
+        if let Ok(key) = String::from_utf8(bytes) {
+            if !key.trim().is_empty() {
+                settings.linear_api_key = Some(key);
+            }
+        }
+    }
+}
+
+#[cfg(any(test, target_os = "macos", windows, all(target_os = "linux", feature = "desktop")))]
+fn save_linear_key_with_secrets(
+    settings: &Settings,
+    secrets: &dyn crate::keychain::SecretStore,
+    persist: impl FnOnce(&Settings) -> Result<()>,
+) -> Result<()> {
+    match settings.linear_api_key.as_deref().map(str::trim).filter(|k| !k.is_empty()) {
+        Some(key) => {
+            secrets.set(LINEAR_SECRET_SERVICE, LINEAR_SECRET_ACCOUNT, key.as_bytes())?;
+            let mut scrubbed = settings.clone();
+            scrubbed.linear_api_key = None;
+            persist(&scrubbed)
+        }
+        None => {
+            let _ = secrets.delete(LINEAR_SECRET_SERVICE, LINEAR_SECRET_ACCOUNT);
+            persist(settings)
+        }
+    }
+}
+
 pub fn load() -> Settings {
     let mut settings = file::load();
+    #[cfg(all(not(test), any(target_os = "macos", windows, all(target_os = "linux", feature = "desktop"))))]
+    load_linear_key_with_secrets(&mut settings, &crate::keychain::Keychain, file::save);
     settings.loaded_configuration = Some((settings.branch_prefix.clone(), settings.worktree_dir.clone()));
     settings
 }
 
 pub fn save(s: &Settings) -> Result<()> {
+    #[cfg(all(not(test), any(target_os = "macos", windows, all(target_os = "linux", feature = "desktop"))))]
+    {
+        save_linear_key_with_secrets(s, &crate::keychain::Keychain, file::save)
+    }
+    #[cfg(not(all(not(test), any(target_os = "macos", windows, all(target_os = "linux", feature = "desktop")))))]
     file::save(s)
 }
 
@@ -1232,5 +1317,45 @@ mod tests {
             let damaged = read(&format!(r#"{{"statusBar":{{"usageRefreshMinutes":{invalid}}}}}"#));
             assert_eq!(damaged.usage_refresh_minutes, 1, "{invalid}");
         }
+    }
+
+    #[test]
+    fn settings_debug_redacts_linear_api_key_and_routes_through_secret_store() {
+        let settings = Settings {
+            linear_api_key: Some("lin_api_super_secret_token_9999".into()),
+            ..Settings::default()
+        };
+        let debug_text = format!("{settings:?}");
+        assert!(!debug_text.contains("lin_api_super_secret_token_9999"), "Debug leaked secret: {debug_text}");
+        assert!(debug_text.contains("[REDACTED]"), "Debug should mark redacted secret: {debug_text}");
+
+        let secrets = crate::keychain::testing::MemorySecrets::default();
+        let mut persisted: Option<Settings> = None;
+        save_linear_key_with_secrets(&settings, &secrets, |scrubbed| {
+            persisted = Some(scrubbed.clone());
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(persisted.as_ref().unwrap().linear_api_key, None, "plaintext key must be scrubbed from settings file");
+
+        let mut loaded = persisted.unwrap();
+        load_linear_key_with_secrets(&mut loaded, &secrets, |_| Ok(()));
+        assert_eq!(loaded.linear_api_key.as_deref(), Some("lin_api_super_secret_token_9999"));
+
+        // Legacy plaintext migration scrubs disk copy and moves secret to vault.
+        let mut legacy = Settings {
+            linear_api_key: Some("lin_api_legacy_key".into()),
+            ..Settings::default()
+        };
+        let mut scrubbed_on_load: Option<Settings> = None;
+        load_linear_key_with_secrets(&mut legacy, &secrets, |s| {
+            scrubbed_on_load = Some(s.clone());
+            Ok(())
+        });
+        assert_eq!(scrubbed_on_load.unwrap().linear_api_key, None);
+        assert_eq!(
+            crate::keychain::SecretStore::get(&secrets, LINEAR_SECRET_SERVICE, LINEAR_SECRET_ACCOUNT).unwrap().as_deref(),
+            Some(b"lin_api_legacy_key".as_slice())
+        );
     }
 }

@@ -337,6 +337,35 @@ mod hash_b64 {
     }
 }
 
+const MAX_TRACKED_HOST_EVENTS: usize = 4096;
+
+#[derive(Default)]
+struct BoundedSet {
+    set: HashSet<String>,
+    order: std::collections::VecDeque<String>,
+}
+
+impl BoundedSet {
+    fn contains(&self, value: &str) -> bool {
+        self.set.contains(value)
+    }
+
+    fn insert(&mut self, value: String) -> bool {
+        if !self.set.insert(value.clone()) {
+            return false;
+        }
+        self.order.push_back(value);
+        while self.set.len() > MAX_TRACKED_HOST_EVENTS {
+            if let Some(oldest) = self.order.pop_front() {
+                self.set.remove(&oldest);
+            } else {
+                break;
+            }
+        }
+        true
+    }
+}
+
 #[derive(Default)]
 struct HostState {
     devices: HashMap<String, Device>,
@@ -344,10 +373,10 @@ struct HostState {
     /// Keyed by attachment id and device: the API re-mints an attachment
     /// (a refreshed pairing, a reopened session) under the same id with a new
     /// device, and that one must be answered too.
-    completed: HashSet<String>,
+    completed: BoundedSet,
     /// Revocations confirmed to the API in this process. The session read
     /// right after a confirmation may still list them.
-    confirmed: HashSet<String>,
+    confirmed: BoundedSet,
     /// A revocation removed a device but the list could not be written.
     devices_unsaved: bool,
     /// Open client connections per device, closed on revocation.
@@ -586,13 +615,25 @@ impl RelayHost {
     fn save_devices(&self, devices: &HashMap<String, Device>) -> bool {
         let Some(path) = &self.devices_path else { return true };
         let write = || -> Result<()> {
+            use std::io::Write;
             if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)?;
+                crate::machine_host::private_dir(parent)?;
             }
             let temporary = path.with_extension("new");
-            std::fs::write(&temporary, serde_json::to_vec(devices)?)?;
-            #[cfg(unix)]
-            std::fs::set_permissions(&temporary, std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
+            let bytes = serde_json::to_vec(devices)?;
+            #[cfg(windows)]
+            let mut file = crate::win::fs::create_private(&temporary, true)?;
+            #[cfg(not(windows))]
+            let mut file = {
+                let mut options = std::fs::OpenOptions::new();
+                options.write(true).create(true).truncate(true);
+                #[cfg(unix)]
+                std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+                options.open(&temporary)?
+            };
+            file.write_all(&bytes)?;
+            file.sync_all()?;
+            drop(file);
             std::fs::rename(&temporary, path)?;
             Ok(())
         };
@@ -2015,7 +2056,9 @@ pub(crate) fn websocket_url(origin: &str, path: &str) -> Result<String> {
 }
 
 pub(crate) fn valid_opaque_id(value: &str) -> bool {
-    !value.is_empty() && value.len() <= 128
+    !value.is_empty()
+        && value.len() <= 128
+        && value.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
 }
 
 pub(crate) fn valid_base64url_32(value: &str) -> bool {
@@ -2600,5 +2643,20 @@ mod tests {
     #[test]
     fn assign_agent_is_pooled_across_calls() {
         assert!(std::ptr::eq(assign_agent(), assign_agent()));
+    }
+
+    #[test]
+    fn valid_opaque_id_restricts_to_safe_url_segment_chars_and_bounded_set_caps_growth() {
+        assert!(valid_opaque_id("host_01-abcXYZ"));
+        for bad in ["", "../admin", "a/b", "id?foo=1", "id#frag", "has space", "a.b", "a:b", &"a".repeat(129)] {
+            assert!(!valid_opaque_id(bad), "expected rejection for {bad:?}");
+        }
+        let mut set = BoundedSet::default();
+        for i in 0..(MAX_TRACKED_HOST_EVENTS + 10) {
+            assert!(set.insert(format!("id-{i}")));
+        }
+        assert_eq!(set.set.len(), MAX_TRACKED_HOST_EVENTS);
+        assert!(!set.contains("id-0"));
+        assert!(set.contains(&format!("id-{}", MAX_TRACKED_HOST_EVENTS + 9)));
     }
 }

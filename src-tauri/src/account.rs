@@ -1448,16 +1448,20 @@ impl AccountManager {
         let ours = |session: &DesktopSession| {
             saved.as_ref().is_some_and(|saved| crate::machine_account::family(&saved.refresh_token).is_some() && crate::machine_account::family(&saved.refresh_token) == crate::machine_account::family(&session.refresh_token))
         };
-        let result = match (&session, Self::runtime_copy_wanted()) {
-            (Some(session), true) => serde_json::to_value(session)
-                .and_then(serde_json::from_value::<crate::machine_account::Session>)
-                .map_err(anyhow::Error::from)
-                .and_then(|copy| crate::machine_account::save(&root, &copy)),
-            (Some(session), false) if ours(session) => crate::machine_account::remove(&root).map(|_| ()),
-            _ => match ended {
-                Some(ended) if ours(ended) => crate::machine_account::remove(&root).map(|_| ()),
-                _ => Ok(()),
-            },
+        let result = if crate::data_privacy::enabled() {
+            crate::machine_account::remove(&root).map(|_| ())
+        } else {
+            match (&session, Self::runtime_copy_wanted()) {
+                (Some(session), true) => serde_json::to_value(session)
+                    .and_then(serde_json::from_value::<crate::machine_account::Session>)
+                    .map_err(anyhow::Error::from)
+                    .and_then(|copy| crate::machine_account::save(&root, &copy)),
+                (Some(session), false) if ours(session) => crate::machine_account::remove(&root).map(|_| ()),
+                _ => match ended {
+                    Some(ended) if ours(ended) => crate::machine_account::remove(&root).map(|_| ()),
+                    _ => Ok(()),
+                },
+            }
         };
         if let Err(error) = result {
             log::warn!("could not keep the runtime's copy of the account session: {error:#}");

@@ -341,10 +341,40 @@ fn read_status() -> Status {
 // older read after the settings command has finished.
 static SETTINGS: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Remove any residual plaintext `<root>/account/session.json` when Data
+/// Privacy Mode is enabled so live cloud tokens never remain on disk.
+fn purge_plaintext_account_session_at(root: &std::path::Path) {
+    if !crate::machine_account::session_path(root).exists() {
+        return;
+    }
+    if let Err(error) = crate::machine_account::locked(root, || {
+        let _ = crate::machine_account::remove(root)?;
+        Ok(())
+    }) {
+        log::warn!("data privacy: could not purge plaintext account session: {error:#}");
+    }
+}
+
+fn purge_plaintext_account_session() {
+    let Ok(root) = crate::store::root() else { return };
+    purge_plaintext_account_session_at(&root);
+}
+
+fn apply_status(target: &Policy, status: Status, root: Option<&std::path::Path>) -> Status {
+    target.set(status);
+    let applied = target.status();
+    if applied.enabled {
+        match root {
+            Some(root) => purge_plaintext_account_session_at(root),
+            None => purge_plaintext_account_session(),
+        }
+    }
+    applied
+}
+
 pub(crate) fn refresh() -> Status {
     let _settings = SETTINGS.lock().unwrap();
-    policy().set(read_status());
-    policy().status()
+    apply_status(policy(), read_status(), None)
 }
 
 /// Called before any desktop clients start. The local runtime uses the same
@@ -412,6 +442,9 @@ pub async fn data_privacy_set(state: tauri::State<'_, crate::AppState>, enabled:
         let error = write().err().map(|error| error.to_string());
         policy().set(read_status());
         let status = policy().status();
+        if status.enabled {
+            purge_plaintext_account_session();
+        }
         let mut snapshot = synchronize_runtime(status, runtime.as_deref());
         if error.is_some() { snapshot.error = error; }
         snapshot
@@ -948,5 +981,29 @@ mod tests {
         assert_eq!(slow.join().unwrap().unwrap().status(), 200);
         done_rx.recv_timeout(Duration::from_secs(2)).unwrap();
         activator.join().unwrap();
+    }
+
+    #[test]
+    fn enabling_data_privacy_purges_residual_plaintext_account_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let session: crate::machine_account::Session = serde_json::from_value(serde_json::json!({
+            "accessToken": "dat_priv.1",
+            "refreshToken": "drt_priv.1",
+            "expiresAt": 9_999_999_999_000_i64,
+            "cloud": { "cloudProfileId": "cp1", "userId": "u1", "email": "person@example.com" }
+        }))
+        .unwrap();
+        crate::machine_account::save(root, &session).unwrap();
+        assert!(crate::machine_account::session_path(root).exists());
+
+        // Use an isolated Policy so parallel tests in this process never observe a global privacy flip.
+        let local = Policy::default();
+        let status = apply_status(&local, ON, Some(root));
+        assert!(status.enabled);
+        assert!(
+            !crate::machine_account::session_path(root).exists(),
+            "enabling Data Privacy Mode must purge residual plaintext account/session.json"
+        );
     }
 }

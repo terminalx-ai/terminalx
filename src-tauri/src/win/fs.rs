@@ -288,12 +288,26 @@ pub(crate) fn private_temp(name: &str) -> io::Result<std::path::PathBuf> {
     Ok(dir)
 }
 
+/// Resolve the system PowerShell binary under `%SystemRoot%` so `junction()`
+/// never executes an unqualified `powershell.exe` from CWD or PATH.
+fn powershell_path_from_system_root(system_root: Option<&std::ffi::OsStr>) -> std::path::PathBuf {
+    let root = system_root
+        .map(std::path::PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .unwrap_or_else(|| std::path::PathBuf::from(r"C:\Windows"));
+    root.join("System32").join("WindowsPowerShell").join("v1.0").join("powershell.exe")
+}
+
+fn system_powershell() -> std::path::PathBuf {
+    powershell_path_from_system_root(std::env::var_os("SystemRoot").as_deref())
+}
+
 /// Make `link` a directory junction to `target`: a link to a folder that,
 /// unlike a symlink, needs neither an administrator nor Developer Mode.
 /// The paths travel in the environment: no shell parses them.
 pub(crate) fn junction(link: &Path, target: &Path) -> io::Result<()> {
     use std::os::windows::process::CommandExt;
-    let made = std::process::Command::new("powershell.exe")
+    let made = std::process::Command::new(system_powershell())
         .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", "New-Item -ItemType Junction -Path $env:TERMINALX_LINK -Target $env:TERMINALX_TARGET | Out-Null"])
         .env("TERMINALX_LINK", link)
         .env("TERMINALX_TARGET", target)
@@ -453,5 +467,16 @@ mod tests {
         let mut text = String::new();
         open_private(&file).unwrap().read_to_string(&mut text).unwrap();
         assert_eq!(text, "secret");
+    }
+
+    #[test]
+    fn system_powershell_resolves_to_absolute_system32_path() {
+        use std::ffi::OsStr;
+        let resolved = powershell_path_from_system_root(Some(OsStr::new(r"D:\Win")));
+        assert_eq!(resolved, std::path::PathBuf::from(r"D:\Win\System32\WindowsPowerShell\v1.0\powershell.exe"));
+        let fallback = powershell_path_from_system_root(Some(OsStr::new("relative")));
+        assert_eq!(fallback, std::path::PathBuf::from(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"));
+        let none = powershell_path_from_system_root(None);
+        assert_eq!(none, std::path::PathBuf::from(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"));
     }
 }
