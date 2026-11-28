@@ -1,4 +1,5 @@
-import { openWorkspaceInEditor, setupWorkspaceSsh, removeWorkspaceSsh, SSH_EDITORS } from "@/lib/cloudSsh";
+import { setupWorkspaceSsh, removeWorkspaceSsh, SSH_EDITORS } from "@/lib/cloudSsh";
+import { EditorButtonNote, openEditorDialog, useEditorOpen } from "@/components/cloud/CloudEditorOpen";
 import { phase2Ready } from "@/lib/phase2Readiness";
 import { useDataPrivacy } from "@/lib/dataPrivacy";
 import { isWindows } from "@/lib/platform";
@@ -87,6 +88,8 @@ export function WorkspaceActionItems({
   const canSetUpSsh = current?.workspace.state === "ready"
     && (sshRole?.role === "manager" || (sshRole?.role === "driver" && sshRole.canApprove));
   const sshTarget = { orgId: workspace.orgId, workspaceId: workspace.id };
+  const editorOpening = useEditorOpen(workspace.id)?.phase === "opening";
+  const primaryDirectory = (current ?? item).workspace.repositories?.find((repository) => repository.primary)?.targetDirectory ?? null;
   const present = !archived && workspace.state !== "destroyed" && !workspace.deletedAt;
   // A private workspace is shared from here too: the dialog makes it visible
   // to the organization with the first person added. Someone who cannot
@@ -149,10 +152,13 @@ export function WorkspaceActionItems({
           Set up SSH and copy command
         </DropdownMenuItem>
       )}
-      {/* Design 14.06: the workspace in an editor over SSH. The same setup runs first, so the same people may. */}
+      {/* Design 14.06: the workspace in an editor over SSH. The same setup runs first, so the same people may.
+          The status dialog shows the setup's progress and any error; one open runs at a time. */}
       {sshAvailable && present && canSetUpSsh && SSH_EDITORS.map(({ id, label }) => (
-        <DropdownMenuItem key={id} data-testid={`cloud-open-in-${id}`} onSelect={() => run(() => openWorkspaceInEditor(sshTarget, id))}>
+        <DropdownMenuItem key={id} data-testid={`cloud-open-in-${id}`} disabled={editorOpening}
+          onSelect={() => openEditorDialog({ ...sshTarget, name: item.workspace.name, preferredRepo: primaryDirectory }, id)}>
           Open in {label}
+          <span className="ml-auto"><EditorButtonNote editor={id} /></span>
         </DropdownMenuItem>
       ))}
       {sshAvailable && present && (

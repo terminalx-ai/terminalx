@@ -3340,6 +3340,14 @@ impl SessionManager {
         crate::cloud_grants::sign_in_required_for_launch(harness, &launch)
     }
 
+    /// Which login the tab's agent started with in this cloud workspace:
+    /// `organization` or `route` (PRO-200). `None` when none, or not yet.
+    pub fn agent_login(&self, session_id: &str, tab_id: &str) -> Option<&'static str> {
+        let runtime = self.tabs.lock().unwrap().get(&key_of(session_id, tab_id)).cloned();
+        let launch = runtime.map_or_else(|| key_of(session_id, tab_id), |runtime| runtime.lock().unwrap().launch_key());
+        crate::cloud_grants::login_for_launch(&launch)
+    }
+
     /// Whether an earlier stop of this tab is still unconfirmed: retained
     /// launches a Stop has to finish before anything is removed (#467).
     pub(crate) fn stop_unconfirmed(&self, session_id: &str, tab_id: &str) -> bool {

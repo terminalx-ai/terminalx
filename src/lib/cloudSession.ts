@@ -324,6 +324,8 @@ export interface CloudSessionModel {
    * for a session in the repository's main directory.
    */
   removableWorkspace: RemovableWorkspace | undefined;
+  /** The folder this session works in on the runtime (its worktree or checkout), as the runtime reports it; null until it has. */
+  checkoutPath?: string | null;
   /**
    * A session on a paired machine (PRO-347) rather than in a cloud workspace:
    * where it runs and how that machine is reached. Everything that belongs to
@@ -759,6 +761,8 @@ export function useCloudSession(key: string): CloudSessionModel | null {
   const agentProcess = useCallback((tabId: string) => agents.tabs.find((tab) => tab.tabId === tabId)?.info.process ?? null, [agents.tabs]);
   // PRO-110: what the runtime says of the tab's agent's sign-in, for the notice over the tab.
   const signIn = useCallback((tabId: string) => agents.tabs.find((tab) => tab.tabId === tabId)?.info.signIn ?? null, [agents.tabs]);
+  // PRO-200: which login the tab's agent started with, for the usage-limit card.
+  const agentLogin = useCallback((tabId: string) => agents.tabs.find((tab) => tab.tabId === tabId)?.info.login ?? null, [agents.tabs]);
   const backend = useMemo(
     () =>
       cloudSessionBackend({
@@ -783,8 +787,9 @@ export function useCloudSession(key: string): CloudSessionModel | null {
         terminalBase,
         agentProcess,
         signIn,
+        agentLogin,
       }),
-    [key, workspaceKey, scope, runtimeSessionId, state, client, workspaceState, authority, agents.outbox, followUps, mailboxKinds, workspaceStatus, wake, you, collabLive, settingsNotice, connects, agentPty, terminalBase, agentProcess, signIn],
+    [key, workspaceKey, scope, runtimeSessionId, state, client, workspaceState, authority, agents.outbox, followUps, mailboxKinds, workspaceStatus, wake, you, collabLive, settingsNotice, connects, agentPty, terminalBase, agentProcess, signIn, agentLogin],
   );
 
   const ownTabs = useMemo(() => {
@@ -986,6 +991,7 @@ export function useCloudSession(key: string): CloudSessionModel | null {
     gitSource: locked ? undefined : gitSource,
     fileSource: locked ? undefined : fileSource,
     removableWorkspace: locked ? undefined : removableWorkspace,
+    checkoutPath: locked || !worktreePath ? null : worktreePath,
     // While connected the runtime's word; while not, whoever would manage it once it runs, or an approving driver.
     ports: { offered: !locked && mayUsePreviews(connected ? manage : wouldManage, you), state, connectionId: connection?.connectionId?.() ?? null },
     error,

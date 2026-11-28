@@ -97,6 +97,12 @@ pub struct AgentTabInfo {
     /// configuration sets no key. Absent otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sign_in: Option<crate::cloud_grants::SignInRequired>,
+    /// Which login the tab's agent started with: `organization` (the
+    /// organization's agent login) or `route` (the creator's own model
+    /// access), PRO-200. Absent when it started with neither, or has not
+    /// started.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub login: Option<&'static str>,
     pub last_seq: u64,
     pub created: String,
     pub modified: String,
@@ -367,6 +373,7 @@ impl AgentOps for ManagerOps {
                     follow_ups: Vec::new(),
                     lease: None,
                     sign_in: self.manager.sign_in_required(&entry.id, &tab.id, &tab.harness),
+                    login: self.manager.agent_login(&entry.id, &tab.id),
                     last_seq,
                     created: tab.created.clone(),
                     modified: tab.modified.clone(),

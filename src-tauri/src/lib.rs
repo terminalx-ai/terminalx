@@ -73,6 +73,8 @@ mod cloud_ports;
 #[cfg(feature = "desktop")]
 mod cloud_remote;
 #[cfg(feature = "desktop")]
+mod editor_link;
+#[cfg(feature = "desktop")]
 mod agent_local_login;
 #[cfg(feature = "desktop")]
 mod codex_device_login;
@@ -773,6 +775,7 @@ pub fn run() {
             commands::cloud_agent_logins,
             commands::cloud_agent_login_affected_workspaces,
             commands::cloud_agent_login_connect,
+            commands::cloud_agent_bedrock_connect,
             commands::cloud_agent_login_remove,
             commands::cloud_agent_routes,
             commands::cloud_agent_route_save,
@@ -874,6 +877,7 @@ pub fn run() {
             machines::connect::machines_reconnect,
             machines::connect::machines_remove,
             machines::connect::machines_rename,
+            editor_link::cloud_open_in_editor,
             cloud_remote::cloud_remote_send,
             cloud_remote::cloud_remote_activate,
             cloud_remote::cloud_remote_detach,

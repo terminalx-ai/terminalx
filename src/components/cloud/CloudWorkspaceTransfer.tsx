@@ -1,4 +1,4 @@
-import { useEffect, useSyncExternalStore } from "react";
+import { useEffect, useRef, useSyncExternalStore } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { Button } from "@/components/ui/button";
@@ -7,7 +7,8 @@ import { Check, Download, Loader2 } from "@/icons";
 import { getAccount } from "@/lib/account";
 import { api } from "@/lib/api";
 import { cloudAgentLabel } from "@/lib/cloudAgentLabel";
-import { openWorkspaceInEditor, SSH_EDITORS } from "@/lib/cloudSsh";
+import { SSH_EDITORS } from "@/lib/cloudSsh";
+import { EditorButtonNote, EditorOpenStatus, forwardingNote, openInEditor, useEditorOpen } from "@/components/cloud/CloudEditorOpen";
 import { useDataPrivacy } from "@/lib/dataPrivacy";
 import { isWindows } from "@/lib/platform";
 import { useCloudCatalog } from "@/lib/cloudCatalog";
@@ -112,6 +113,11 @@ export function CloudWorkspaceTransfer({ cloud, sessionId, tabId, accountRevisio
   // 14.16's "open it in an editor": the workspace menu's rule for SSH setup
   // (PRO-215), which these buttons run first.
   const privateMode = useDataPrivacy().enabled;
+  const editorState = useEditorOpen(workspaceId);
+  const editorOpening = editorState?.phase === "opening";
+  // The confirmation sits above the editors; in a short window it is scrolled to, never left below the fold.
+  const confirmation = useRef<HTMLDivElement>(null);
+  useEffect(() => { if (state.confirming) confirmation.current?.scrollIntoView?.({ block: "nearest" }); }, [state.confirming]);
   const you = row?.workspace.you;
   const editors = !isWindows && !privateMode && row?.workspace.state === "ready"
     && (you?.role === "manager" || (you?.role === "driver" && you.canApprove))
@@ -299,25 +305,28 @@ export function CloudWorkspaceTransfer({ cloud, sessionId, tabId, accountRevisio
             ))}
           </fieldset>
         )}
+        {state.confirming && !imported && (
+          <div ref={confirmation} role="alert" className="mx-5 mb-4 rounded-lg border border-destructive/50 bg-destructive/5 px-3 py-2.5 text-sm">
+            {leftBehind === null
+              ? `This runtime cannot say what the move leaves behind: uncommitted files, other agent tabs and notes stay in the cloud. Archiving ${workspaceName} deletes them after 30 days.`
+              : `The move does not carry ${leftBehind.join(", ")}. Archiving ${workspaceName} deletes them after 30 days.`}
+          </div>
+        )}
         {!imported && editors && (
           <div className="flex flex-col gap-2 px-5 pb-4">
             <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">Or keep it in the cloud and open it in an editor</p>
             <div className="grid grid-cols-3 gap-2">
               {SSH_EDITORS.map(({ id, label }) => (
-                <Button key={id} variant="outline" className="justify-between" disabled={busy}
-                  onClick={() => void openWorkspaceInEditor({ orgId, workspaceId }, id)
-                    .catch((error: unknown) => update({ notice: error instanceof Error ? error.message : String(error) }))}>
-                  <span>{label}</span><span className="text-[10px] text-muted-foreground">SSH</span>
+                <Button key={id} variant="outline" className="h-auto justify-between py-2" disabled={busy || editorOpening}
+                  aria-busy={editorOpening && editorState?.editor === id}
+                  onClick={() => void openInEditor({ orgId, workspaceId, path: cloud.checkoutPath ?? null }, id)}>
+                  <span>{editorOpening && editorState?.editor === id ? `Opening ${label}…` : label}</span>
+                  <EditorButtonNote editor={id} />
                 </Button>
               ))}
             </div>
-          </div>
-        )}
-        {state.confirming && !imported && (
-          <div role="alert" className="mx-5 mt-3 rounded-lg border border-destructive/50 bg-destructive/5 px-3 py-2.5 text-sm">
-            {leftBehind === null
-              ? `This runtime cannot say what the move leaves behind: uncommitted files, other agent tabs and notes stay in the cloud. Archiving ${workspaceName} deletes them after 30 days.`
-              : `The move does not carry ${leftBehind.join(", ")}. Archiving ${workspaceName} deletes them after 30 days.`}
+            <p className="text-xs text-muted-foreground">{forwardingNote}</p>
+            <EditorOpenStatus state={editorState} />
           </div>
         )}
         {notice && <p role="status" className="px-5 pt-3 text-sm">{notice}</p>}
