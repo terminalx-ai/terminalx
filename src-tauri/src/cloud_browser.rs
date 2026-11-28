@@ -240,8 +240,8 @@ pub(crate) fn set_liveness(alive: impl Fn(&str, &str, &str) -> bool + Send + Syn
     let _ = LIVENESS.set(Box::new(alive));
 }
 
-/// The launch a browser session key names is still running.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+/// The launch a browser session key names is still running (the reaper's).
+#[cfg(any(target_os = "linux", test))]
 fn launch_alive(key: &str) -> bool {
     let mut parts = key.splitn(3, '/');
     let (Some(session), Some(tab), Some(token)) = (parts.next(), parts.next(), parts.next()) else { return false };
@@ -413,7 +413,8 @@ pub(crate) fn desktop_agent_state() -> Value {
 }
 
 /// The runtime's Tokio runtime, which drives Chrome and ends idle sessions.
-#[cfg(target_os = "linux")]
+/// Not in tests, whose runtimes end with them.
+#[cfg(all(target_os = "linux", not(test)))]
 pub(crate) fn install_runtime(handle: tokio::runtime::Handle) {
     engine::install(handle);
 }
