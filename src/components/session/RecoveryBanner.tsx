@@ -48,7 +48,8 @@ export function RecoveryBanner({ placement = "top", kind, limit = null, waiting,
   onRetry: (model?: string) => void;
   onStop: () => void;
   /** Continue in a new session, from a summary of this one. */
-  onContinue: () => void;
+  /** Absent where a new session cannot be opened from here (a runtime without the handoff). */
+  onContinue?: () => void;
   /** Send "continue" in this same conversation, with no stop first. */
   onSendContinue?: () => void;
   /** Signed out: sign the agent in again, where it can be (its terminal, or a shell running its login). */
@@ -135,7 +136,7 @@ export function RecoveryBanner({ placement = "top", kind, limit = null, waiting,
         {models.map(model => <option key={model.id} value={model.id}>{modelOptionText(model, models)}</option>)}
       </select>}
       <Button size="sm" variant="outline" disabled={busy} onClick={pressed(onStop)}>Stop session</Button>
-      {offer.continueInNewSession && <Button size="sm" variant="ghost" disabled={busy} onClick={pressed(onContinue)}>Continue in new session</Button>}
+      {offer.continueInNewSession && onContinue && <Button size="sm" variant="ghost" disabled={busy} onClick={pressed(onContinue)}>Continue in new session</Button>}
     </div>
     {orgHint && <p className="mt-1.5 text-muted-foreground">{orgHint}</p>}
   </section>
