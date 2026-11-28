@@ -880,6 +880,17 @@ describe("a message that never went, or went with others", () => {
     expect(drawn).toEqual([]);
   });
 
+  it("shows a message held and delivered again as itself once", () => {
+    const first = ev({ type: "user_message", text: "run the tests", queued: true });
+    const again = ev({ type: "user_message", text: "run the tests", queued: false });
+    const t = buildTranscript([first, again, ev({ type: "prompt_joined", promptSeq: first.seq, intoSeq: again.seq })], true);
+    const prompts = t.turns.map((turn) => turn.prompt).filter(Boolean);
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0]).toMatchObject({ seq: again.seq, text: "run the tests" });
+    expect(prompts[0]?.sent).toBeUndefined();
+    expect(t.turns.flatMap((turn) => turn.work.filter((item) => item.kind === "queued" || item.kind === "message"))).toEqual([]);
+  });
+
   it("drops a turn that only ever held the folded message", () => {
     const first = ev({ type: "user_message", text: "also lint", queued: false });
     const second = ev({ type: "user_message", text: "and run the tests", queued: false });

@@ -24,6 +24,11 @@ pub struct Item {
     /// Stored attachments the follow-up carries (PRO-290).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub files: Vec<FileRef>,
+    /// The chat's message this follow-up was first sent as, held back when
+    /// the agent moved off an organization route (PRO-310). Delivered, that
+    /// message joins the new one, so the chat shows it once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replaces: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -275,7 +280,7 @@ impl SessionManager {
         let (images, _) = Self::archive_images(session, &images)?;
         let mut queue = rt.held_queue.clone();
         let id = uuid::Uuid::now_v7().to_string();
-        queue.items.push(Item { id: id.clone(), text, images, files });
+        queue.items.push(Item { id: id.clone(), text, images, files, replaces: None });
         if send_now { queue.next = Some(id); }
         let event = self.save_held(&mut rt, queue)?;
         drop(rt);
@@ -309,6 +314,16 @@ impl SessionManager {
         // As send_pressed does, hold sharing through admission for a shared tab.
         if prompt.author.is_none() { drop(sharing); }
         self.send_admitted(admission, session, tab, prompt, images, None, crate::recovery_log::Origin::Composer)
+    }
+
+    /// Hold `item` as it is, already archived (PRO-310), and deliver it when
+    /// nothing blocks.
+    pub(super) fn hold_item(&self, rt: &mut TabRuntime, item: Item) -> Result<()> {
+        let mut queue = rt.held_queue.clone();
+        queue.items.push(item);
+        self.save_held(rt, queue)?;
+        self.schedule_held(rt);
+        Ok(())
     }
 
     pub(super) fn schedule_held(&self, rt: &TabRuntime) {
@@ -380,7 +395,14 @@ impl SessionManager {
         queue.sending = None;
         queue.next = None;
         match outcome {
-            Ok(_) => { queue.items.retain(|held| held.id != item.id); queue.error = None; }
+            Ok(sent) => {
+                queue.items.retain(|held| held.id != item.id);
+                queue.error = None;
+                let delivered = sent.events.iter().find(|event| matches!(event.payload, Payload::UserMessage { .. })).map(|event| event.seq);
+                if let (Some(prompt_seq), Some(into_seq)) = (item.replaces, delivered) {
+                    self.publish(&mut rt, Payload::PromptJoined { prompt_seq, into_seq }, None);
+                }
+            }
             // The final send lock checks blocked() again. If earlier CLI
             // input appeared after the claim, release it and wait for the
             // next boundary, without dropping the item or pausing delivery.

@@ -300,7 +300,7 @@ fn a_held_follow_up_goes_on_the_account_switched_to() {
         let rt = rig.rt();
         let mut rt = rt.lock().unwrap();
         let mut queue = rt.held_queue.clone();
-        queue.items.push(held::Item { id: "next".into(), text: "next task".into(), images: Vec::new(), files: Vec::new() });
+        queue.items.push(held::Item { id: "next".into(), text: "next task".into(), images: Vec::new(), files: Vec::new(), replaces: None });
         rig.manager.save_held(&mut rt, queue).unwrap();
     }
     // The account fills during the turn.
@@ -318,7 +318,7 @@ fn a_held_follow_up_goes_on_the_account_switched_to() {
     let rt = rig.rt();
     let mut rt = rt.lock().unwrap();
     let mut queue = rt.held_queue.clone();
-    queue.items.push(held::Item { id: "now".into(), text: "right away".into(), images: Vec::new(), files: Vec::new() });
+    queue.items.push(held::Item { id: "now".into(), text: "right away".into(), images: Vec::new(), files: Vec::new(), replaces: None });
     queue.next = Some("now".into());
     rig.manager.save_held(&mut rt, queue).unwrap();
     assert!(!rig.manager.account_switch_holds_queue(&rt));

@@ -2757,10 +2757,12 @@ fn a_switched_native_thread_is_brought_into_the_home_it_resumes_in() {
 }
 
 /// PRO-310, the Codex stdio branch: the organization route Codex runs on
-/// goes while a turn runs. The turn finishes on it; a message the cloud
-/// mailbox gets meanwhile waits, never reaching that connection; the turn's
-/// end lets the connection go, and the message starts Codex again (on the
-/// login there is then) on the same thread. The session is told once.
+/// goes while a turn runs. The turn finishes on it. A message queued behind
+/// that turn before the removal was known is carried across: the turn's end
+/// lets the connection go, and that message starts Codex again (on the login
+/// there is then) on the same thread, once, nothing withdrawn. A message the
+/// cloud mailbox gets after the removal waits, never reaching the old
+/// connection, and follows on the new one. The session is told once.
 #[cfg(unix)]
 #[allow(clippy::too_many_arguments)]
 fn route_gone(
@@ -2776,17 +2778,21 @@ fn route_gone(
         assert!(Instant::now() < until, "Codex did not take the turn");
         std::thread::sleep(Duration::from_millis(20));
     }
+    assert!(manager.send("stdio-owner", "tab", "queued before the removal".into(), Vec::new()).unwrap().queued);
+    assert_eq!(rt.lock().unwrap().queued.len(), 1);
     manager.switch_organization_routes();
     assert!(rt.lock().unwrap().turn_open, "the running turn is left alone");
     assert!(manager.switching_route("stdio-owner", "tab"));
     let (outcome, receipt) = mailbox_send(agents, "c2", "after the removal");
     assert_eq!((outcome.as_str(), &receipt["queued"]), ("applied", &json!(true)));
     std::fs::remove_file(bin.join("hold")).unwrap();
-    settled(2);
-    assert_eq!(starts(), ["on the route", "after the removal"]);
-    assert_eq!(launches(), 2, "the message went to a new connection");
+    settled(3);
+    assert_eq!(starts(), ["on the route", "queued before the removal", "after the removal"]);
+    assert_eq!(launches(), 2, "both messages went to the new connection");
     assert_eq!(threads(), ["thread/start -", "thread/resume thread-1"]);
-    let notices: Vec<String> = store::read_lines::<AgentEvent>(&store::log_path("stdio-owner", "tab").unwrap()).unwrap().into_iter()
+    let events = store::read_lines::<AgentEvent>(&store::log_path("stdio-owner", "tab").unwrap()).unwrap();
+    assert!(!events.iter().any(|event| matches!(event.payload, Payload::PromptWithdrawn { .. })), "nothing to send again");
+    let notices: Vec<String> = events.into_iter()
         .filter_map(|event| match event.payload { Payload::Status { text, .. } if text.starts_with("The organization's") => Some(text), _ => None }).collect();
     assert_eq!(notices, ["The organization's Codex route no longer applies to this workspace. The turn that was running finished on it; Codex in this session now uses the organization's login."]);
     assert!(!manager.switching_route("stdio-owner", "tab"));

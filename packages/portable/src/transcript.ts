@@ -592,7 +592,8 @@ export class TranscriptReducer {
         if (!taken) break;
         const { prompt, from } = taken;
         this.touch(from);
-        this.changeMessage(payload.intoSeq, (into) => ({ sent: [into.sent ?? into.text, prompt.text].join("\n\n") }));
+        // A message held and delivered again as itself (PRO-310) adds nothing to what was sent.
+        this.changeMessage(payload.intoSeq, (into) => (prompt.text === (into.sent ?? into.text) ? {} : { sent: [into.sent ?? into.text, prompt.text].join("\n\n") }));
         if (!from.prompt && !from.work.length && !from.completed) {
           this.turns.splice(this.turns.indexOf(from), 1);
           this.versions.delete(from);

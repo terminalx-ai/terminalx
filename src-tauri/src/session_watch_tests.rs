@@ -4290,7 +4290,7 @@ impl Rig {
     fn route(&self, switch: Option<RouteSwitch>, hold: bool) {
         let mut stand_in = self.manager.route_stand_in.lock().unwrap();
         let taken = stand_in.take().map(|stand_in| stand_in.taken).unwrap_or_default();
-        *stand_in = Some(super::RouteStandIn { switch, record: true, hold, taken });
+        *stand_in = Some(super::RouteStandIn { switch, record: true, hold, taken, unsettled: false });
     }
 
     /// The moves recorded so far, once there are `count` of them.
@@ -4468,4 +4468,105 @@ fn a_move_that_failed_is_not_announced() {
     rig.manager.route_switch_done(&mut rig.rt.lock().unwrap(), RouteAction::Stop, false);
     assert!(rig.route_notices().is_empty());
     assert!(!rig.manager.switching_route(SESSION, TAB));
+}
+
+/// Prompts that reach Claude Code's own queue before the move: one the app
+/// typed into it before the removal was known is held with its message,
+/// which it joins once delivered, so the chat shows it once; one that came
+/// with a receipt of its own (a handoff) is withdrawn and its sender told,
+/// never sent again under the host's authority; a wakeup the CLI starts
+/// itself is held, not dropped.
+#[test]
+fn prompts_already_in_the_cli_are_held_once_or_withdrawn() {
+    let rig = Rig::new();
+    rig.save_entry();
+    rig.start_turn();
+    let message = |rig: &Rig, text: &str| {
+        let mut rt = rig.rt.lock().unwrap();
+        let event = rig.manager.publish(&mut rt, Payload::UserMessage { author: None, bot: None, text: text.into(), images: Vec::new(), files: Vec::new(), baseline: None, queued: true, cwd: None }, None);
+        event.seq
+    };
+    let (typed, handoff) = (message(&rig, "typed before the removal"), message(&rig, "a handoff"));
+    let (sent, told) = std::sync::mpsc::channel();
+    {
+        let mut rt = rig.rt.lock().unwrap();
+        let Engine::Cli(cli) = &mut rt.engine else { panic!("a CLI tab") };
+        cli.echoed.push_back(ComposerEcho { queued: true, submitted: true, seq: typed, ..ComposerEcho::new("typed before the removal".into(), 0) });
+        cli.echoed.push_back(ComposerEcho { queued: true, submitted: true, seq: handoff, receipt: Some(sent), ..ComposerEcho::new("a handoff".into(), 0) });
+    }
+    rig.route(Some(RouteSwitch::Login(Replacement::OrganizationLogin)), true);
+    rig.manager.switch_organization_routes();
+    rig.end_turn_in_transcript();
+    rig.advance(PATIENCE.settle);
+    rig.tick();
+    assert_eq!(rig.moves(1).len(), 1);
+    let submit = |prompt: &str, source: &str| rig.manager.on_hook(HookFrame { tab: TAB.into(), session: SESSION.into(), token: rig.token.clone(), event: "UserPromptSubmit".into(), payload: json!({ "prompt": prompt, "source": source }) });
+    for (prompt, source) in [("typed before the removal", "user"), ("a handoff", "user"), ("check the build again", "loop_wakeup")] {
+        assert_eq!(submit(prompt, source).output.as_ref().unwrap()["decision"], "block", "{prompt}");
+    }
+    assert!(!rig.turn_open(), "no turn runs on the old route");
+    let held: Vec<(String, Option<u64>)> = rig.rt.lock().unwrap().held_queue.items.iter().map(|item| (item.text.clone(), item.replaces)).collect();
+    assert_eq!(held, [("typed before the removal".to_string(), Some(typed)), ("check the build again".to_string(), None)]);
+    assert!(told.try_recv().unwrap().is_err(), "the handoff's sender is told it did not go");
+    assert!(rig.events().iter().any(|event| matches!(event.payload, Payload::PromptWithdrawn { prompt_seq, .. } if prompt_seq == handoff)));
+    assert!(!rig.events().iter().any(|event| matches!(event.payload, Payload::PromptWithdrawn { prompt_seq, .. } if prompt_seq == typed)));
+    let rt = rig.rt.lock().unwrap();
+    let Engine::Cli(cli) = &rt.engine else { panic!("a CLI tab") };
+    assert!(cli.echoed.is_empty(), "neither is awaited from the old CLI any more");
+}
+
+/// A sync that failed says nothing of the route: a tab marked to move keeps
+/// its mark (and stays busy) until a sync that gets through answers; the
+/// route applying again then clears it.
+#[test]
+fn a_failed_sync_keeps_the_mark_until_one_answers() {
+    let rig = Rig::new();
+    rig.start_turn();
+    rig.route(Some(RouteSwitch::SignIn), false);
+    rig.manager.switch_organization_routes();
+    assert!(rig.manager.switching_route(SESSION, TAB));
+    rig.route(None, false);
+    rig.manager.route_stand_in.lock().unwrap().as_mut().unwrap().unsettled = true;
+    rig.end_turn_in_transcript();
+    rig.advance(PATIENCE.settle);
+    rig.tick();
+    rig.manager.switch_organization_routes();
+    assert!(rig.manager.switching_route(SESSION, TAB), "no answer is not the route back");
+    assert!(rig.moves(0).is_empty());
+    rig.manager.route_stand_in.lock().unwrap().as_mut().unwrap().unsettled = false;
+    rig.manager.switch_organization_routes();
+    assert!(!rig.manager.switching_route(SESSION, TAB), "the route applies again");
+    assert!(rig.moves(0).is_empty() && rig.route_notices().is_empty());
+}
+
+/// A settings restart already under way when the move runs starts the CLI
+/// again on the login there is now: the move counts as done and is told.
+/// A move that did not happen sends what was held to the agent still there.
+#[test]
+fn a_restart_under_way_moves_the_agent_and_a_failed_move_lets_held_go() {
+    let rig = Rig::new();
+    rig.route(Some(RouteSwitch::Login(Replacement::OwnRoute)), false);
+    let tail = {
+        let mut rt = rig.rt.lock().unwrap();
+        assert_eq!(rig.manager.route_switch_now(&mut rt), Some(RouteAction::Restart));
+        let Engine::Cli(cli) = &rt.engine else { panic!("a CLI tab") };
+        let tail = cli.tail.clone();
+        rt.restart_claim = Some(tail.clone());
+        tail
+    };
+    assert!(rig.manager.move_cli_off_route(&rig.rt, &tail, RouteAction::Restart));
+    rig.manager.route_switch_done(&mut rig.rt.lock().unwrap(), RouteAction::Restart, true);
+    assert_eq!(rig.route_notices(), [OWN_ROUTE]);
+    drop(rig);
+
+    let rig = Rig::new();
+    rig.save_entry();
+    rig.route(Some(RouteSwitch::SignIn), true);
+    rig.manager.switch_organization_routes();
+    assert_eq!(rig.moves(1).len(), 1);
+    assert!(rig.manager.send(SESSION, TAB, "while it moves".into(), Vec::new()).unwrap().queued);
+    rig.manager.route_switch_done(&mut rig.rt.lock().unwrap(), RouteAction::Stop, false);
+    let rt = rig.rt.lock().unwrap();
+    assert!(!rt.switching_route());
+    assert!(rt.held_queue.blocked(&rt).is_none(), "nothing holds it back from the agent still there");
 }

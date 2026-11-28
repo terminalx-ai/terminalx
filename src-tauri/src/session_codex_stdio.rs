@@ -469,6 +469,35 @@ impl SessionManager {
         self.apply_codex_actions(rt, actions)
     }
 
+    /// The first follow-up carried across a move off an organization route
+    /// (PRO-310) starts Codex again, on the same thread, under the login
+    /// there is now; the rest wait for its turn's end as before.
+    fn deliver_carried_followup(&self, rt: &mut TabRuntime, rt_arc: &Arc<Mutex<TabRuntime>>) -> Result<()> {
+        self.accepting_work()?;
+        let entry = index::get(&rt.session_id)?;
+        let tab = entry.tab(&rt.tab_id).context("tab not found")?.clone();
+        Stdio::validate_mode(&tab.permission_mode)?;
+        self.reclaim_ended_codex_stdio(rt);
+        anyhow::ensure!(matches!(rt.engine, Engine::None) && rt.child.is_none(), "Another engine owns this tab");
+        let _origin = crate::data_privacy::delivery_scope(None)?;
+        self.start_codex_stdio(rt, rt_arc, &entry, &tab)?;
+        // Claimed once the connection is starting: a failure before this
+        // leaves it queued, for the caller to withdraw with the rest.
+        let pending = rt.queued.remove(0);
+        rt.stdio_followups.active = Some((pending.seq, false));
+        rt.stdio_authority = rt.stdio_followups.authorities.remove(&pending.seq);
+        let Engine::CodexStdio(engine) = &mut rt.engine else { bail!("Codex owner was replaced") };
+        let actions = engine.start(pending.message.text, pending.message.images)?;
+        rt.open_turn();
+        rt.turn_started_at = Some(Instant::now());
+        self.set_status(rt, TabStatus::InProgress);
+        if let Err(error) = self.apply_codex_actions(rt, actions) {
+            self.codex_stdio_failed(rt, &error, None);
+            return Err(error);
+        }
+        Ok(())
+    }
+
     /// Retain all text in the event log with a retry action. A request whose
     /// acknowledgement was lost is never automatically replayed.
     pub(super) fn withdraw_codex_followups(&self, rt: &mut TabRuntime) {
@@ -1075,10 +1104,32 @@ impl SessionManager {
             self.route_switch_done(&mut rt, RouteAction::Retire, false);
             return;
         }
+        // A move off an organization route (PRO-310) keeps what was queued
+        // behind the last turn: it goes to the new connection, once, rather
+        // than being withdrawn with this one.
+        let carried = {
+            let mut rt = rt_arc.lock().unwrap();
+            if rt.route_notice.is_some() {
+                (std::mem::take(&mut rt.queued), std::mem::take(&mut rt.stdio_followups.authorities))
+            } else {
+                Default::default()
+            }
+        };
         let retired = self.end_codex_stdio(rt_arc, false, true);
         let status = {
             let mut rt = rt_arc.lock().unwrap();
             forget(&mut rt);
+            let (queued, authorities) = carried;
+            if !queued.is_empty() {
+                rt.queued = queued;
+                rt.stdio_followups.authorities = authorities;
+                if retired.is_err() {
+                    self.withdraw_codex_followups(&mut rt);
+                } else if let Err(error) = self.deliver_carried_followup(&mut rt, rt_arc) {
+                    log::warn!("[{}] send what was queued to the new Codex connection: {error:#}", key_of(&session, &tab));
+                    self.withdraw_codex_followups(&mut rt);
+                }
+            }
             self.route_switch_done(&mut rt, RouteAction::Retire, retired.is_ok());
             rt.status
         };
