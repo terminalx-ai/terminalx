@@ -1856,7 +1856,7 @@ impl WorkspaceRpc {
         if !self.is_machine() {
             let _ = self.desktop.get_or_init(|| super::cloud_desktop::shared_pool_in(self.desktop_workdir()));
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(all(target_os = "linux", not(test)))]
         crate::cloud_browser::install_runtime(tokio::runtime::Handle::current());
         let weak = Arc::downgrade(self);
         let mut changes = crate::cloud_browser::subscribe();
