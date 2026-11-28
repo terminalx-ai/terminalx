@@ -315,7 +315,7 @@ describe("delivery", () => {
       const { local } = await modules();
       await local.restoreLocalNotifications(state.connection, "mac");
       expect(fake.scheduled.map((request) => request.trigger)).toEqual([{ channelId: "alerts" }]);
-      expect(fake.channels.sort()).toEqual(["alerts", "quiet"]);
+      expect(fake.channels.sort()).toEqual(["alerts", "quiet", "terminalx_session_alerts"]);
     } finally {
       fake.os = "ios";
     }

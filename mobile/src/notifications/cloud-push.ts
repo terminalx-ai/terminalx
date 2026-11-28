@@ -161,6 +161,13 @@ export async function syncCloudPushRegistration(options: {
     )().catch(() => "denied" as const);
     if (epoch !== syncEpoch || permission !== "granted") return false;
 
+    if (platform === "android") {
+      await import("./android-channels")
+        .then((mod) => mod.ensureAndroidNotificationChannels())
+        .catch(() => undefined);
+      if (epoch !== syncEpoch) return false;
+    }
+
     let pushToken = options.tokenOverride?.trim() || null;
     if (!pushToken) {
       if (options.getDevicePushToken) {

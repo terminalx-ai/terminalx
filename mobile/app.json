@@ -13,7 +13,10 @@
       "buildNumber": "4",
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false,
-        "NSLocalNetworkUsageDescription": "TerminalX connects directly to a computer you choose to pair."
+        "NSLocalNetworkUsageDescription": "TerminalX connects directly to a computer you choose to pair.",
+        "UIBackgroundModes": [
+          "remote-notification"
+        ]
       }
     },
     "android": {

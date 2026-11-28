@@ -231,7 +231,7 @@ impl Phones {
         cleanup.known.extend(DeviceRegistry.list()?.into_iter().map(|device| device.id));
         cleanup.save()?;
         let pending_revocations = cleanup.pending.iter().cloned().map(|id| (id, None)).collect();
-        Ok(Arc::new(Self {
+        let phones = Arc::new(Self {
             host,
             sessions,
             lifetime,
@@ -247,7 +247,48 @@ impl Phones {
             changed: Box::new(changed),
             relay: Mutex::new(None),
             stopped: watch::channel(0).0,
-        }))
+        });
+        let (push_tx, push_rx) =
+            std::sync::mpsc::sync_channel::<crate::phone::cloud_push::CloudPushEvent>(32);
+        let push_phones = Arc::downgrade(&phones);
+        let _ = std::thread::Builder::new()
+            .name("headless-cloud-push-worker".into())
+            .spawn(move || {
+                while let Ok(event) = push_rx.recv() {
+                    let Some(phones) = push_phones.upgrade() else { break };
+                    let Some(relay_host_id) = phones
+                        .relay
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .and_then(Weak::upgrade)
+                        .and_then(|relay| relay.registration())
+                        .map(|reg| reg.relay_host_id)
+                    else {
+                        continue;
+                    };
+                    let Ok(data_dir) = crate::store::root() else { continue };
+                    let Ok(Some(session)) = crate::machine_account::load(&data_dir) else {
+                        continue;
+                    };
+                    let host_label = crate::machine_name::computer_name();
+                    let payload = crate::phone::cloud_push::build_push_payload(
+                        &relay_host_id,
+                        host_label.as_deref(),
+                        &event,
+                    );
+                    let api_base_url = crate::machine_account::api_base_url();
+                    let _ = crate::phone::cloud_push::send_push_notify(
+                        &api_base_url,
+                        &session.access_token,
+                        &payload,
+                    );
+                }
+            });
+        phones.host.mobile.attach_cloud_push(Arc::new(move |event| {
+            let _ = push_tx.try_send(event);
+        }));
+        Ok(phones)
     }
 
     pub(super) fn watch_account_revocations(&self) -> Arc<super::phone_revocations::Authority> {
