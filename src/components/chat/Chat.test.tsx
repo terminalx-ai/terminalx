@@ -450,7 +450,10 @@ describe("chat scroll follow", () => {
     const shownTop = content.querySelector<HTMLElement>(`[data-turn="${far}"]`)!.getBoundingClientRect().top;
     expect(shownTop).toBeGreaterThanOrEqual(0);
     expect(shownTop).toBeLessThan(VIEWPORT);
-    await act(async () => {}); // MutationObserver paints the newly mounted row.
+    await act(async () => {
+      await Promise.resolve();
+      await new Promise((resolve) => requestAnimationFrame(() => resolve(undefined)));
+    }); // MutationObserver schedules rAF paint for the newly mounted row (P-74).
     const selected = () => [...highlights.entries()].find(([name]) => name.endsWith("-active"))![1];
     expect([...selected()].map((range) => range.toString())).toEqual(["elusive file"]);
     fireEvent.keyDown(field, { key: "g", ctrlKey: true });

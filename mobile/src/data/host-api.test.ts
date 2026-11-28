@@ -3,6 +3,15 @@ import type { HostConnection } from "../transport/connection";
 import { HostApi } from "./host-api";
 
 vi.mock("expo-crypto", () => ({ randomUUID: () => "client-id" }));
+vi.mock("expo-secure-store", () => {
+  const store = new Map<string, string>();
+  return {
+    WHEN_UNLOCKED_THIS_DEVICE_ONLY: 5,
+    getItemAsync: async (key: string) => store.get(key) ?? null,
+    setItemAsync: async (key: string, value: string) => { store.set(key, value); },
+    deleteItemAsync: async (key: string) => { store.delete(key); },
+  };
+});
 vi.mock("@react-native-async-storage/async-storage", () => ({
   default: { getItem: vi.fn(), setItem: vi.fn(), removeItem: vi.fn() },
 }));

@@ -4,6 +4,16 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("react-native", () => ({ Platform: { OS: "ios" } }));
+vi.mock("expo-crypto", () => ({ randomUUID: () => "test-uuid" }));
+vi.mock("expo-secure-store", () => {
+  const store = new Map<string, string>();
+  return {
+    WHEN_UNLOCKED_THIS_DEVICE_ONLY: 5,
+    getItemAsync: async (key: string) => store.get(key) ?? null,
+    setItemAsync: async (key: string, value: string) => { store.set(key, value); },
+    deleteItemAsync: async (key: string) => { store.delete(key); },
+  };
+});
 
 import { CloudApi } from "../cloud/api";
 import { registerCloudPushToken, unregisterCloudPushToken } from "../notifications/cloud-push";

@@ -18,55 +18,10 @@ afterEach(() => {
   confirmMock.confirmInApp.mockResolvedValue(true);
 });
 
-describe("Wave 4 security config & capability invariants (S-35, S-43, S-44, S-45, S-56)", () => {
-  it("points all desktop updater endpoints to terminalx-ai/terminalx (S-35)", () => {
-    for (const rel of [
-      "src-tauri/tauri.conf.json",
-      "src-tauri/tauri.linux.conf.json",
-      "src-tauri/tauri.windows.conf.json",
-    ]) {
-      const cfg = JSON.parse(fs.readFileSync(path.join(rootDir, rel), "utf8"));
-      const endpoints: string[] = cfg.plugins.updater.endpoints;
-      expect(endpoints.length).toBeGreaterThan(0);
-      for (const ep of endpoints) {
-        expect(ep).toContain("https://github.com/terminalx-ai/terminalx/releases/latest/download/");
-        expect(ep).not.toContain("terminalx-ai/raccoon");
-      }
-    }
-  });
-
-  it("restricts x-apple.systempreferences scope and removes tauri-plugin-shell completely (S-43, S-44)", () => {
-    const defCap = JSON.parse(fs.readFileSync(path.join(rootDir, "src-tauri/capabilities/default.json"), "utf8"));
-    const flatPerms = JSON.stringify(defCap.permissions);
-    expect(flatPerms).not.toContain("shell:allow-open");
-    expect(flatPerms).not.toContain("x-apple.systempreferences:*");
-    expect(flatPerms).toContain("x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone");
-    expect(flatPerms).toContain("x-apple.systempreferences:com.apple.preference.security?Privacy_SpeechRecognition");
-    expect(flatPerms).toContain("x-apple.systempreferences:com.apple.Notifications-Settings.extension");
-
+describe("Wave 4 frontend package & dev-gate invariants (S-44, S-56)", () => {
+  it("removes @tauri-apps/plugin-shell from package.json (S-44)", () => {
     const pkg = JSON.parse(fs.readFileSync(path.join(rootDir, "package.json"), "utf8"));
     expect(pkg.dependencies["@tauri-apps/plugin-shell"]).toBeUndefined();
-    const cargo = fs.readFileSync(path.join(rootDir, "src-tauri/Cargo.toml"), "utf8");
-    expect(cargo).not.toContain("tauri-plugin-shell");
-    const libRs = fs.readFileSync(path.join(rootDir, "src-tauri/src/lib.rs"), "utf8");
-    expect(libRs).not.toContain("tauri_plugin_shell");
-  });
-
-  it("hardens CSP, clears static $HOME/.raccoon/attachments scope, and narrows floating.json (S-45, S-56)", () => {
-    const tauri = JSON.parse(fs.readFileSync(path.join(rootDir, "src-tauri/tauri.conf.json"), "utf8"));
-    const csp: string = tauri.app.security.csp;
-    expect(csp).toContain("frame-src 'none'");
-    expect(csp).not.toMatch(/img-src[^;]*\shttps:(?!\/\/)/);
-    expect(tauri.app.security.assetProtocol.scope).toEqual([]);
-
-    const floating = JSON.parse(fs.readFileSync(path.join(rootDir, "src-tauri/capabilities/floating.json"), "utf8"));
-    const perms = floating.permissions as unknown[];
-    expect(perms).not.toContain("opener:default");
-    expect(perms).not.toContain("dialog:default");
-    expect(perms).not.toContain("shell:allow-open");
-    expect(perms).toContain("dialog:allow-message");
-    expect(perms).toContain("dialog:allow-open");
-    expect(perms).toContain("dialog:allow-ask");
   });
 
   it("gates terminalBench & window.__TERMINALX_PERF__ behind import.meta.env.DEV (S-56)", () => {

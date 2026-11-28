@@ -681,11 +681,11 @@ mod tests {
         std::fs::write(&allowed_file, b"hello").unwrap();
         std::fs::write(&secret_file, b"PRIVATE KEY").unwrap();
 
-        let stored = store_in_roots("s1", &[at("notes.txt", &allowed_file)], &[ws_root.clone()]).unwrap();
+        let stored = store_in_roots("s1", &[at("notes.txt", &allowed_file)], std::slice::from_ref(&ws_root)).unwrap();
         assert_eq!(stored.len(), 1);
         assert_eq!(std::fs::read(&stored[0].path).unwrap(), b"hello");
 
-        assert!(store_in_roots("s1", &[at("id_rsa", &secret_file)], &[ws_root.clone()]).is_err());
+        assert!(store_in_roots("s1", &[at("id_rsa", &secret_file)], std::slice::from_ref(&ws_root)).is_err());
 
         #[cfg(unix)]
         {

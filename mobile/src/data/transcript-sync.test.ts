@@ -10,6 +10,15 @@ import { startPrefetch } from "./prefetch";
 
 const storage = vi.hoisted(() => new Map<string, string>());
 vi.mock("expo-crypto", () => ({ randomUUID: () => "client" }));
+vi.mock("expo-secure-store", () => {
+  const store = new Map<string, string>();
+  return {
+    WHEN_UNLOCKED_THIS_DEVICE_ONLY: 5,
+    getItemAsync: async (key: string) => store.get(key) ?? null,
+    setItemAsync: async (key: string, value: string) => { store.set(key, value); },
+    deleteItemAsync: async (key: string) => { store.delete(key); },
+  };
+});
 vi.mock("@react-native-async-storage/async-storage", () => ({ default: {
   getItem: async (key: string) => storage.get(key) ?? null,
   setItem: async (key: string, value: string) => { storage.set(key, value); },

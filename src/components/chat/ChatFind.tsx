@@ -87,7 +87,9 @@ export function useChatFind({ root, scroller, transcript, footerHeight }: {
     const readerKey = (event: KeyboardEvent) => {
       if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(event.key)) stopFollowing();
     };
+    let disposed = false;
     const paint = () => {
+      if (disposed) return;
       const all: Range[] = [];
       let chosen: Range | undefined;
       for (const field of chat.querySelectorAll<HTMLElement>("[data-chat-search]")) {
@@ -96,7 +98,7 @@ export function useChatFind({ root, scroller, transcript, footerHeight }: {
         all.push(...ranges);
         if (field.id === activeId) chosen = ranges[occurrence ?? 0];
       }
-      if (native) {
+      if (native && typeof Highlight !== "undefined" && typeof CSS !== "undefined" && CSS.highlights) {
         CSS.highlights.set(name, new Highlight(...all));
         const highlight = new Highlight(...(chosen ? [chosen] : []));
         highlight.priority = 1;
@@ -134,6 +136,7 @@ export function useChatFind({ root, scroller, transcript, footerHeight }: {
       window.addEventListener("resize", schedulePaint);
     }
     return () => {
+      disposed = true;
       if (rafId !== null) cancelAnimationFrame(rafId);
       observer.disconnect();
       chat.removeEventListener("wheel", stopFollowing);

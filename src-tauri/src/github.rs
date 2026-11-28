@@ -274,11 +274,22 @@ fn enrich_panel_pr_concurrent(pr: &mut PullRequest) {
     pr.auto_merge_enabled = false;
     if pr.state != "OPEN" { return; }
     let url = pr.url.clone();
+    let ticket = crate::github_process::ticket();
     let result = (|| -> Result<()> {
         let (host, query) = queue_query(&url)?;
         let (required, queue_out) = std::thread::scope(|scope| {
-            let req_handle = scope.spawn(|| run_output(&outside_checkouts(), &["pr", "checks", &url, "--required", "--json", "name"]));
-            let q_handle = scope.spawn(|| run_output(&outside_checkouts(), &["api", "graphql", "--hostname", &host, "-f", &query]));
+            let req_ticket = ticket.clone();
+            let q_ticket = ticket.clone();
+            let req_handle = scope.spawn(move || {
+                crate::github_process::with_ticket(req_ticket, || {
+                    run_output(&outside_checkouts(), &["pr", "checks", &url, "--required", "--json", "name"])
+                })
+            });
+            let q_handle = scope.spawn(move || {
+                crate::github_process::with_ticket(q_ticket, || {
+                    run_output(&outside_checkouts(), &["api", "graphql", "--hostname", &host, "-f", &query])
+                })
+            });
             (
                 req_handle.join().unwrap_or_else(|_| Err(anyhow::anyhow!("required checks thread panicked"))),
                 q_handle.join().unwrap_or_else(|_| Err(anyhow::anyhow!("queue query thread panicked"))),
@@ -296,6 +307,7 @@ fn enrich_panel_pr_concurrent(pr: &mut PullRequest) {
 
 pub fn panel_prs_for_branch(cwd: &Path, branch: &str) -> Result<Vec<PullRequest>> {
     let _request = crate::github_process::scope();
+    let ticket = crate::github_process::ticket();
     let mut prs = prs_for_branch(cwd, branch)?;
     if prs.len() <= 1 {
         for pr in &mut prs { enrich_panel_pr_concurrent(pr); }
@@ -303,7 +315,8 @@ pub fn panel_prs_for_branch(cwd: &Path, branch: &str) -> Result<Vec<PullRequest>
         std::thread::scope(|scope| {
             for pr in &mut prs {
                 if pr.state == "OPEN" {
-                    scope.spawn(move || enrich_panel_pr_concurrent(pr));
+                    let ticket = ticket.clone();
+                    scope.spawn(move || crate::github_process::with_ticket(ticket, || enrich_panel_pr_concurrent(pr)));
                 } else {
                     enrich_panel_pr_concurrent(pr);
                 }
@@ -866,9 +879,24 @@ fn pr_snapshot_concurrent(
         bail!("GitHub did not say which commit pull request #{number} is at.");
     }
     if snapshot.state == "OPEN" && !snapshot.checks_unread {
+        let ticket = crate::github_process::ticket();
+        let run_output_ref = &run_output_fn;
+        let run_ref = &run_fn;
+        let snapshot_ref = &snapshot;
+        let n_ref = n.as_str();
         let (required_res, evidence_res) = std::thread::scope(|scope| {
-            let req = scope.spawn(|| run_output_fn(cwd, &["pr", "checks", &n, "--required", "--json", "name"]));
-            let ev = scope.spawn(|| validation_concurrent(cwd, &snapshot, &run_fn));
+            let req_ticket = ticket.clone();
+            let ev_ticket = ticket.clone();
+            let req = scope.spawn(move || {
+                crate::github_process::with_ticket(req_ticket, || {
+                    run_output_ref(cwd, &["pr", "checks", n_ref, "--required", "--json", "name"])
+                })
+            });
+            let ev = scope.spawn(move || {
+                crate::github_process::with_ticket(ev_ticket, || {
+                    validation_concurrent(cwd, snapshot_ref, run_ref)
+                })
+            });
             (
                 req.join().unwrap_or_else(|_| Err(anyhow::anyhow!("required checks thread panicked"))),
                 ev.join().unwrap_or_else(|_| Err(anyhow::anyhow!("validation thread panicked"))),
@@ -933,12 +961,21 @@ fn validation_concurrent(cwd: &Path, pr: &PrSnapshot, run_fn: &(impl Fn(&Path, &
     let child_path = format!("repos/{repo}/commits/{}/check-runs?filter=latest&per_page=100", pr.head_sha);
     let status_path = format!("repos/{repo}/commits/{}/status?per_page=100", pr.head_sha);
 
+    let ticket = crate::github_process::ticket();
     let read_wave = || -> Result<ValidationWave> {
+        let wf_path = workflow_path.as_str();
+        let su_path = suite_path.as_str();
+        let ch_path = child_path.as_str();
+        let st_path = status_path.as_str();
         let (wf, su, ch, st) = std::thread::scope(|scope| {
-            let h1 = scope.spawn(|| read_paginated_validation(cwd, &workflow_path, "workflow_runs", run_fn));
-            let h2 = scope.spawn(|| read_paginated_validation(cwd, &suite_path, "check_suites", run_fn));
-            let h3 = scope.spawn(|| read_paginated_validation(cwd, &child_path, "check_runs", run_fn));
-            let h4 = scope.spawn(|| read_paginated_validation(cwd, &status_path, "statuses", run_fn));
+            let t1 = ticket.clone();
+            let t2 = ticket.clone();
+            let t3 = ticket.clone();
+            let t4 = ticket.clone();
+            let h1 = scope.spawn(move || crate::github_process::with_ticket(t1, || read_paginated_validation(cwd, wf_path, "workflow_runs", run_fn)));
+            let h2 = scope.spawn(move || crate::github_process::with_ticket(t2, || read_paginated_validation(cwd, su_path, "check_suites", run_fn)));
+            let h3 = scope.spawn(move || crate::github_process::with_ticket(t3, || read_paginated_validation(cwd, ch_path, "check_runs", run_fn)));
+            let h4 = scope.spawn(move || crate::github_process::with_ticket(t4, || read_paginated_validation(cwd, st_path, "statuses", run_fn)));
             (
                 h1.join().unwrap_or_else(|_| Err(anyhow::anyhow!("workflow validation thread panicked"))),
                 h2.join().unwrap_or_else(|_| Err(anyhow::anyhow!("suite validation thread panicked"))),
@@ -970,11 +1007,14 @@ fn validation_concurrent(cwd: &Path, pr: &PrSnapshot, run_fn: &(impl Fn(&Path, &
         std::thread::scope(|scope| {
             let handles: Vec<_> = failed_workflows.iter().map(|workflow| {
                 let repo = repo.as_str();
+                let t = ticket.clone();
                 scope.spawn(move || {
-                    let id = workflow["id"].as_u64().context("GitHub omitted workflow identity")?;
-                    let attempt = workflow["run_attempt"].as_u64().context("GitHub omitted the workflow attempt")?;
-                    let jobs = read_paginated_validation(cwd, &format!("repos/{repo}/actions/runs/{id}/attempts/{attempt}/jobs?per_page=100"), "jobs", run_fn)?;
-                    Ok((id, attempt, workflow["check_suite_id"].as_u64(), jobs))
+                    crate::github_process::with_ticket(t, || {
+                        let id = workflow["id"].as_u64().context("GitHub omitted workflow identity")?;
+                        let attempt = workflow["run_attempt"].as_u64().context("GitHub omitted the workflow attempt")?;
+                        let jobs = read_paginated_validation(cwd, &format!("repos/{repo}/actions/runs/{id}/attempts/{attempt}/jobs?per_page=100"), "jobs", run_fn)?;
+                        Ok((id, attempt, workflow["check_suite_id"].as_u64(), jobs))
+                    })
                 })
             }).collect();
             handles.into_iter().map(|h| h.join().unwrap_or_else(|_| Err(anyhow::anyhow!("workflow jobs thread panicked")))).collect()

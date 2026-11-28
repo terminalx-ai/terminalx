@@ -154,6 +154,8 @@ case "${0##*/}" in
    printf "Hi privacy-reader! You've successfully authenticated.\n" >&2; exit 1 ;;
 esac
 case "$*" in
+ 'repo view '*) printf '{"owner":{"login":"privacy"},"name":"fixture","url":"https://github.com/privacy/fixture"}\n'; exit 0 ;;
+ *'b0:pullRequests('*'r0:pullRequests('*) printf '{"data":{"repository":{"b0":{"nodes":[{"number":7,"title":"Privacy fixture","state":"OPEN","isDraft":false,"headRefOid":"head","baseRefName":"develop","url":"https://github.com/privacy/fixture/pull/7","isCrossRepository":false}]},"r0":{"nodes":[]}}}}\n'; exit 0 ;;
  *'query=query($owner:'*) printf '{"data":{"repository":{"pullRequest":{"url":"https://github.com/privacy/fixture/pull/7","headRefOid":"head","baseRefOid":"base","reviewThreads":{"nodes":[],"pageInfo":{"hasNextPage":false}}}}}}\n'; exit 0 ;;
  *'query=query($id:'*) printf '{"data":{"node":{"id":"thread","pullRequest":{"url":"https://github.com/privacy/fixture/pull/7"}}}}\n'; exit 0 ;;
  *'resolveReviewThread(input:'*) printf '{"data":{"resolveReviewThread":{"thread":{"id":"thread","isResolved":true}}}}\n'; exit 0 ;;
@@ -201,7 +203,7 @@ esac
     // verbs are observed substitutes, so metadata assertions exercise Git too.
     let git = bin.join("git");
     std::fs::write(&git, r#"#!/bin/sh
-if [ "$1" = cat-file ] && [ -f "$TERMINALX_HOME/media-cat-hold" ]; then
+if [ \( "$1" = cat-file -o "$1" = ls-tree \) ] && [ -f "$TERMINALX_HOME/media-cat-hold" ]; then
  printf '%s %s\n' "$$" "${GIT_NO_LAZY_FETCH:-unset}" > "$TERMINALX_HOME/media-cat-entered"
  while [ -f "$TERMINALX_HOME/media-cat-hold" ]; do /bin/sleep 0.01; done
 fi

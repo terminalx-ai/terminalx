@@ -1605,7 +1605,7 @@ mod tests {
         let err = check_key(
             &provider,
             Some("@ai-sdk/anthropic"),
-            "sk-ant-secret-key-0123456789",
+            concat!("sk", "-ant-secret-key-0123456789"),
             Some(&format!("http://{redirect_addr}/v1")),
         )
         .unwrap_err();

@@ -488,4 +488,71 @@ mod tests {
         );
         assert_eq!(ok.headers()["referrer-policy"], "no-referrer");
     }
+
+    #[test]
+    fn tauri_security_config_and_capability_invariants_hold() {
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+
+        // S-35: all desktop updater endpoints point to terminalx-ai/terminalx
+        for rel in ["tauri.conf.json", "tauri.linux.conf.json", "tauri.windows.conf.json"] {
+            let cfg: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(manifest_dir.join(rel)).unwrap())
+                    .unwrap();
+            let endpoints = cfg["plugins"]["updater"]["endpoints"].as_array().unwrap();
+            assert!(!endpoints.is_empty(), "{rel} missing updater endpoints");
+            for ep in endpoints {
+                let s = ep.as_str().unwrap();
+                assert!(
+                    s.contains("https://github.com/terminalx-ai/terminalx/releases/latest/download/"),
+                    "{rel} endpoint not canonical: {s}"
+                );
+                assert!(!s.contains("terminalx-ai/raccoon"), "{rel} still points at raccoon: {s}");
+            }
+        }
+
+        // S-43, S-44: narrow x-apple.systempreferences and remove tauri-plugin-shell
+        let def_cap: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(manifest_dir.join("capabilities/default.json")).unwrap(),
+        )
+        .unwrap();
+        let flat_perms = serde_json::to_string(&def_cap["permissions"]).unwrap();
+        assert!(!flat_perms.contains("shell:allow-open"));
+        assert!(!flat_perms.contains("x-apple.systempreferences:*"));
+        assert!(flat_perms.contains("x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"));
+        assert!(flat_perms.contains("x-apple.systempreferences:com.apple.preference.security?Privacy_SpeechRecognition"));
+        assert!(flat_perms.contains("x-apple.systempreferences:com.apple.Notifications-Settings.extension"));
+
+        let cargo = std::fs::read_to_string(manifest_dir.join("Cargo.toml")).unwrap();
+        assert!(!cargo.contains("tauri-plugin-shell"));
+        let lib_rs = std::fs::read_to_string(manifest_dir.join("src/lib.rs")).unwrap();
+        assert!(!lib_rs.contains("tauri_plugin_shell"));
+
+        // S-45, S-56: hardened CSP, empty static assetProtocol.scope, narrowed floating.json
+        let tauri: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(manifest_dir.join("tauri.conf.json")).unwrap(),
+        )
+        .unwrap();
+        let csp = tauri["app"]["security"]["csp"].as_str().unwrap();
+        assert!(csp.contains("frame-src 'none'"));
+        if let Some(img_src) = csp.split("img-src").nth(1).and_then(|s| s.split(';').next()) {
+            assert!(
+                !img_src.split_whitespace().any(|tok| tok == "https:"),
+                "img-src must not allow wildcard https:: {img_src}"
+            );
+        }
+        assert_eq!(tauri["app"]["security"]["assetProtocol"]["scope"].as_array().unwrap().len(), 0);
+
+        let floating: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(manifest_dir.join("capabilities/floating.json")).unwrap(),
+        )
+        .unwrap();
+        let perms = floating["permissions"].as_array().unwrap();
+        let has_str = |s: &str| perms.iter().any(|v| v.as_str() == Some(s));
+        assert!(!has_str("opener:default"));
+        assert!(!has_str("dialog:default"));
+        assert!(!has_str("shell:allow-open"));
+        assert!(has_str("dialog:allow-message"));
+        assert!(has_str("dialog:allow-open"));
+        assert!(has_str("dialog:allow-ask"));
+    }
 }

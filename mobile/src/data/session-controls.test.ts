@@ -6,6 +6,15 @@ import { RelayOuterError } from "../transport/relay-client";
 import { continueHere, continueInNewTab, recoveryState, resendLast, resumeLogDetail, retrySafely, settingsView } from "./session-controls";
 
 vi.mock("expo-crypto", () => ({ randomUUID: () => "client-id" }));
+vi.mock("expo-secure-store", () => {
+  const store = new Map<string, string>();
+  return {
+    WHEN_UNLOCKED_THIS_DEVICE_ONLY: 5,
+    getItemAsync: async (key: string) => store.get(key) ?? null,
+    setItemAsync: async (key: string, value: string) => { store.set(key, value); },
+    deleteItemAsync: async (key: string) => { store.delete(key); },
+  };
+});
 
 const ok = (value: unknown = null) => ({ ok: true, value });
 const refused = (message: string) => ({ ok: false, refusal: { code: "refused", message } });
