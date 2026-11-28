@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Keyboard, KeyboardAvoidingView, Modal, Platform, Pressable, StyleSheet, Text, View } from "react-native";
+import { Keyboard, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { WifiOff } from "lucide-react-native";
 import { BYPASS_NOT_FROM_PHONE, phoneModes } from "@mobile/cloud/agent-settings";
@@ -148,26 +148,29 @@ export function StartAgentSheet({ kind, session, snapshot, sessionId, from, text
     const close = () => setPicker(null);
     if (picker === "agent") {
       const list: Choice[] = agents.map((entry) => ({ id: entry.id, label: entry.name, detail: entry.detail ?? undefined, disabled: !!entry.blocked }));
-      return <ChoiceSheet title="Agent" subtitle={START_WORDS.agentsSubtitle} choices={list} chosen={choices.agent} onChoose={(id) => setChoices(chooseAgent(agents, choices, id))} onClose={close} />;
+      return <ChoiceSheet inline title="Agent" subtitle={START_WORDS.agentsSubtitle} choices={list} chosen={choices.agent} onChoose={(id) => setChoices(chooseAgent(agents, choices, id))} onClose={close} />;
     }
-    if (picker === "model") return <ChoiceSheet title="Model" subtitle={agent.name} choices={modelChoices(agent)} chosen={choices.model} onChoose={(id) => setChoices(chooseModel(agents, choices, id))} onClose={close} />;
-    if (picker === "effort" && model) return <ChoiceSheet title="Effort" subtitle={model.label} choices={effortChoices(model)} chosen={choices.effort} onChoose={(id) => setChoices({ ...choices, effort: id })} onClose={close} />;
+    if (picker === "model") return <ChoiceSheet inline title="Model" subtitle={agent.name} choices={modelChoices(agent)} chosen={choices.model} onChoose={(id) => setChoices(chooseModel(agents, choices, id))} onClose={close} />;
+    if (picker === "effort" && model) return <ChoiceSheet inline title="Effort" subtitle={model.label} choices={effortChoices(model)} chosen={choices.effort} onChoose={(id) => setChoices({ ...choices, effort: id })} onClose={close} />;
     if (picker === "mode") {
       const list: Choice[] = phoneModes(agent.modes).map((mode) => ({ id: mode.id, label: mode.label, detail: mode.hint }));
-      return <ChoiceSheet title="Permission mode" choices={list} chosen={choices.mode} help={BYPASS_NOT_FROM_PHONE} onChoose={(id) => setChoices({ ...choices, mode: id as StartChoices["mode"] })} onClose={close} />;
+      return <ChoiceSheet inline title="Permission mode" choices={list} chosen={choices.mode} help={BYPASS_NOT_FROM_PHONE} onChoose={(id) => setChoices({ ...choices, mode: id as StartChoices["mode"] })} onClose={close} />;
     }
     return null;
   })();
 
   const locked = busy;
-  return <Modal visible transparent animationType="slide" onRequestClose={onClose}>
-    <Pressable testID="start-sheet-backdrop" accessibilityRole="button" accessibilityLabel="Close" onPress={busy ? undefined : onClose} style={styles.backdrop} />
+  const dismiss = busy ? undefined : onClose;
+  return <Modal visible transparent animationType="slide" onRequestClose={picker ? () => setPicker(null) : onClose}>
+    <Pressable testID="start-sheet-backdrop" accessibilityRole="button" accessibilityLabel="Close" onPress={dismiss} style={styles.backdrop} />
     <KeyboardAvoidingView behavior={keyboardAvoidingBehavior()}>
-      <View testID="start-sheet" accessibilityViewIsModal style={[styles.sheet, { backgroundColor: palette.page, borderColor: palette.border, paddingBottom: insets.bottom + 16 }]}>
-        <View style={[styles.handle, { backgroundColor: palette.faint }]} />
+      <View testID="start-sheet" accessibilityViewIsModal onAccessibilityEscape={dismiss} style={[styles.sheet, { backgroundColor: palette.page, borderColor: palette.border, paddingBottom: insets.bottom + 16 }]}>
+        <Pressable testID="start-sheet-close" accessibilityRole="button" accessibilityLabel="Close" disabled={busy} onPress={dismiss} style={styles.handleTarget}>
+          <View style={[styles.handle, { backgroundColor: palette.faint }]} />
+        </Pressable>
         <Text accessibilityRole="header" style={[styles.title, { color: palette.ink }]}>{conversation ? START_WORDS.newConversation : START_WORDS.addTab}</Text>
         {conversation ? null : <Text style={[styles.subtitle, { color: palette.muted }]}>{START_WORDS.addTabUnder}</Text>}
-        <View style={styles.body}>
+        <ScrollView style={styles.scroll} keyboardShouldPersistTaps="handled" contentContainerStyle={styles.body}>
           {blocker ? <Notice testID="start-blocker" tone={blocker.tone} text={blocker.text} icon={blocker.offline ? (color) => <WifiOff size={16} color={color} /> : undefined} action={blocker.retry ? { label: START_WORDS.tryAgain, onPress: blocker.retry } : undefined} /> : null}
           {spinnerLine ? <View testID="start-reading" style={styles.spinnerLine}><Spinner size={14} color={palette.muted} /><Text style={[styles.spinnerText, { color: palette.muted }]}>{spinnerLine}</Text></View> : null}
           {!showRows ? null
@@ -181,7 +184,7 @@ export function StartAgentSheet({ kind, session, snapshot, sessionId, from, text
             helper={emptyAllowed && !text.trim() && !failure ? START_WORDS.noMessage : undefined} /> : null}
           {failure ? <Notice testID="start-failure" tone={failure.kind === "no-answer" || failure.kind === "offline" ? "warning" : failure.kind === "refused" ? "warning" : "danger"} text={failure.text} icon={failure.kind === "no-answer" || failure.kind === "offline" ? (color) => <WifiOff size={16} color={color} /> : undefined} /> : null}
           <Button testID="start-submit" label={label} disabled={!canSend} onPress={() => void start()} style={styles.submit} />
-        </View>
+        </ScrollView>
       </View>
     </KeyboardAvoidingView>
     {pickerSheet}
@@ -202,10 +205,12 @@ function Skeleton() {
 const styles = StyleSheet.create({
   backdrop: { flex: 1, backgroundColor: "#00000080" },
   sheet: { maxHeight: "92%", borderTopLeftRadius: 24, borderTopRightRadius: 24, borderWidth: StyleSheet.hairlineWidth, paddingHorizontal: 16, paddingTop: 10 },
-  handle: { alignSelf: "center", width: 40, height: 4, borderRadius: 2, marginBottom: 12, opacity: 0.6 },
+  handleTarget: { alignSelf: "center", minWidth: 88, minHeight: 44, marginTop: -10, marginBottom: -8, alignItems: "center", justifyContent: "center" },
+  handle: { width: 40, height: 4, borderRadius: 2, opacity: 0.6 },
   title: { fontSize: 17, fontWeight: "600", lineHeight: 22, paddingHorizontal: 4 },
   subtitle: { fontSize: 13, lineHeight: 18, paddingHorizontal: 4, paddingTop: 2 },
-  body: { marginTop: 12, gap: 12 },
+  scroll: { flexGrow: 0, flexShrink: 1, marginTop: 12 },
+  body: { gap: 12 },
   spinnerLine: { flexDirection: "row", alignItems: "center", gap: 8, paddingHorizontal: 4 },
   spinnerText: { fontSize: 13, lineHeight: 18, flex: 1 },
   skeletonRow: { minHeight: 48, flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 14 },

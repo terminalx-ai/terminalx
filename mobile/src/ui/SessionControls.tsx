@@ -301,7 +301,7 @@ function isModelList(value: unknown): value is ModelInfo[] {
 
 function Chip({ label, disabled, onPress }: { label: string; disabled?: boolean; onPress(): void }) {
   const { palette } = useTheme();
-  return <Pressable accessibilityRole="button" accessibilityLabel={label} disabled={disabled} onPress={onPress} hitSlop={4} style={({ pressed }) => [styles.chip, { backgroundColor: pressed ? palette.selected : "transparent" }, disabled && styles.disabled]}>
+  return <Pressable accessibilityRole="button" accessibilityLabel={label} disabled={disabled} onPress={onPress} hitSlop={8} style={({ pressed }) => [styles.chip, { backgroundColor: pressed ? palette.selected : "transparent" }, disabled && styles.disabled]}>
     <Text numberOfLines={1} style={{ color: palette.muted, fontSize: 13, fontWeight: "500" }}>{label}</Text>
   </Pressable>;
 }
@@ -312,7 +312,7 @@ function ChoiceSheet({ picker, onClose }: { picker: { title: string; choices: Ch
   const insets = useSafeAreaInsets();
   return <Modal visible={!!picker} transparent animationType="slide" onRequestClose={onClose}>
     <Pressable accessibilityLabel="Close" style={styles.backdrop} onPress={onClose} />
-    <View style={[styles.sheet, { backgroundColor: palette.card, paddingBottom: insets.bottom + 16 }]}>
+    <View accessibilityViewIsModal onAccessibilityEscape={onClose} style={[styles.sheet, { backgroundColor: palette.card, paddingBottom: insets.bottom + 16 }]}>
       <Text style={[styles.title, { color: palette.ink }]}>{picker?.title}</Text>
       <ScrollView style={styles.list}>
         {picker?.choices.map((choice) => <Pressable key={choice.key} accessibilityRole="button" accessibilityLabel={choice.label} accessibilityState={{ selected: !!choice.current }} onPress={() => { onClose(); choice.onSelect(); }} style={[styles.choice, choice.current && { backgroundColor: palette.selected }]}>
@@ -336,13 +336,13 @@ function ContinueSheet({ tab, models, onClose, onStart }: { tab: TabControls; mo
   const efforts = effortChoices(model, settings.effort);
   const row = (label: string, options: { key: string; label: string; selected: boolean; onPress(): void }[]) => <View style={styles.field}>
     <Text style={[styles.message, { color: palette.muted }]}>{label}</Text>
-    <View style={styles.actions}>{options.map((option) => <Pressable key={option.key} accessibilityRole="button" accessibilityState={{ selected: option.selected }} onPress={option.onPress} style={[styles.chip, styles.outlined, { borderColor: palette.border }, option.selected && { backgroundColor: palette.selected }]}>
-      <Text style={{ color: palette.ink, fontSize: 12 }}>{option.label}</Text>
+    <View style={styles.actions}>{options.map((option) => <Pressable key={option.key} accessibilityRole="button" accessibilityState={{ selected: option.selected }} onPress={option.onPress} style={[styles.sheetChip, styles.outlined, { borderColor: palette.border }, option.selected && { backgroundColor: palette.selected }]}>
+      <Text style={{ color: palette.ink, fontSize: 13 }}>{option.label}</Text>
     </Pressable>)}</View>
   </View>;
   return <Modal visible transparent animationType="slide" onRequestClose={onClose}>
     <Pressable accessibilityLabel="Close" style={styles.backdrop} onPress={onClose} />
-    <View style={[styles.sheet, { backgroundColor: palette.card, paddingBottom: insets.bottom + 16 }]}>
+    <View accessibilityViewIsModal onAccessibilityEscape={onClose} style={[styles.sheet, { backgroundColor: palette.card, paddingBottom: insets.bottom + 16 }]}>
       <Text style={[styles.title, { color: palette.ink }]}>Continue in new session</Text>
       <ScrollView style={styles.list}>
         {row("Agent", harnesses.map((harness) => ({ key: harness, label: harness, selected: harness === settings.harness, onPress: () => setSettings({ harness, model: harness === tab.harness ? tab.model : "", effort: null, permissionMode: settings.permissionMode }) })))}
@@ -361,7 +361,8 @@ const styles = StyleSheet.create({
   row: { flexDirection: "row", gap: 8, flexWrap: "wrap" },
   flex: { flex: 1 },
   feedback: { flexDirection: "row", alignItems: "center", gap: 8 },
-  chip: { borderRadius: 14, paddingHorizontal: 9, paddingVertical: 6, maxWidth: 180 },
+  chip: { minHeight: 32, justifyContent: "center", borderRadius: 14, paddingHorizontal: 9, paddingVertical: 6, maxWidth: 180 },
+  sheetChip: { minHeight: 44, justifyContent: "center", borderRadius: 14, paddingHorizontal: 12, paddingVertical: 8, maxWidth: 220 },
   outlined: { borderWidth: StyleSheet.hairlineWidth },
   disabled: { opacity: 0.4 },
   note: { fontSize: 12, lineHeight: 16 },
@@ -372,6 +373,6 @@ const styles = StyleSheet.create({
   backdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.3)" },
   sheet: { padding: 16, gap: 10, maxHeight: "70%", borderTopLeftRadius: 14, borderTopRightRadius: 14 },
   list: { flexGrow: 0 },
-  choice: { paddingVertical: 10, paddingHorizontal: 8, borderRadius: 8 },
+  choice: { minHeight: 44, justifyContent: "center", paddingVertical: 10, paddingHorizontal: 8, borderRadius: 8 },
   field: { gap: 4, marginBottom: 8 },
 });

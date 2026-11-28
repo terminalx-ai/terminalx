@@ -12,8 +12,8 @@ import { Spinner } from "@mobile/ui/Spinner";
 import { useTheme } from "@mobile/ui/theme";
 import { LoginPage } from "./LoginPage";
 
-/** Whether the page may be left by its back button: not while a code is being fetched or waited on. */
-export const codexSignInLeavable = (state: CodexLoginState): boolean => state.phase !== "starting" && state.phase !== "waiting";
+/** Whether the page may be left by its back button: not while a code is being fetched or waited on online (offline may leave; the attempt stays in SecureStore and resumes on return). */
+export const codexSignInLeavable = (state: CodexLoginState): boolean => state.phase !== "starting" && (state.phase !== "waiting" || state.offline);
 
 /**
  * "Sign in with ChatGPT" (25.04): the one-time code, the way to OpenAI's
@@ -93,7 +93,8 @@ export function CodexSignIn({ flow, organization, consent, onDone, onUseKey, onB
     { text: "Keep waiting", style: "cancel" },
   ]);
   return <LoginPage testID="codex-sign-in" footer={<>
-    {offline ? null : <Button label={opened ? "Open sign-in page again" : "Open sign-in page"} kind={opened ? "secondary" : "primary"} disabled={canceling} icon={(color) => <ArrowUpRight size={16} color={color} />} onPress={openPage} />}
+    {offline ? <Button label="Leave for now" kind="secondary" onPress={onBackToList} />
+      : <Button label={opened ? "Open sign-in page again" : "Open sign-in page"} kind={opened ? "secondary" : "primary"} disabled={canceling} icon={(color) => <ArrowUpRight size={16} color={color} />} onPress={openPage} />}
     <Button label="Cancel sign-in" kind="secondary" disabled={offline || canceling} accessibilityState={{ disabled: offline || canceling, busy: canceling }} onPress={askCancel} />
   </>}>
     <OneTimeCode code={login.userCode} expiresAt={login.expiresAt} onExpired={() => flow.expire()} />

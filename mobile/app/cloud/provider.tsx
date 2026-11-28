@@ -1,5 +1,7 @@
 import { useRef, useState } from "react";
-import { Alert, StyleSheet, Text, View } from "react-native";
+import { Alert, KeyboardAvoidingView, StyleSheet, Text, View } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { keyboardAvoidingBehavior } from "@mobile/ui/keyboard";
 import { Stack, useLocalSearchParams, useRouter } from "expo-router";
 import * as WebBrowser from "expo-web-browser";
 import { CloudOff, Layers, MapPin, PowerOff, Receipt, Trash2, WifiOff, type LucideIcon } from "lucide-react-native";
@@ -106,6 +108,7 @@ function ConnectForm({ catalog, orgId, provider, replacing, read, onConnected, o
   onStored(): void;
 }) {
   const { palette } = useTheme();
+  const insets = useSafeAreaInsets();
   const { descriptor } = provider;
   const label = descriptor.label;
   const fields = useRef<DescribedFieldsHandle>(null);
@@ -144,7 +147,7 @@ function ConnectForm({ catalog, orgId, provider, replacing, read, onConnected, o
     }
   };
 
-  return <Screen testID="provider-form">
+  return <KeyboardAvoidingView style={[styles.flex, { backgroundColor: palette.page }]} behavior={keyboardAvoidingBehavior()} keyboardVerticalOffset={insets.top + 44}><Screen testID="provider-form">
     <Card>
       <View style={styles.about}>
         <ProviderMark icon={descriptor.icon} />
@@ -170,7 +173,7 @@ function ConnectForm({ catalog, orgId, provider, replacing, read, onConnected, o
       {failure?.where === "form" ? <Notice testID="provider-form-failure" tone="danger" text={failure.text} icon={failure.offline ? (color) => <WifiOff size={16} color={color} /> : undefined} /> : null}
       <Button testID="provider-connect" label={busy ? "Checking the key…" : replacing ? "Replace key" : "Connect"} accessibilityState={{ disabled: !ready || !accepted || busy, busy }} disabled={!ready || !accepted || busy} onPress={() => void send()} />
     </> : <Notice testID="provider-several-fields" tone="info" text={`${label} asks for more than one value, which this app cannot send yet. Connect it from the TerminalX desktop app or the web console.`} />}
-  </Screen>;
+  </Screen></KeyboardAvoidingView>;
 }
 
 const FACT_ICONS: Record<ProviderFactKind, LucideIcon> = { location: MapPin, source: Layers, pricing: Receipt, release: Trash2, suspend: PowerOff };
@@ -246,6 +249,7 @@ function Stored({ catalog, orgId, provider, connection, read, onReplace, onDisco
 }
 
 const styles = StyleSheet.create({
+  flex: { flex: 1 },
   help: { fontSize: 13, lineHeight: 18, marginHorizontal: 4 },
   retry: { paddingHorizontal: 8 },
   about: { flexDirection: "row", alignItems: "flex-start", gap: 12, paddingHorizontal: 14, paddingVertical: 12 },

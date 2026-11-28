@@ -60,7 +60,7 @@ function CommandLine({ command }: { command: string }) {
   const { palette } = useTheme();
   const [whole, setWhole] = useState(false);
   const { line, cut } = commandFirstLine(command);
-  return <Pressable testID="work-group-command" accessibilityRole="button" accessibilityLabel={whole ? command : `Command: ${line}`} accessibilityHint={whole ? "Shows one line of the command." : "Shows the whole command."} accessibilityState={{ expanded: whole }} onPress={() => setWhole(!whole)}>
+  return <Pressable testID="work-group-command" accessibilityRole="button" accessibilityLabel={whole ? command : `Command: ${line}`} accessibilityHint={whole ? "Shows one line of the command." : "Shows the whole command."} accessibilityState={{ expanded: whole }} hitSlop={{ top: 13, bottom: 13 }} onPress={() => setWhole(!whole)}>
     {whole ? <Text selectable style={[styles.command, { color: palette.muted }]}>{command}</Text>
       // A long line is cut in its middle, so the end of a path stays in sight.
       : <Text numberOfLines={1} ellipsizeMode={cut ? "tail" : "middle"} style={[styles.command, { color: palette.muted }]}>{line}</Text>}

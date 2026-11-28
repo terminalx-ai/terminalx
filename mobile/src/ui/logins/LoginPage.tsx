@@ -15,7 +15,7 @@ export function LoginPage({ children, footer, testID }: { children: ReactNode; f
   const { palette } = useTheme();
   const insets = useSafeAreaInsets();
   const keyboard = useKeyboardShown();
-  return <KeyboardAvoidingView testID={testID} style={[styles.flex, { backgroundColor: palette.page }]} behavior={keyboardAvoidingBehavior()} keyboardVerticalOffset={92}>
+  return <KeyboardAvoidingView testID={testID} style={[styles.flex, { backgroundColor: palette.page }]} behavior={keyboardAvoidingBehavior()} keyboardVerticalOffset={insets.top + 44}>
     <ScrollView contentInsetAdjustmentBehavior="automatic" keyboardShouldPersistTaps="handled" style={styles.flex} contentContainerStyle={[styles.content, footer ? null : { paddingBottom: insets.bottom + 24 }]}>{children}</ScrollView>
     {footer ? <View testID="login-footer" style={[styles.footer, { paddingBottom: (keyboard ? 0 : insets.bottom) + 12, borderTopColor: palette.border, backgroundColor: palette.page }]}>{footer}</View> : null}
   </KeyboardAvoidingView>;

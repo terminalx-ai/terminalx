@@ -209,4 +209,28 @@ describe("the start sheet (25.10)", () => {
     expect(page.byText(START_WORDS.old)).not.toBeNull();
     expect(page.byId("start-submit")!.getAttribute("aria-disabled")).toBe("true");
   });
+
+  it("renders pickers inline without a nested Modal (U-10) and exposes VoiceOver Escape + >=44pt Close (U-11)", async () => {
+    const w = workspace();
+    const close = vi.fn();
+    await page.show(<Held kind="conversation" session={w.session} snapshot={snap()} onStarted={vi.fn()} onClose={close} />);
+    const sheet = page.byId("start-sheet")!;
+    expect(sheet.getAttribute("aria-modal")).toBe("true");
+    expect(sheet.getAttribute("data-has-escape")).toBe("true");
+    const closeBtn = page.byId("start-sheet-close")!;
+    expect(page.styleOf(closeBtn).minHeight).toBeGreaterThanOrEqual(44);
+    expect(page.styleOf(closeBtn).minWidth).toBeGreaterThanOrEqual(44);
+    // Open Agent picker: still only ONE native Modal in the tree (no nested Modal on iOS).
+    await page.press(page.byId("pick-agent"));
+    expect(page.container.querySelectorAll("[data-modal='true']")).toHaveLength(1);
+    const choiceSheet = page.byId("choice-sheet")!;
+    expect(choiceSheet.getAttribute("aria-modal")).toBe("true");
+    expect(choiceSheet.getAttribute("data-has-escape")).toBe("true");
+    const choiceClose = page.byId("close-choice-sheet")!;
+    expect(page.styleOf(choiceClose).minHeight).toBeGreaterThanOrEqual(44);
+    await page.press(choiceClose);
+    expect(page.byId("choice-sheet")).toBeNull();
+    await page.press(closeBtn);
+    expect(close).toHaveBeenCalledOnce();
+  });
 });

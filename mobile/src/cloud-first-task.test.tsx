@@ -25,7 +25,7 @@ vi.mock("react-native", async () => {
   return { ...native, KeyboardAvoidingView: native.View, ActivityIndicator: () => <i data-busy="true" />, Modal: ({ children }: { children?: unknown }) => <div role="dialog">{children as never}</div> };
 });
 vi.mock("@mobile/ui/theme", async (actual) => (await import("@mobile/ui/testing/kit")).boardTheme(await actual()));
-vi.mock("expo-router", () => ({ Stack: { Screen: () => null }, useLocalSearchParams: () => mocks.params, useRouter: () => mocks.router, useFocusEffect: () => undefined }));
+vi.mock("expo-router", () => ({ Stack: { Screen: () => null }, useLocalSearchParams: () => mocks.params, useRouter: () => mocks.router, useFocusEffect: () => undefined, usePreventRemove: () => undefined }));
 vi.mock("@mobile/state/AppProvider", () => ({ useApp: () => mocks.app }));
 vi.mock("expo-crypto", () => ({ randomUUID: () => globalThis.crypto.randomUUID() }));
 vi.mock("expo-clipboard", () => ({ getStringAsync: async () => "", hasStringAsync: async () => false }));

@@ -72,5 +72,5 @@ it("takes the light palette", async () => {
   expect(page.styleOf(page.byText("Creating the machine")).color).toBe("#29282b");
   expect(page.styleOf(page.byText("Ready")).color).toBe("#706d70");
   expect(page.styleOf(mark(4)).borderColor).toBe("#706d7035");
-  expect(page.styleOf(mark(0)).backgroundColor).toBe("#55b97929");
+  expect(page.styleOf(mark(0)).backgroundColor).toBe("#14532d29");
 });

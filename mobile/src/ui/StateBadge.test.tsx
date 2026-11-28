@@ -28,10 +28,11 @@ it.each([
   expect(page.styleOf(pill().firstElementChild)).toMatchObject({ color, fontSize: 12, fontWeight: "600" });
 });
 
-it("keeps the status colours in light, and takes the light palette's grey at rest", async () => {
+it("uses WCAG AA darker status colours in light, and takes the light palette's grey at rest", async () => {
   appearance.scheme = "light";
   await page.show(<StateBadge testID="badge" state="connected" />);
-  expect(page.styleOf(pill()).backgroundColor).toBe("#55b97924");
+  expect(page.styleOf(pill()).backgroundColor).toBe("#14532d24");
+  expect(page.styleOf(pill().firstElementChild).color).toBe("#14532d");
   await page.show(<StateBadge testID="badge" state="not-connected" />);
   expect(page.styleOf(pill()).backgroundColor).toBe("#f2f0ec");
   expect(page.styleOf(pill().firstElementChild).color).toBe("#706d70");

@@ -19,7 +19,7 @@ vi.mock("@mobile/ui/theme", async (actual) => ({ ...(await actual<typeof import(
 vi.mock("react-native", () => {
   const View = ({ children }: { children?: ReactNode }) => <div>{children}</div>;
   return {
-    View, ScrollView: View,
+    View, ScrollView: View, KeyboardAvoidingView: View, Platform: { OS: "ios" },
     // A row that opens a page; the buttons of this screen are its Button's.
     Pressable: ({ children, onPress, accessibilityLabel }: any) => <div role="link" aria-label={accessibilityLabel} onClick={onPress}>{children}</div>,
     Text: ({ children, selectable, testID, accessibilityRole }: any) => <span data-testid={testID} data-selectable={selectable ? "true" : undefined} role={accessibilityRole}>{children}</span>,
