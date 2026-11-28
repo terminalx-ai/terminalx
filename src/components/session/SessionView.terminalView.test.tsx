@@ -410,7 +410,8 @@ describe("a local session's row of tabs under the title bar", () => {
     expect(within(header).queryByRole("button", { name: "Show terminal view" })).toBeNull();
     const toggle = await screen.findByTestId("strip-terminal-view");
     expect(toggle.getAttribute("aria-label")).toBe("Show terminal view");
-    expect(toggle.textContent).toContain("terminal view");
+    expect(toggle.querySelector('[data-icon="square-terminal"]')).not.toBeNull();
+    expect(toggle.textContent).not.toContain("terminal view");
     fireEvent.click(toggle);
     await waitFor(() => expect(screen.getByTestId("strip-terminal-view").getAttribute("aria-label")).toBe("Back to chat"));
     const backToChat = screen.getByRole("button", { name: "Back to chat" });
