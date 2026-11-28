@@ -706,6 +706,7 @@ async fn phase2_collaboration_v2_bootstrap_refresh_installs_before_actual_rpc_an
             workspace_ssh: None,
                 ssh_updater: None,
             desktop_ready: false,
+                agent_browser_ready: false,
         };
         crate::remote::bootstrap_link::relay_session(&session, crate::cloud_bootstrap::CAPABILITIES)
     };

@@ -1824,6 +1824,12 @@ pub async fn cloud_workspace_details(workspace_id: String, org_id: Option<String
 }
 
 #[tauri::command]
+pub async fn cloud_workspace_agent_browser(workspace_id: String, org_id: Option<String>, enabled: Option<bool>, state: tauri::State<'_, crate::AppState>) -> Result<crate::cloud_workspaces::AgentBrowserState, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    let risk = if enabled.is_some() { crate::cloud_workspaces::RequestRisk::Mutation } else { crate::cloud_workspaces::RequestRisk::Read };
+    cloud_command!(state, risk, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.agent_browser(org_id.as_deref(), &workspace_id, enabled))
+}
+
+#[tauri::command]
 pub async fn organization_billing(org_id: String, state: tauri::State<'_, crate::AppState>) -> Result<crate::cloud_workspaces::OrganizationBilling, crate::cloud_workspaces::CloudWorkspaceClientError> {
     cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.organization_billing(&org_id))
 }

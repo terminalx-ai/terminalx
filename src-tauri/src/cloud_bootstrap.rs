@@ -241,6 +241,8 @@ pub struct Session {
     pub(crate) workspace_ssh: Option<serde_json::Value>,
     pub(crate) ssh_updater: Option<serde_json::Value>,
     pub(crate) desktop_ready: bool,
+    /// The workspace's Cloud browser for agents switch (PRO-209).
+    pub(crate) agent_browser_ready: bool,
 }
 
 impl Session {
@@ -637,11 +639,13 @@ fn redeem(config: &Config, api: &dyn Api, key: &HostKey, stored: Option<(&str, &
                 workspace_ssh: None,
                 ssh_updater: None,
                 desktop_ready: read_desktop_readiness(redeemed.phase2_readiness.as_ref()),
+                agent_browser_ready: crate::cloud_browser::read_readiness(redeemed.phase2_readiness.as_ref()),
             }
         }
     };
     remove_spent_token(&config.token_path, &stored.token_sha256).map_err(Failure::Fatal)?;
     crash_point("token-removed");
+    crate::cloud_browser::set_switch(session.agent_browser_ready);
     Ok((session, Zeroizing::new(stored.runtime_credential.clone())))
 }
 
@@ -670,6 +674,8 @@ impl Bootstrapped {
         let refreshed = refreshed.and_then(|response| {
             if response.workspace_id != current.workspace_id || response.organization_id != current.organization_id {
                 current.desktop_ready = false;
+                current.agent_browser_ready = false;
+                crate::cloud_browser::set_switch(false);
                 return Err(CallError::Transient(RefreshIdentityMismatch.into()));
             }
             session_from_refresh(response, &relay_host_id).map_err(CallError::Transient)
@@ -687,6 +693,7 @@ impl Bootstrapped {
                 };
                 self.rejected.store(false, std::sync::atomic::Ordering::SeqCst);
                 *failures = 0;
+                crate::cloud_browser::set_switch(session.agent_browser_ready);
                 *current = session;
                 Ok(())
             }
@@ -700,6 +707,8 @@ impl Bootstrapped {
                 *failures = failures.saturating_add(1);
                 if rejected || *failures >= DESKTOP_REFRESH_FAILURE_LIMIT {
                     current.desktop_ready = false;
+                    current.agent_browser_ready = false;
+                    crate::cloud_browser::set_switch(false);
                 }
                 Err(error)
             }
@@ -917,6 +926,7 @@ fn session_from_refresh(mut refreshed: Refreshed, relay_host_id: &str) -> Result
         workspace_ssh: refreshed.workspace_ssh.take(),
         ssh_updater: refreshed.ssh_updater.take(),
         desktop_ready: read_desktop_readiness(refreshed.phase2_readiness.as_ref()),
+        agent_browser_ready: crate::cloud_browser::read_readiness(refreshed.phase2_readiness.as_ref()),
         quiesce: refreshed.quiesce.take().filter(|value| !value.is_null()).and_then(|value| {
             match serde_json::from_value::<QuiesceRequest>(value) {
                 Ok(request) if opaque_id(&request.operation_id) => Some(request),
@@ -1248,6 +1258,25 @@ mod tests {
         assert!(!session_from_refresh(response(None), "host_1").unwrap().desktop_ready);
     }
 
+    /// PRO-209: the workspace's Cloud browser for agents switch reaches the
+    /// runtime as its own readiness flag, replaced on every refresh.
+    #[test]
+    fn agent_browser_switch_is_read_from_readiness_and_replaced_on_refresh() {
+        use serde_json::json;
+        let response = |flags: serde_json::Value| serde_json::from_value::<Refreshed>(json!({
+            "v": 1, "workspaceId": WORKSPACE, "organizationId": "org_1",
+            "relayToken": "fresh-relay-token", "relayTokenExpiresAt": 1,
+            "directorUrl": "https://relay.example", "attachments": [], "revocations": [],
+            "phase2Readiness": { "version": 1, "flags": flags }
+        })).unwrap();
+        let on = session_from_refresh(response(json!({"cloud.desktop.v1": true, "cloud.desktop.agent-browser.v1": true})), "host_1").unwrap();
+        assert!(on.desktop_ready && on.agent_browser_ready);
+        let off = session_from_refresh(response(json!({"cloud.desktop.v1": true, "cloud.desktop.agent-browser.v1": false})), "host_1").unwrap();
+        assert!(off.desktop_ready && !off.agent_browser_ready);
+        let absent = session_from_refresh(response(json!({"cloud.desktop.v1": true})), "host_1").unwrap();
+        assert!(!absent.agent_browser_ready);
+    }
+
     #[test]
     fn cloud_desktop_holds_after_three_failed_refreshes_and_recovers() {
         let token = random_credential();
@@ -1257,9 +1286,12 @@ mod tests {
         let boot = establish(&config, &server, &quick()).unwrap();
         assert!(boot.session.lock().unwrap().desktop_ready);
         *server.down.borrow_mut() = true;
+        assert!(boot.session.lock().unwrap().agent_browser_ready);
         for expected in [true, true, false, false] {
             assert!(boot.refresh(&server).is_err());
             assert_eq!(boot.session.lock().unwrap().desktop_ready, expected);
+            // PRO-209: the cloud browser for agents fails closed with it.
+            assert_eq!(boot.session.lock().unwrap().agent_browser_ready, expected);
         }
         *server.down.borrow_mut() = false;
         boot.refresh(&server).unwrap();
@@ -1272,6 +1304,7 @@ mod tests {
         assert!(matches!(boot.refresh(&server), Err(CallError::Rejected)));
         assert!(boot.is_rejected());
         assert!(!boot.session.lock().unwrap().desktop_ready);
+        assert!(!boot.session.lock().unwrap().agent_browser_ready);
     }
 
     #[test]
@@ -1350,7 +1383,7 @@ mod tests {
                 workspace_ssh: None,
                 ssh_updater: None,
                 phase2_readiness: self.refresh_desktop_ready.then(|| serde_json::json!({
-                    "version": 1, "flags": { "cloud.desktop.v1": true }
+                    "version": 1, "flags": { "cloud.desktop.v1": true, "cloud.desktop.agent-browser.v1": true }
                 })),
             })
         }

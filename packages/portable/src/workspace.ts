@@ -170,6 +170,8 @@ export const METHOD_CAPABILITIES: Readonly<Record<string, WorkspaceCapability>> 
   "desktop.write": "cloud-desktop/1",
   "desktop.ack": "cloud-desktop/1",
   "desktop.close": "cloud-desktop/1",
+  "desktop.takeControl": "cloud-desktop/1",
+  "desktop.handBack": "cloud-desktop/1",
   "session.commands": "composer/1",
   "session.files": "composer/2",
   "session.attach": "composer/3",
