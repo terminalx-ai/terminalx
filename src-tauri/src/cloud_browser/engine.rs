@@ -2,7 +2,7 @@
 //! One browser session at a time per workspace: the desktop has one screen.
 
 use super::cdp::Cdp;
-use super::{changed, describe, launch_alive, offer, text_result, Caller, HELD_WAIT, IDLE_LIMIT, SESSION_LIMIT};
+use super::{changed, describe, offer, text_result, Caller, HELD_WAIT, IDLE_LIMIT, SESSION_LIMIT};
 use serde_json::{json, Value};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
@@ -12,6 +12,7 @@ const READ_LIMIT: usize = 8000;
 const TITLE_LIMIT: usize = 200;
 /// The largest screenshot handed to an agent, base64.
 const SHOT_LIMIT: usize = 1_500_000;
+#[cfg(not(test))]
 const REAP_EVERY: Duration = Duration::from_secs(30);
 
 /// What holds the desktop for a session. In tests (on any platform; this
@@ -65,7 +66,9 @@ fn runtime() -> Option<tokio::runtime::Handle> {
 }
 
 /// The runtime's Tokio runtime, from the relay host that serves the desktop.
-/// Starts the reaper that ends sessions past their limits.
+/// Starts the reaper that ends sessions past their limits. Never in tests:
+/// a test's runtime ends with the test, and the engine's tests bring their own.
+#[cfg(not(test))]
 pub(crate) fn install(handle: tokio::runtime::Handle) {
     if RUNTIME.set(handle.clone()).is_ok() {
         handle.spawn(async {
@@ -134,7 +137,7 @@ async fn end(slot: &mut Option<Browser>, why: &str) {
 
 async fn reap() {
     let mut slot = ENGINE.browser.lock().await;
-    let why = slot.as_ref().and_then(|browser| expired(browser.opened, browser.last, Instant::now(), browser.cdp.is_closed(), launch_alive(&browser.key), offer() == "on"));
+    let why = slot.as_ref().and_then(|browser| expired(browser.opened, browser.last, Instant::now(), browser.cdp.is_closed(), super::launch_alive(&browser.key), offer() == "on"));
     if let Some(why) = why {
         end(&mut slot, why).await;
     }
@@ -696,6 +699,34 @@ mod tests {
         assert!(ENGINE.browser.try_lock().unwrap().is_none(), "no session started without approval");
         *ENGINE.owner.lock().unwrap() = None;
         offering(None);
+    }
+
+    /// The idle sweep ends a session nobody has called for 15 minutes.
+    #[test]
+    fn the_sweep_ends_an_idle_session_and_closes_its_tab() {
+        let _lock = super::super::TEST_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+        let rt = runtime_for_tests();
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("chrome.log");
+        let (_chrome, cdp) = rt.block_on(async { fake_chrome(&log) });
+        *TEST_CDP.lock().unwrap() = Some(cdp);
+        rt.block_on(super::super::TASK_OFFER.scope(Some("on"), async {
+            let mut slot = ENGINE.browser.lock().await;
+            let mut browser = start("s/t/launch-6", "Claude Code", None).await.unwrap();
+            browser.last = Instant::now().checked_sub(Duration::from_secs(60)).unwrap();
+            *slot = Some(browser);
+            publish(slot.as_ref());
+            drop(slot);
+            reap().await;
+            assert!(ENGINE.browser.lock().await.is_some(), "a minute idle is fine");
+            let idle = Instant::now().checked_sub(IDLE_LIMIT).unwrap();
+            ENGINE.browser.lock().await.as_mut().unwrap().last = idle;
+            reap().await;
+            assert!(ENGINE.browser.lock().await.is_none(), "15 minutes idle ends it");
+        }));
+        assert!(ENGINE.owner.lock().unwrap().is_none());
+        assert_eq!(std::fs::read_to_string(&log).unwrap().matches("Target.closeTarget").count(), 1);
+        *TEST_CDP.lock().unwrap() = None;
     }
 
     #[test]
