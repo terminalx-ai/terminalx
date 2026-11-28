@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { CheckCircle2, ChevronDown, ChevronUp, CircleAlert, CircleX, Hammer, Loader2, LoaderCircle, MinusCircle, RefreshCw } from "@/icons";
 import { Button } from "@/components/ui/button";
+import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
+import { useSettingsLeaveGuard } from "./settingsLeaveGuard";
 import { listedProviders } from "@/lib/hiddenProviders";
 import { api } from "@/lib/api";
 import { providerLabel } from "@/lib/organizationCompute";
@@ -203,7 +205,9 @@ export function OrganizationEnvironment({ contextRevision, organizationId = null
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [confirming, setConfirming] = useState<string | null>(null);
+  const [pendingProvider, setPendingProvider] = useState<string | null>(null);
   const [historyOpen, setHistoryOpen] = useState(true);
+  useSettingsLeaveGuard(dirty);
   const [log, setLog] = useState<{ versionId: string; entries: EnvironmentLogEntry[] | null; error: string | null } | null>(null);
   const contextEpoch = useRef(0);
   const loadSeq = useRef(0);
@@ -247,7 +251,7 @@ export function OrganizationEnvironment({ contextRevision, organizationId = null
     }
   }, []);
 
-  useEffect(() => {
+  const loadProviders = useCallback(() => {
     const context = contextEpoch.current;
     setProviders(null);
     setProvider(null);
@@ -258,6 +262,7 @@ export function OrganizationEnvironment({ contextRevision, organizationId = null
     dirtyRef.current = false;
     setBusy(null);
     setConfirming(null);
+    setPendingProvider(null);
     setLog(null);
     setError(null);
     setLoading(true);
@@ -279,10 +284,14 @@ export function OrganizationEnvironment({ contextRevision, organizationId = null
         setError("TerminalX could not load this organization's cloud providers. Try again.");
         setLoading(false);
       });
+  }, []);
+
+  useEffect(() => {
+    loadProviders();
     return () => {
       contextEpoch.current += 1;
     };
-  }, [contextRevision]);
+  }, [contextRevision, loadProviders]);
 
   useEffect(() => {
     if (!provider) return;
@@ -376,7 +385,17 @@ export function OrganizationEnvironment({ contextRevision, organizationId = null
   const providerPicker = providers && providers.length > 1 && (
     <label className="flex items-center gap-2 text-xs text-muted-foreground">
       Provider
-      <select aria-label="Environment provider" className={inputClass} value={provider ?? ""} disabled={Boolean(busy)} onChange={(event) => setProvider(event.target.value)}>
+      <select
+        aria-label="Environment provider"
+        className={inputClass}
+        value={provider ?? ""}
+        disabled={Boolean(busy)}
+        onChange={(event) => {
+          const next = event.target.value;
+          if (dirty && next !== provider) setPendingProvider(next);
+          else setProvider(next);
+        }}
+      >
         {providers.map((option) => (
           <option key={option.id} value={option.id}>
             {providerLabel(option.id)}
@@ -385,6 +404,23 @@ export function OrganizationEnvironment({ contextRevision, organizationId = null
         ))}
       </select>
     </label>
+  );
+
+  const switchProviderDialog = (
+    <ConfirmDialog
+      open={pendingProvider !== null}
+      title="Discard unsaved environment changes?"
+      action="Discard & switch"
+      destructive
+      onAction={() => {
+        const next = pendingProvider;
+        setPendingProvider(null);
+        if (next) setProvider(next);
+      }}
+      onCancel={() => setPendingProvider(null)}
+    >
+      Switching providers will discard your unsaved edits to this environment template.
+    </ConfirmDialog>
   );
 
   if (!status) {
@@ -397,16 +433,15 @@ export function OrganizationEnvironment({ contextRevision, organizationId = null
           </div>
         ) : error ? (
           <div className="flex items-center gap-2">
-            <p className="text-xs text-destructive">{error}</p>
-            {provider && (
-              <Button variant="ghost" size="sm" onClick={() => void load(provider)}>
-                Retry
-              </Button>
-            )}
+            <p className="text-xs text-destructive" role="alert">{error}</p>
+            <Button variant="ghost" size="sm" onClick={() => (provider ? void load(provider) : loadProviders())}>
+              Retry
+            </Button>
           </div>
         ) : (
           <p className="text-xs text-muted-foreground">Connect a cloud provider to set up its environment.</p>
         )}
+        {switchProviderDialog}
       </div>
     );
   }
@@ -690,6 +725,7 @@ export function OrganizationEnvironment({ contextRevision, organizationId = null
           )}
         </>
       )}
+      {switchProviderDialog}
     </div>
   );
 }

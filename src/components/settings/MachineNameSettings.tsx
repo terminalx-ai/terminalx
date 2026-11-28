@@ -92,6 +92,7 @@ export function MachineNameSettings() {
                 event.preventDefault();
                 commit();
               } else if (event.key === "Escape") {
+                event.preventDefault();
                 setDraft(null);
                 setError(null);
               }

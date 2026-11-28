@@ -100,6 +100,8 @@ describe("the local mirror dialog", () => {
     await waitFor(() => expect(mocks.resolveCloudMirror).toHaveBeenCalledWith(target, "export"));
     await waitFor(() => expect(screen.getByTestId("cloud-mirror-exported").textContent).toContain("exports/1"));
     fireEvent.click(screen.getByRole("button", { name: "Discard my changes" }));
+    expect(mocks.resolveCloudMirror).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole("button", { name: "Discard changes" }));
     await waitFor(() => expect(mocks.resolveCloudMirror).toHaveBeenCalledWith(target, "discard"));
   });
 

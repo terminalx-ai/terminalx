@@ -237,6 +237,9 @@ describe("Pair a phone dialog", () => {
     fireEvent.click(toggle);
     await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("pairing_set_keep_awake", { enabled: false }));
     expect(toggle.getAttribute("aria-checked")).toBe("false");
+    // U-43: ticking countdown must not have aria-live="polite" directly on it.
+    const ticking = screen.getByText(/^Expires in /);
+    expect(ticking.getAttribute("aria-live")).toBeNull();
   });
 });
 

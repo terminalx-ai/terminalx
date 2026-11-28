@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { LocalVmStatus } from "@/lib/api";
 
@@ -137,5 +137,24 @@ describe("the Computer tab", () => {
     await show();
     fireEvent.click(screen.getByRole("radio", { name: "Cloud VM" }));
     expect(screen.getByText(/Cloud VM — coming soon/)).toBeTruthy();
+  });
+
+  it("offers a Try again button when initial status check fails (U-36)", async () => {
+    localVm.status.mockRejectedValueOnce(new Error("daemon unreachable")).mockResolvedValueOnce(vm("not_created"));
+    await show();
+    expect(screen.getByText(/daemon unreachable/)).toBeTruthy();
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Try again" })));
+    expect(screen.getByRole("button", { name: "Start Local VM" })).toBeTruthy();
+  });
+
+  it("requires confirmation before resetting the Local VM (U-37)", async () => {
+    localVm.status.mockResolvedValue(running);
+    localVm.reset.mockResolvedValue(vm("not_created"));
+    await show();
+    fireEvent.keyDown(await screen.findByRole("button", { name: "Local VM actions" }), { key: "Enter" });
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Reset (start fresh)" }));
+    expect(localVm.reset).not.toHaveBeenCalled();
+    fireEvent.click(await screen.findByRole("button", { name: "Reset Local VM" }));
+    await waitFor(() => expect(localVm.reset).toHaveBeenCalledOnce());
   });
 });

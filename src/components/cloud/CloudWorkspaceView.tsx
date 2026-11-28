@@ -379,7 +379,7 @@ function WorkspaceViewBody({ opened, state, agentRequest = 0, initialAgent = fal
           {opened.machine ? opened.machine.status : describe(state)}
         </div>
       )}
-      {error && <p className="px-4 py-1 text-xs text-red-500">Terminal: {error}</p>}
+      {error && <p className="px-4 py-1 text-xs text-destructive">Terminal: {error}</p>}
       {/* Terminal views stay mounted across reconnects and view switches:
           they live on the runtime, and their streams resume from the last byte. */}
       <div className={view.kind === "terminal" ? "flex min-h-0 flex-1 flex-col" : "hidden"}>

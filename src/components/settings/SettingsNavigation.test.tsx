@@ -300,8 +300,8 @@ describe("row search over repository rows (PRO-127)", () => {
     const view = render(<SettingsPage onBack={vi.fn()} />);
     const input = screen.getByRole("combobox", { name: "Search settings" });
     fireEvent.change(input, { target: { value: "worktreeinclude" } });
-    const result = screen.getByRole("option", { name: /Files to copy/ });
-    expect(result.closest('[role="group"]')?.textContent).toContain("Projects");
+    const result = screen.getByRole("row", { name: /Files to copy/ });
+    expect(result.closest('[role="rowgroup"]')?.textContent).toContain("Projects");
     fireEvent.keyDown(input, { key: "Enter" });
     expect(screen.getByRole("button", { name: "One" }).getAttribute("aria-expanded")).toBe("true");
     let row = view.container.querySelector<HTMLElement>('[data-setting-id="repositories.filesToCopy"]');
@@ -311,7 +311,7 @@ describe("row search over repository rows (PRO-127)", () => {
 
     fireEvent.click(within(screen.getByRole("group", { name: "Projects" })).getByRole("button", { name: "Two" }));
     fireEvent.change(input, { target: { value: "worktreeinclude" } });
-    fireEvent.click(screen.getByRole("option", { name: /Files to copy/ }));
+    fireEvent.click(screen.getByRole("row", { name: /Files to copy/ }));
     expect(screen.getByRole("button", { name: "Two" }).getAttribute("aria-expanded")).toBe("true");
     row = view.container.querySelector<HTMLElement>('[data-setting-id="repositories.filesToCopy"]');
     expect(row?.getAttribute("data-setting-instance")).toBe("/repos/two");

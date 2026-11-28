@@ -251,7 +251,7 @@ export function CloudCreateWorkspace({
       onSubmit={(event) => {
         event.preventDefault();
         // Return asks for the price; only the button under it creates (and spends).
-        if (!quoted && !busy) void showPrice();
+        if (!quoted && !busy && Object.keys(errors).length === 0 && !pending) void showPrice();
       }}
     >
       {loadError && <p role="alert" className="text-xs text-muted-foreground">Cloud workspaces are unavailable ({loadError}). <Button type="button" size="xs" variant="outline" onClick={loadProviders}>Try again</Button></p>}
@@ -262,7 +262,7 @@ export function CloudCreateWorkspace({
       <label className="flex flex-col gap-1 text-xs">
         <span className="font-medium">Name</span>
         <input aria-label="Workspace name" className={inputClass} value={form.name} maxLength={80} onChange={(event) => update("name", event.target.value)} />
-        {form.name && errors.name && <span className="text-red-500">{errors.name}</span>}
+        {form.name && errors.name && <span className="text-destructive">{errors.name}</span>}
       </label>
 
       {usable.length > 1 && (
@@ -286,7 +286,7 @@ export function CloudCreateWorkspace({
       <fieldset className="flex flex-col gap-2 text-xs">
         <legend className="mb-1 font-medium">Repositories</legend>
         {repositoriesError && (
-          <p className="flex items-center gap-2 text-red-500" role="alert">
+          <p className="flex items-center gap-2 text-destructive" role="alert">
             The organization's repositories could not be loaded ({repositoriesError}).
             <Button type="button" size="sm" variant="outline" onClick={loadRepositories}>
               Try again
@@ -297,33 +297,35 @@ export function CloudCreateWorkspace({
           <p className="text-muted-foreground">No repositories are selected for cloud workspaces. An admin chooses them on the organization's page in Settings → Organizations, under GitHub.</p>
         )}
         {form.repositories.map((repository, index) => (
-          <div key={repository.cloneUrl} className="flex items-center gap-2" data-testid="cloud-create-repository">
+          <div key={repository.cloneUrl} className="flex flex-wrap items-center gap-2" data-testid="cloud-create-repository">
             <span className="w-16 shrink-0 text-muted-foreground">{index === 0 ? "Primary" : "Also"}</span>
             <span className="min-w-0 flex-1 truncate">{repository.fullName}</span>
-            <GitBranch className="size-3.5 text-muted-foreground" />
-            <input
-              aria-label={`Base branch of ${repository.fullName}`}
-              className={`${inputClass} w-40 font-mono text-xs`}
-              placeholder={selected?.find((item) => item.cloneUrl === repository.cloneUrl)?.defaultBranch ?? "default branch"}
-              value={repository.ref}
-              onChange={(event) =>
-                setForm((current) => ({
-                  ...current,
-                  repositories: current.repositories.map((item, at) => (at === index ? { ...item, ref: event.target.value } : item)),
-                }))
-              }
-            />
-            <Button
-              type="button"
-              size="icon"
-              variant="ghost"
-              className="size-6"
-              aria-label={`Remove ${repository.fullName}`}
-              onClick={() => setForm((current) => ({ ...current, repositories: current.repositories.filter((_, at) => at !== index) }))}
-            >
-              <X className="size-3" />
-            </Button>
-            {errors[`ref:${index}`] && <span className="text-red-500">{errors[`ref:${index}`]}</span>}
+            <div className="flex shrink-0 items-center gap-1.5">
+              <GitBranch className="size-3.5 text-muted-foreground" />
+              <input
+                aria-label={`Base branch of ${repository.fullName}`}
+                className={`${inputClass} w-36 sm:w-40 font-mono text-xs`}
+                placeholder={selected?.find((item) => item.cloneUrl === repository.cloneUrl)?.defaultBranch ?? "default branch"}
+                value={repository.ref}
+                onChange={(event) =>
+                  setForm((current) => ({
+                    ...current,
+                    repositories: current.repositories.map((item, at) => (at === index ? { ...item, ref: event.target.value } : item)),
+                  }))
+                }
+              />
+              <Button
+                type="button"
+                size="icon"
+                variant="ghost"
+                className="size-6"
+                aria-label={`Remove ${repository.fullName}`}
+                onClick={() => setForm((current) => ({ ...current, repositories: current.repositories.filter((_, at) => at !== index) }))}
+              >
+                <X className="size-3" />
+              </Button>
+            </div>
+            {errors[`ref:${index}`] && <span className="basis-full text-destructive">{errors[`ref:${index}`]}</span>}
           </div>
         ))}
         {available.length > 0 && form.repositories.length < 5 && (
@@ -345,7 +347,7 @@ export function CloudCreateWorkspace({
             </select>
           </div>
         )}
-        {errors.repositories && <span className="text-red-500">{errors.repositories}</span>}
+        {errors.repositories && <span className="text-destructive">{errors.repositories}</span>}
         <p className="text-muted-foreground">Each repository gets a new branch of its own for this workspace, made from its base branch.</p>
       </fieldset>
 
@@ -359,7 +361,7 @@ export function CloudCreateWorkspace({
           value={form.prompt}
           onChange={(event) => update("prompt", event.target.value)}
         />
-        {errors.prompt && <span className="text-red-500">{errors.prompt}</span>}
+        {errors.prompt && <span className="text-destructive">{errors.prompt}</span>}
       </label>
 
       <fieldset className="flex flex-col gap-1 text-xs">
@@ -388,7 +390,7 @@ export function CloudCreateWorkspace({
 
       {error && (
         <div className="flex items-center gap-2 text-xs" role="alert" data-testid="cloud-create-error">
-          <span className="text-red-500">{error.message}</span>
+          <span className="text-destructive">{error.message}</span>
           <AgentLoginsLink message={error.message} organizationId={organizationId} />
           {error.retry && pending && (
             <Button type="button" size="sm" variant="outline" disabled={busy} onClick={() => void submit(true)}>
@@ -529,11 +531,11 @@ export function CreationProgress({
           return (
             <li key={item.id} className="flex items-center gap-2" data-state={done ? "done" : current ? "current" : stopped ? "stopped" : "waiting"}>
               {done || (phase === "running" && item.id === "running") ? (
-                <Check className="size-3.5 text-green-600" />
+                <Check className="size-3.5 text-add" />
               ) : current ? (
                 <Loader2 className="size-3.5 animate-spin" />
               ) : stopped ? (
-                <X className="size-3.5 text-red-500" />
+                <X className="size-3.5 text-destructive" />
               ) : (
                 <Circle className="size-3.5 text-muted-foreground/50" />
               )}
@@ -549,17 +551,17 @@ export function CreationProgress({
         </p>
       )}
       {notPickedUp && (
-        <p className="text-xs text-amber-600" role="status" data-testid="cloud-create-not-picked-up">
+        <p className="text-xs text-warning" role="status" data-testid="cloud-create-not-picked-up">
           {RUNTIME_NOT_PICKED_UP}
         </p>
       )}
       {phase === "failed" && (
-        <p className="text-xs text-red-500">
+        <p className="text-xs text-destructive">
           {failureMessage(snapshot)} <AgentLoginsLink message={failureMessage(snapshot)} organizationId={snapshot.workspace.orgId} className="ml-1 align-baseline text-foreground" />
         </p>
       )}
       {phase === "canceled" && <p className="text-xs text-muted-foreground">Canceled. Its compute is released and the first prompt was not sent.</p>}
-      {error && <p className="text-xs text-red-500">{error}</p>}
+      {error && <p className="text-xs text-destructive">{error}</p>}
       <div className="flex items-center gap-2">
         {openable && (
           <Button size="sm" variant={phase === "running" ? "default" : "outline"} onClick={() => onOpen({ workspace: snapshot.workspace, latestOperation: snapshot.operation })}>

@@ -270,8 +270,8 @@ function ConfigureProviders({ overview, take, initial, onClose }: {
   const catalogEntry = selected ? byId.get(selected) ?? null : null;
 
   return <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
-    <DialogContent width="max-w-[800px]" className="gap-0 p-0" showClose={false} data-testid="configure-providers">
-      <div className="flex items-start gap-3 px-5 pb-3 pt-4">
+    <DialogContent width="max-w-[800px]" className="flex max-h-[calc(100dvh-2rem)] flex-col gap-0 p-0" showClose={false} data-testid="configure-providers">
+      <div className="flex shrink-0 items-start gap-3 px-5 pb-3 pt-4">
         <div className="min-w-0 flex-1">
           <DialogTitle className="text-[15px] font-semibold">Configure providers</DialogTitle>
           <DialogDescription className="mt-0.5 text-[12.5px] text-muted-foreground">
@@ -280,8 +280,8 @@ function ConfigureProviders({ overview, take, initial, onClose }: {
         </div>
         <button type="button" aria-label="Close" onClick={onClose} className="ml-auto text-faint hover:text-foreground"><X className="size-4" /></button>
       </div>
-      <div className="flex h-[520px] border-t border-hairline">
-        <div className="flex w-[262px] shrink-0 flex-col border-r border-hairline">
+      <div className="flex min-h-0 flex-1 flex-col border-t border-hairline sm:h-[min(520px,calc(100dvh-11rem))] sm:flex-row">
+        <div className="flex max-h-44 w-full shrink-0 flex-col border-b border-hairline sm:max-h-none sm:w-[262px] sm:border-r sm:border-b-0">
           <div className="p-2.5 pb-0"><FilterField value={search} onChange={setSearch} label="Search providers" /></div>
           <div className="min-h-0 flex-1 overflow-y-auto px-1.5 pb-2">
             <ListHead>Connected{overview.connected.length ? ` · ${overview.connected.length}` : ""}</ListHead>
@@ -452,6 +452,7 @@ function ConnectedDetail({ provider, entry, authPath, take, onGone, note, onNote
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const disconnect = async () => {
+    if (busy) return;
     setBusy(true);
     setError(null);
     try { take(await opencode.disconnect(provider.id)); onGone(); } catch (e) { setError(errorMessage(e)); } finally { setBusy(false); }
@@ -500,6 +501,7 @@ function ProviderModels({ provider, entry, take }: { provider: OpenCodeConnected
     opencode.catalogModels(provider.id).then(setCatalogue).catch((e) => { setError(errorMessage(e)); setCatalogue([]); });
   }, [browsing, catalogue, provider.id]);
   const change = async (model: string, add: boolean) => {
+    if (busy) return;
     setBusy(model);
     setError(null);
     try {
@@ -527,7 +529,7 @@ function ProviderModels({ provider, entry, take }: { provider: OpenCodeConnected
         {shown.map((model) => <li key={model} className="flex h-9 items-center gap-3 border-b border-hairline px-3 text-[12.5px] last:border-0">
           <span className="min-w-0 truncate font-mono text-[12px]">{model}</span>
           {names.get(model) && <span className="min-w-0 truncate text-faint">{names.get(model)}</span>}
-          <Button size="xs" variant="ghost" aria-label={`Remove ${model}`} className="ml-auto shrink-0 text-muted-foreground" disabled={busy === model} onClick={() => void change(model, false)}>
+          <Button size="xs" variant="ghost" aria-label={`Remove ${model}`} className="ml-auto shrink-0 text-muted-foreground" disabled={Boolean(busy)} onClick={() => void change(model, false)}>
             {busy === model ? <Loader2 className="animate-spin" /> : <X />}
           </Button>
         </li>)}
