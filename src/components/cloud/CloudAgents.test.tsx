@@ -373,6 +373,15 @@ describe("a workspace's agent sessions (#1289)", () => {
     const cursor = { harness: "cursor-agent", signIn: { provider: "cursor", state: "sign-in-required", reason: null } };
     expect(signInAgain(cursor, true)).toBeNull();
     expect(signInMessage(cursor, true)).toContain("Connect it again in Settings → Organizations → Agent logins");
+    // PRO-310: the organization route its sessions ran on went, with no other login: "Sign in to continue".
+    const removed = { provider: "codex", state: "not-connected", reason: "organization-route-removed" };
+    expect(signInMessage(info(removed), true, "Acme")).toBe(
+      "Sign in to continue: Acme’s Codex route no longer applies to this workspace, and there is no other Codex login here. Connect a Codex login in Settings → Organizations → Agent logins, then send again.",
+    );
+    expect(signInMessage(info(removed), false)).toBe(
+      "Sign in to continue: the organization’s Codex route no longer applies to this workspace, and there is no other Codex login here. Ask an owner or admin to connect a Codex login, then send again.",
+    );
+    expect(signInAgain(info(removed), true)).toBeNull();
     // A state word this app does not know is not printed.
     const unknown = signInMessage(info({ provider: "codex", state: "quarantined_v2" }), true)!;
     expect(unknown).toContain("Codex login is not available");

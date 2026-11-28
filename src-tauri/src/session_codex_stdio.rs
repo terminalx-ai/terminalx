@@ -924,7 +924,13 @@ impl SessionManager {
                         let actions = engine.answer(&request, "deny")?;
                         self.apply_codex_actions_with_approval(rt, actions, None)?;
                     }
-                    if turn_end && !rt.turn_open && rt.recovery == Some(RecoveryKind::SignedOut) { self.retire_codex_stdio_later(rt); }
+                    // A refused sign-in, or an organization route that went during
+                    // the turn (PRO-310, which finished on it): the next turn starts
+                    // Codex again on the login there is then.
+                    if turn_end && !rt.turn_open
+                        && (rt.recovery == Some(RecoveryKind::SignedOut) || (rt.route_switch_after_turn && self.route_switch_now(rt).is_some())) {
+                        self.retire_codex_stdio_later(rt);
+                    }
                 }
                 StdioAction::Accepted => {
                     if let Some((seq, acknowledged)) = rt.stdio_followups.active.as_mut() {
@@ -1022,7 +1028,7 @@ impl SessionManager {
     /// ([`Self::retire_codex_stdio`]), off this thread, which is the reader
     /// the exit is drained by. Until then the tab is busy to the cloud
     /// mailbox, so what was queued behind the turn waits for a new one.
-    fn retire_codex_stdio_later(&self, rt: &mut TabRuntime) {
+    pub(super) fn retire_codex_stdio_later(&self, rt: &mut TabRuntime) {
         let Engine::CodexStdio(engine) = &rt.engine else { return };
         if engine.exited || engine.blocked || rt.stopping || retiring(rt, &engine.launch) { return; }
         let launch = engine.launch.clone();

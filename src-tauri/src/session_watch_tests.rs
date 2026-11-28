@@ -437,6 +437,7 @@ impl Rig {
             last_settings_report: None, collaboration_stance: None, collaboration_raw: None, collaboration_prompts: HashMap::new(), collaboration_settings: HashMap::new(),
             reported_mode_to_judge: None,
             restart_claim: None,
+            route_switch_after_turn: false,
             stopping: false,
             stop_in_flight: false,
             stopping_pid: None,
@@ -4269,5 +4270,80 @@ fn wait_for_card(rig: &Rig, worker: &std::thread::JoinHandle<HookReply>) -> Stri
         assert!(!worker.is_finished(), "the call must ask");
         assert!(Instant::now() < deadline, "the call must publish a card");
         std::thread::sleep(MOMENT);
+    }
+}
+
+// ------------------------------------------------- organization routes (PRO-310)
+
+fn route_notices(rig: &Rig) -> Vec<String> {
+    rig.notices().into_iter().filter(|text| text.starts_with("The organization's")).collect()
+}
+
+/// A route removed while the tab is between turns: the agent moves at once,
+/// starting again on the next login or, with none, stopping at "Sign in to
+/// continue", the session told either way. A route that still applies moves
+/// nothing.
+#[test]
+fn an_idle_tab_leaves_an_organization_route_that_went_for_the_next_login() {
+    use crate::cloud_grants::{Replacement, RouteSwitch};
+    for (switch, action, notice) in [
+        (
+            RouteSwitch::Login(Replacement::OwnRoute),
+            RouteAction::Restart,
+            "The organization's Claude Code route no longer applies to this workspace, so Claude Code now uses your own route.",
+        ),
+        (
+            RouteSwitch::SignIn,
+            RouteAction::Stop,
+            "The organization's Claude Code route no longer applies to this workspace, and Claude Code has no other login here. Sign in to continue.",
+        ),
+    ] {
+        let rig = Rig::new();
+        let taken = super::tests::stand_in_route_switch(None);
+        taken.lock().unwrap().clear();
+        rig.manager.switch_organization_routes();
+        assert!(taken.lock().unwrap().is_empty() && route_notices(&rig).is_empty(), "the route still applies");
+        super::tests::stand_in_route_switch(Some(switch));
+        rig.manager.switch_organization_routes();
+        assert_eq!(*taken.lock().unwrap(), [action]);
+        assert_eq!(route_notices(&rig), [notice]);
+    }
+}
+
+/// A route removed while a turn runs (PRO-310): the turn is left to finish
+/// on the route it started with, and only its end moves the agent, with a
+/// notice that says the turn finished on the route.
+#[test]
+fn a_turn_running_when_its_organization_route_goes_finishes_on_it() {
+    use crate::cloud_grants::{Replacement, RouteSwitch};
+    for (switch, action, notice) in [
+        (
+            RouteSwitch::Login(Replacement::OrganizationLogin),
+            RouteAction::Restart,
+            "The organization's Claude Code route no longer applies to this workspace. The turn that was running finished on it; Claude Code now uses the organization's login.",
+        ),
+        (
+            RouteSwitch::SignIn,
+            RouteAction::Stop,
+            "The organization's Claude Code route no longer applies to this workspace. The turn that was running finished on it, and Claude Code has no other login here. Sign in to continue.",
+        ),
+    ] {
+        let rig = Rig::new();
+        rig.start_turn();
+        let taken = super::tests::stand_in_route_switch(Some(switch));
+        taken.lock().unwrap().clear();
+        rig.manager.switch_organization_routes();
+        assert!(taken.lock().unwrap().is_empty(), "nothing interrupts the running turn");
+        assert!(route_notices(&rig).is_empty());
+        assert!(rig.turn_open());
+        assert!(rig.rt.lock().unwrap().route_switch_after_turn);
+        rig.end_turn_in_transcript();
+        rig.advance(PATIENCE.settle);
+        rig.tick();
+        assert!(!rig.turn_open());
+        assert_eq!(rig.completed_turns(), 1, "the turn completed as it would have");
+        assert_eq!(*taken.lock().unwrap(), [action]);
+        assert_eq!(route_notices(&rig), [notice]);
+        assert!(!rig.rt.lock().unwrap().route_switch_after_turn);
     }
 }
