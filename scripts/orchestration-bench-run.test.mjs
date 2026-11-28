@@ -376,7 +376,7 @@ describe("plan approval", () => {
     const on = capture(repo);
     expect(await main(["--task", "fix-add", "--arrangement", "lead-low-escalate", "--dry-run"], on.io)).toBe(0);
     expect(on.out()).toContain("Plan approval is on (the app's default (no settings file))");
-    const off = capture(repo, { settings: { orchestrator: { projects: { [repo]: { requireApproval: false } } } } });
+    const off = capture(repo, { settings: { orchestrator: { projects: { [mainCheckout(repo)]: { requireApproval: false } } } } });
     expect(await main(["--task", "fix-add", "--arrangement", "lead-mid-workers", "--dry-run"], off.io)).toBe(0);
     expect(off.out()).toContain("Plan approval is off (this project's setting)");
     const single = capture(repo);
@@ -439,7 +439,7 @@ describe("dry run", () => {
     expect(text).toContain("Budget: $3.00; each run stops at $3.00.");
     for (const [index, name] of ARRANGEMENTS.entries()) expect(text).toContain(`run ${index + 1} of 4: fix-add under ${name}`);
     expect(text).toContain("terminalx sessions usage '<session>' --json");
-    expect(text).toContain(join(realpathSync(repo), "bench/orchestration/results.jsonl"));
+    expect(text).toContain(join(realpathSync.native(repo), "bench/orchestration/results.jsonl"));
   });
 
   // POSIX shell, pnpm and `/` paths: run on macOS and Linux.
