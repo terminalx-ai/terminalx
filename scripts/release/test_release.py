@@ -27,7 +27,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import release as cli  # noqa: E402
-from txrelease import assets, config, content, credentials, notarize, publish, secrets_scan, source, verify  # noqa: E402
+from txrelease import assets, build, config, content, credentials, notarize, publish, secrets_scan, source, verify  # noqa: E402
 from txrelease.config import LATEST_DMG, ReleaseError  # noqa: E402
 from txrelease.proc import Result, Runner, sha256, write_json  # noqa: E402
 
@@ -303,6 +303,28 @@ class AssetTests(TempCase):
         (self.release.assets / LATEST_DMG).unlink()
         with self.assertRaises(ReleaseError):
             assets.check_assets(self.release, self.release.assets)
+
+
+class UpdaterArchiveTests(TempCase):
+    """The updater extracts TerminalX.app.tar.gz with a plain tar reader, so a `._` member becomes a file in the app."""
+
+    def test_the_archive_is_made_without_macos_metadata_and_without_signing_secrets(self):
+        release = Fixture(self.directory).release
+        command = build.archive_command(release)
+        self.assertEqual(command[:2], ['tar', '--no-mac-metadata'])
+        self.assertIn(str(release.built_archive), command)
+        env = build.archive_env({'PATH': '/bin', 'TAURI_SIGNING_PRIVATE_KEY': 'secret', 'WINDOWS_CERTIFICATE': 'cert'})
+        self.assertEqual(env, {'PATH': '/bin', 'COPYFILE_DISABLE': '1'})
+
+    def test_verify_finds_appledouble_members_that_bsdtar_would_hide(self):
+        clean = self.directory / 'clean.tar.gz'
+        make_archive(clean, {'TerminalX.app/Contents/MacOS/raccoon': b'bin'})
+        self.assertEqual(verify.metadata_members(clean), [])
+        dirty = self.directory / 'dirty.tar.gz'
+        make_archive(dirty, {'TerminalX.app/Contents/MacOS/raccoon': b'bin', 'TerminalX.app/Contents/MacOS/._raccoon': b'meta',
+                             'TerminalX.app/._Contents': b'meta'})
+        self.assertEqual(sorted(verify.metadata_members(dirty)),
+                         ['TerminalX.app/._Contents', 'TerminalX.app/Contents/MacOS/._raccoon'])
 
 
 class NotarizeTests(TempCase):
