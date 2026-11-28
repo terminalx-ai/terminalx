@@ -124,6 +124,7 @@ describe("ReviewStackPane off-screen editor recycling (P-41)", () => {
     render(<ReviewStackPane entry={entry} visible />);
     const sectionA = await screen.findByRole("region", { name: "a.ts" });
     expect(screen.queryByTestId("diff-pane-a.ts")).toBeNull();
+    await waitFor(() => expect(observers.some((entry) => entry.target === sectionA)).toBe(true));
 
     // Scroll sectionA into view -> mounts DiffPane and fetches content once.
     act(() => emitIntersection(sectionA, true));
@@ -157,6 +158,7 @@ describe("ReviewStackPane off-screen editor recycling (P-41)", () => {
     };
     render(<ReviewStackPane entry={entry} visible />);
     const sectionA = await screen.findByRole("region", { name: "a.ts" });
+    await waitFor(() => expect(observers.some((entry) => entry.target === sectionA)).toBe(true));
     act(() => emitIntersection(sectionA, true));
     await screen.findByTestId("diff-pane-a.ts");
 

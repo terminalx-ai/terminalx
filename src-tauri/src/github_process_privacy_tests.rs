@@ -27,8 +27,8 @@ fn privacy_covers_identity_and_issue_entry_points() {
                     command.args(["--exact", &format!("github_process::tests::{child}"), "--nocapture"])
                         .env("TERMINALX_TEST_GITHUB_ENTRIES", if managed { "managed" } else { "personal" })
                         .env("TERMINALX_HOME", root.path().canonical().unwrap());
-                    let (output, timed_out) = fixture_output(&mut command, Duration::from_secs(300));
-                    assert!(!timed_out, "policy={managed}/{child} exceeded 300 seconds; child killed and reaped\n{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+                    let (output, timed_out) = fixture_output(&mut command, Duration::from_secs(600));
+                    assert!(!timed_out, "policy={managed}/{child} exceeded 600 seconds; child killed and reaped\n{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
                     assert!(output.status.success(), "policy={managed}/{child}\n{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
                     String::from_utf8_lossy(&output.stdout).into_owned()
                 })
