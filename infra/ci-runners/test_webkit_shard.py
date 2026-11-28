@@ -95,10 +95,12 @@ class WebKitShardTest(unittest.TestCase):
             with self.subTest(seed=seed):
                 self.assertEqual(deal(dict(items))["deals"], self.dealt["deals"])
 
-    def test_measured_times_give_four_even_parts(self):
+    def test_measured_times_give_even_parts(self):
         weights = self.dealt["weights"]
-        sums = [sum(weights[name] for name in part) for part in self.dealt["deals"]["4"]]
-        self.assertLessEqual(max(sums), min(sums) * 1.10, f"four parts' predicted times (tenths of check-seconds): {sums}")
+        for count in ("4", "6"):
+            with self.subTest(count=count):
+                sums = [sum(weights[name] for name in part) for part in self.dealt["deals"][count]]
+                self.assertLessEqual(max(sums), min(sums) * 1.10, f"{count} parts' predicted times (tenths of check-seconds): {sums}")
 
     def test_the_kinds_stay_spread(self):
         # The two dealt apart are in different parts; Vite checks differ by at most one between parts.
