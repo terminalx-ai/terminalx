@@ -6,6 +6,8 @@
 //! optional `paneKey`, `eventKind`, and a sanitized short `hostLabel`) leaves
 //! the desktop.
 
+use std::io::Read as _;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use serde::Serialize;
@@ -15,6 +17,20 @@ const PUSH_NOTIFY_PATH: &str = "/v1/desktop/push/notify";
 const PUSH_NOTIFY_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_ID_LEN: usize = 128;
 const MAX_HOST_LABEL_LEN: usize = 40;
+
+fn push_agent() -> &'static ureq::Agent {
+    static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
+    AGENT.get_or_init(|| {
+        crate::data_privacy::http_agent()
+            .timeout(PUSH_NOTIFY_TIMEOUT)
+            .redirects(0)
+            .build()
+    })
+}
+
+fn discard_body(response: ureq::Response) {
+    let _ = std::io::copy(&mut response.into_reader().take(64 * 1024), &mut std::io::sink());
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -129,18 +145,18 @@ pub(crate) fn send_push_notify(
         Ok(body) => body,
         Err(_) => return false,
     };
-    match crate::account::cloud_agent()
+    match push_agent()
         .post(&url)
         .timeout(PUSH_NOTIFY_TIMEOUT)
         .set("Authorization", &format!("Bearer {access_token}"))
         .send_json(body)
     {
         Ok(response) => {
-            crate::account::discard_body(response);
+            discard_body(response);
             true
         }
         Err(ureq::Error::Status(_, response)) => {
-            crate::account::discard_body(response);
+            discard_body(response);
             false
         }
         Err(ureq::Error::Transport(_)) => false,
@@ -212,9 +228,31 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let server = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
+            let mut req_bytes = Vec::new();
             let mut buf = [0u8; 4096];
-            let n = stream.read(&mut buf).unwrap();
-            let req = String::from_utf8_lossy(&buf[..n]).to_string();
+            loop {
+                let n = stream.read(&mut buf).unwrap();
+                if n == 0 {
+                    break;
+                }
+                req_bytes.extend_from_slice(&buf[..n]);
+                if let Some(sep) = req_bytes.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&req_bytes[..sep]);
+                    let content_len = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (k, v) = line.split_once(':')?;
+                            k.eq_ignore_ascii_case("content-length")
+                                .then(|| v.trim().parse::<usize>().ok())
+                                .flatten()
+                        })
+                        .unwrap_or(0);
+                    if req_bytes.len() >= sep + 4 + content_len {
+                        break;
+                    }
+                }
+            }
+            let req = String::from_utf8_lossy(&req_bytes).to_string();
             stream
                 .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 10\r\n\r\n{\"sent\":1}")
                 .unwrap();

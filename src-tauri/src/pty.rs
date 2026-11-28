@@ -435,10 +435,7 @@ impl OwnedGroup {
 fn reap_group_async(group: Arc<OwnedGroup>) {
     use std::sync::{Condvar, OnceLock};
     static REAPER: OnceLock<(Mutex<Vec<Arc<OwnedGroup>>>, Condvar)> = OnceLock::new();
-    let state = REAPER.get_or_init(|| {
-        let pair = (Mutex::new(Vec::<Arc<OwnedGroup>>::new()), Condvar::new());
-        pair
-    });
+    let state = REAPER.get_or_init(|| (Mutex::new(Vec::<Arc<OwnedGroup>>::new()), Condvar::new()));
     static STARTED: std::sync::Once = std::sync::Once::new();
     STARTED.call_once(|| {
         let _ = std::thread::Builder::new().name("pty-group-reaper".into()).spawn(move || {
@@ -1852,7 +1849,8 @@ impl Terminals {
             std::thread::Builder::new().name(format!("pty-emit-{id}")).spawn(move || {
                 let _emit_end = emit_end;
                 let flush = |acc: &mut Vec<u8>, size: OutputSize| {
-                    let (track_screen, deliveries): (bool, Vec<(String, Arc<Mutex<SizedTap>>)>) = {
+                    type TapDelivery = (String, Arc<Mutex<SizedTap>>);
+                    let (track_screen, deliveries): (bool, Vec<TapDelivery>) = {
                         // Held across scrollback update and view snapshotting, so a view
                         // attaching now gets these bytes exactly once: in the scrollback
                         // it is handed, or from its tap. Dropped before VT100 processing

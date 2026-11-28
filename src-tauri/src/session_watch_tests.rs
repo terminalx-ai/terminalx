@@ -3765,13 +3765,16 @@ fn later_pty_confirmation_resolves_only_the_captured_batch_failure() {
     let first = pty::StoppingPane::wait_all(&captured, Duration::ZERO);
     assert!(!first);
     assert!(SessionManager::settle_pty_wait(&captured, first).unwrap_err().to_string().contains("PTY process exit could not be confirmed"));
+    let posix = cfg!(unix) || std::path::Path::new(&pty::shell()).file_stem()
+        .is_some_and(|stem| matches!(stem.to_str(), Some("bash" | "sh" | "zsh")));
     rig.manager.terminals.spawn(rig.manager.sink.clone(), &rig.pane, pty::PaneSpec {
         cwd: rig._dir.path().to_str().unwrap(), cols: 80, rows: 24,
-        command: Some("sh -c 'read line'"), env: &[],
+        command: Some(if posix { "sh -c 'read line'" } else { "Read-Host" }), env: &[],
     }).unwrap();
     let replacement = rig.manager.terminals.pid(&rig.pane).unwrap();
     assert!(SessionManager::settle_pty_wait(&captured, first).is_err(), "a new pane cannot settle the old handle");
     failure.store(false, std::sync::atomic::Ordering::SeqCst);
+    assert!(pty::StoppingPane::wait_all(&captured, Duration::from_secs(5)), "captured batch should confirm once inspection recovers");
     SessionManager::settle_pty_wait(&captured, first).unwrap();
     assert!(crate::harness::host::is_alive(replacement), "confirmation must not target the reused pane");
 }

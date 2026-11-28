@@ -265,9 +265,17 @@ pub fn prepare_handover(settle: Duration, agreed: &[String]) -> Result<Exclusive
     bail!("{} under way", cut.join("; "))
 }
 
+#[derive(Default)]
+struct HeartbeatState {
+    detail: Option<String>,
+    stop: bool,
+}
+
+type HeartbeatSignal = Arc<(Mutex<HeartbeatState>, Condvar)>;
+
 pub struct Supervisor {
     stopped: Arc<AtomicBool>,
-    heartbeat_signal: Arc<(Mutex<(Option<String>, bool)>, Condvar)>,
+    heartbeat_signal: HeartbeatSignal,
     worker: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -321,7 +329,7 @@ impl Supervisor {
         STOPPING.store(false, Ordering::Release);
         let stopped = Arc::new(AtomicBool::new(false));
         let worker_stopped = stopped.clone();
-        let heartbeat_signal = Arc::new((Mutex::new((None::<String>, false)), Condvar::new()));
+        let heartbeat_signal: HeartbeatSignal = Arc::new((Mutex::new(HeartbeatState::default()), Condvar::new()));
         let controller_signal = heartbeat_signal.clone();
         let thread_signal = heartbeat_signal.clone();
         let heartbeat_root = root.clone();
@@ -334,7 +342,7 @@ impl Supervisor {
                 let (detail, stop) = {
                     let mut guard = lock.lock().unwrap();
                     if let Some(written) = last_write {
-                        while !guard.1 && !heartbeat_stopped.load(Ordering::Acquire) && guard.0 == last_detail {
+                        while !guard.stop && !heartbeat_stopped.load(Ordering::Acquire) && guard.detail == last_detail {
                             let remaining = HEARTBEAT_INTERVAL.saturating_sub(written.elapsed());
                             if remaining.is_zero() {
                                 break;
@@ -346,7 +354,7 @@ impl Supervisor {
                             }
                         }
                     }
-                    (guard.0.clone(), guard.1)
+                    (guard.detail.clone(), guard.stop)
                 };
                 if stop || heartbeat_stopped.load(Ordering::Acquire) {
                     break;
@@ -377,8 +385,8 @@ impl Supervisor {
             {
                 let (lock, cvar) = &*controller_signal;
                 let mut guard = lock.lock().unwrap();
-                if guard.0 != next_detail {
-                    guard.0 = next_detail;
+                if guard.detail != next_detail {
+                    guard.detail = next_detail;
                     cvar.notify_all();
                 }
             }
@@ -403,7 +411,7 @@ impl Supervisor {
         worker_stopped.store(true, Ordering::Release);
         {
             let (lock, cvar) = &*controller_signal;
-            lock.lock().unwrap().1 = true;
+            lock.lock().unwrap().stop = true;
             cvar.notify_all();
         }
         let _ = heartbeat.join();
@@ -419,7 +427,7 @@ impl Supervisor {
                 stopped.store(true, Ordering::Release);
                 {
                     let (lock, cvar) = &*heartbeat_signal;
-                    lock.lock().unwrap().1 = true;
+                    lock.lock().unwrap().stop = true;
                     cvar.notify_all();
                 }
                 Err(error.into())
@@ -432,7 +440,7 @@ impl Supervisor {
         self.stopped.store(true, Ordering::Release);
         {
             let (lock, cvar) = &*self.heartbeat_signal;
-            lock.lock().unwrap().1 = true;
+            lock.lock().unwrap().stop = true;
             cvar.notify_all();
         }
         if let Some(worker) = self.worker.take() {

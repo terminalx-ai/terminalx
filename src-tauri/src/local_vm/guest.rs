@@ -1213,7 +1213,7 @@ impl Guest {
                     } else if cur.dev == dev && cur.ino == ino && len > cur.offset {
                         // Fast path 2: appended bytes on the same inode; verify tail anchor then read only the delta.
                         match read_incremental_events(&log_path, cur)? {
-                            Some((delta_events, consumed, new_anchor)) => {
+                            Some(IncrementalEvents { events: delta_events, consumed, anchor: new_anchor }) => {
                                 let new_offset = cur.offset + consumed;
                                 self.transcript_cursors.lock().unwrap().insert(
                                     task_id.clone(),
@@ -2436,10 +2436,16 @@ fn anchor_tail(prev_anchor: &[u8], appended: &[u8]) -> Vec<u8> {
     }
 }
 
+struct IncrementalEvents {
+    events: Vec<AgentEvent>,
+    consumed: u64,
+    anchor: Vec<u8>,
+}
+
 fn read_incremental_events(
     path: &Path,
     cur: &TranscriptCursor,
-) -> Result<Option<(Vec<AgentEvent>, u64, Vec<u8>)>> {
+) -> Result<Option<IncrementalEvents>> {
     let mut file = File::open(path)?;
     if !cur.tail_anchor.is_empty() {
         let anchor_start = cur.offset.saturating_sub(cur.tail_anchor.len() as u64);
@@ -2454,8 +2460,8 @@ fn read_incremental_events(
     let mut delta = Vec::new();
     file.read_to_end(&mut delta)?;
     let (events, consumed) = parse_jsonl_events(&delta);
-    let new_anchor = anchor_tail(&cur.tail_anchor, &delta[..consumed]);
-    Ok(Some((events, consumed as u64, new_anchor)))
+    let anchor = anchor_tail(&cur.tail_anchor, &delta[..consumed]);
+    Ok(Some(IncrementalEvents { events, consumed: consumed as u64, anchor }))
 }
 
 enum FullRead {

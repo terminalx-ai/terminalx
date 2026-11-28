@@ -688,17 +688,17 @@ pub(crate) type RecordObserver = std::sync::Arc<dyn Fn(&Path, u64, &HashSet<Stri
 
 fn known_value_decoder(decode: Decoder, marker: Option<Marker>) -> Option<ValueDecoder> {
     if let Some(m) = marker {
-        if m as *const () as usize == crate::harness::claude::transcript::decode_marked as *const () as usize {
+        if std::ptr::eq(m as *const (), crate::harness::claude::transcript::decode_marked as *const ()) {
             return Some(crate::harness::claude::transcript::decode_value);
         }
-        if m as *const () as usize == crate::harness::codex::rollout::decode_marked as *const () as usize {
+        if std::ptr::eq(m as *const (), crate::harness::codex::rollout::decode_marked as *const ()) {
             return Some(crate::harness::codex::rollout::decode_value);
         }
     } else {
-        if decode as *const () as usize == crate::harness::claude::transcript::decode_line as *const () as usize {
+        if std::ptr::eq(decode as *const (), crate::harness::claude::transcript::decode_line as *const ()) {
             return Some(crate::harness::claude::transcript::decode_value);
         }
-        if decode as *const () as usize == crate::harness::codex::rollout::decode_line as *const () as usize {
+        if std::ptr::eq(decode as *const (), crate::harness::codex::rollout::decode_line as *const ()) {
             return Some(crate::harness::codex::rollout::decode_value);
         }
     }
@@ -1729,7 +1729,7 @@ mod tests {
         assert_eq!(records[0].1, Some(TurnMark::Opened));
         assert_eq!(records[0].2, "2026-11-01T14:00:00Z");
         // Finish the partial line.
-        let mut rest = claude_line[20..].as_bytes().to_vec();
+        let mut rest = claude_line.as_bytes()[20..].to_vec();
         rest.push(b'\n');
         let tail_records = claude.push_records(&rest);
         assert_eq!(tail_records.len(), 1);
