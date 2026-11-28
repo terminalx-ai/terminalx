@@ -409,12 +409,16 @@ fn mask(key: &str) -> String {
 const CATALOG_URL: &str = "https://models.dev/api.json";
 const CATALOG_TIMEOUT: Duration = Duration::from_secs(10);
 
+fn catalog_agent() -> &'static ureq::Agent {
+    static AGENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
+    AGENT.get_or_init(|| crate::data_privacy::http_agent().timeout(CATALOG_TIMEOUT).build())
+}
+
 /// models.dev's providers, from OpenCode's copy or, without one, the site.
 fn catalog_value(paths: &Paths, fetch: bool) -> Result<Map<String, Value>, String> {
     static FETCHED: std::sync::Mutex<Option<Map<String, Value>>> = std::sync::Mutex::new(None);
     catalog_from(paths, fetch, &FETCHED, || {
-        let agent = crate::data_privacy::http_agent().timeout(CATALOG_TIMEOUT).build();
-        let value = agent.get(CATALOG_URL).call().map_err(|error| format!("Couldn’t download the provider list from models.dev: {error}"))?
+        let value = catalog_agent().get(CATALOG_URL).call().map_err(|error| format!("Couldn’t download the provider list from models.dev: {error}"))?
             .into_json::<Value>().map_err(|error| format!("models.dev sent a provider list TerminalX can’t read: {error}"))?;
         value.as_object().cloned().ok_or_else(|| "models.dev sent a provider list TerminalX can’t read.".to_owned())
     })
@@ -594,14 +598,21 @@ fn probe_for(provider: &str, npm: Option<&str>, api: Option<&str>, base: Option<
 
 const CHECK_TIMEOUT: Duration = Duration::from_secs(10);
 
+fn check_agent() -> &'static ureq::Agent {
+    static AGENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
+    // Never follow HTTP redirects while carrying API key headers (x-api-key,
+    // x-goog-api-key, Authorization), which ureq forwards across 3xx redirects.
+    AGENT.get_or_init(|| crate::data_privacy::http_agent().timeout(CHECK_TIMEOUT).redirects(0).build())
+}
+
 /// Ask the provider whether it takes `key`. A refusal is an error; a
 /// provider that cannot be asked is `NotChecked`.
 fn check_key(provider: &CatalogProvider, npm: Option<&str>, key: &str, base: Option<&str>) -> Result<KeyCheck, String> {
     let Some((url, style)) = probe_for(&provider.id, npm, provider.api.as_deref(), base) else {
         return Ok(KeyCheck::NotChecked { reason: format!("TerminalX has no way to check a {} key; OpenCode will say at the first message if it is refused.", provider.name) });
     };
-    let agent = crate::data_privacy::http_agent().timeout(CHECK_TIMEOUT).build();
-    let request = agent.get(&url);
+    valid_url(&url)?;
+    let request = check_agent().get(&url);
     let request = match style {
         "anthropic" if !key.is_empty() => request.set("x-api-key", key).set("anthropic-version", "2023-06-01"),
         "google" if !key.is_empty() => request.set("x-goog-api-key", key),
@@ -609,6 +620,11 @@ fn check_key(provider: &CatalogProvider, npm: Option<&str>, key: &str, base: Opt
         _ => request,
     };
     match request.call() {
+        Ok(response) if (300..400).contains(&response.status()) => Err(format!(
+            "{} returned an HTTP {} redirect; refusing to follow redirects while checking an API key.",
+            provider.name,
+            response.status()
+        )),
         Ok(_) => Ok(KeyCheck::Accepted),
         Err(ureq::Error::Status(401 | 403, _)) => Err(if key.is_empty() { format!("{} refused the connection without a key.", provider.name) } else { format!("{} didn’t accept this key. Check that it was copied whole and is still active.", provider.name) }),
         Err(ureq::Error::Status(code, _)) => Ok(KeyCheck::NotChecked { reason: format!("{} answered {code}, so the key could not be checked.", provider.name) }),
@@ -626,10 +642,32 @@ fn find_provider(paths: &Paths, id: &str) -> Result<(CatalogProvider, Option<Str
     Ok((catalog_provider(id, value), text(value, "npm")))
 }
 
+fn is_loopback_host(host: Option<url::Host<&str>>) -> bool {
+    match host {
+        Some(url::Host::Domain(domain)) => domain.eq_ignore_ascii_case("localhost") || domain.to_ascii_lowercase().ends_with(".localhost"),
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        None => false,
+    }
+}
+
 fn valid_url(url: &str) -> Result<(), String> {
     let parsed = url::Url::parse(url).map_err(|_| format!("{} is not a web address.", url.chars().take(80).collect::<String>()))?;
-    if !matches!(parsed.scheme(), "http" | "https") { return Err("The base URL must start with http:// or https://.".into()); }
-    Ok(())
+    match parsed.scheme() {
+        "https" => {
+            if parsed.host().is_none() {
+                return Err(format!("{} is not a web address.", url.chars().take(80).collect::<String>()));
+            }
+            Ok(())
+        }
+        "http" => {
+            if !is_loopback_host(parsed.host()) {
+                return Err("Non-local base URLs must use https:// (plain http:// is only allowed for localhost).".into());
+            }
+            Ok(())
+        }
+        _ => Err("The base URL must start with http:// or https://.".into()),
+    }
 }
 
 /// Connect `id` with `key` (or, for Ollama, its server), after its provider
@@ -1527,5 +1565,52 @@ mod tests {
         assert_eq!(latest_log(&paths), Some(paths.log_dir()), "an empty log is passed over for the folder");
         std::fs::write(paths.log_dir().join("2026-11-06T231609.log"), "INFO started").unwrap();
         assert_eq!(latest_log(&paths), Some(paths.log_dir().join("2026-11-06T231609.log")));
+    }
+
+    #[test]
+    fn valid_url_rejects_non_loopback_http_and_allows_loopback_or_https() {
+        assert!(valid_url("https://api.anthropic.com/v1").is_ok());
+        assert!(valid_url("http://127.0.0.1:11434/v1").is_ok());
+        assert!(valid_url("http://localhost:8080/v1").is_ok());
+        assert!(valid_url("http://[::1]:11434/v1").is_ok());
+        assert!(valid_url("http://evil.example.com/v1").is_err());
+        assert!(valid_url("http://10.0.0.5:8080/v1").is_err());
+        assert!(valid_url("ftp://example.com").is_err());
+    }
+
+    #[test]
+    fn check_key_does_not_follow_redirects_with_api_key_headers() {
+        use std::io::{Read, Write};
+        let (sink_url, sink_listener) = untouched();
+        let redirect_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let redirect_addr = redirect_listener.local_addr().unwrap();
+        let target = format!("{sink_url}/steal");
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = redirect_listener.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf);
+            let resp = format!("HTTP/1.1 302 Found\r\nLocation: {target}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            let _ = stream.write_all(resp.as_bytes());
+        });
+        let provider = CatalogProvider {
+            id: "anthropic".into(),
+            name: "Anthropic".into(),
+            env: vec![],
+            api: None,
+            doc: None,
+            model_count: 0,
+            base_url: None,
+            local: false,
+        };
+        let err = check_key(
+            &provider,
+            Some("@ai-sdk/anthropic"),
+            "sk-ant-secret-key-0123456789",
+            Some(&format!("http://{redirect_addr}/v1")),
+        )
+        .unwrap_err();
+        server.join().unwrap();
+        assert!(err.contains("redirect"), "expected redirect refusal, got: {err}");
+        never_asked(&sink_listener, "redirect target");
     }
 }

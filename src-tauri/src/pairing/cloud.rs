@@ -21,13 +21,43 @@ pub enum GrantScope {
 }
 
 impl GrantScope {
-    /// The query that follows `bindingGeneration`. Mobile sends none, as before.
-    fn query(self) -> &'static str {
+    /// Optional query parameter that follows `bindingGeneration`.
+    fn query_pair(self) -> Option<(&'static str, &'static str)> {
         match self {
-            Self::Mobile => "",
-            Self::Runtime => "&requestedScope=runtime",
+            Self::Mobile => None,
+            Self::Runtime => Some(("requestedScope", "runtime")),
         }
     }
+}
+
+fn require_opaque_segment(name: &str, value: &str) -> Result<()> {
+    if !crate::remote::host::valid_opaque_id(value) {
+        return Err(anyhow!("invalid {name}")).context(Category::Protocol);
+    }
+    Ok(())
+}
+
+fn build_api_path(segments: &[&str], query: &[(&str, &str)]) -> Result<String> {
+    let mut url = url::Url::parse("https://placeholder.invalid").context(Category::Protocol)?;
+    {
+        let mut path_segments = url
+            .path_segments_mut()
+            .map_err(|_| anyhow!("invalid cloud API path"))
+            .context(Category::Protocol)?;
+        path_segments.extend(segments.iter().copied());
+    }
+    if !query.is_empty() {
+        let mut pairs = url.query_pairs_mut();
+        for (k, v) in query {
+            pairs.append_pair(k, v);
+        }
+    }
+    let mut out = url.path().to_string();
+    if let Some(q) = url.query() {
+        out.push('?');
+        out.push_str(q);
+    }
+    Ok(out)
 }
 
 const RELAY_DIRECTOR_URL: &str = "https://relay.terminalx.ai";
@@ -318,9 +348,11 @@ fn verify_guest_assertion_at(
 /// so the caller sends one only while the control channel is answering;
 /// otherwise the binding lapses to "unverifiable" on its own.
 pub fn heartbeat(base: &str, context: &AccountContext, host_id: &str, generation: u64, capabilities: &[String]) -> Result<()> {
+    require_opaque_segment("host_id", host_id)?;
+    let path = build_api_path(&["v1", "desktop", "host-account-bindings", host_id, "heartbeat"], &[])?;
     request_unit(
         base,
-        &format!("/v1/desktop/host-account-bindings/{host_id}/heartbeat"),
+        &path,
         "POST",
         Some(json!({
             "bindingGeneration": generation,
@@ -336,9 +368,11 @@ pub fn unbind(context: &AccountContext, host_id: &str, generation: u64) -> Resul
 }
 
 pub fn unbind_at(base: &str, context: &AccountContext, host_id: &str, generation: u64) -> Result<()> {
+    require_opaque_segment("host_id", host_id)?;
+    let path = build_api_path(&["v1", "desktop", "host-account-bindings", host_id], &[])?;
     request_unit(
         base,
-        &format!("/v1/desktop/host-account-bindings/{host_id}"),
+        &path,
         "DELETE",
         Some(json!({ "bindingGeneration": generation, "reason": "host-sign-out" })),
         &context.access_token,
@@ -352,10 +386,19 @@ pub fn pending_grants(
     generation: u64,
     scope: GrantScope,
 ) -> Result<Vec<AccountPairingGrant>> {
-    let query = scope.query();
+    require_opaque_segment("host_id", host_id)?;
+    let gen = generation.to_string();
+    let mut query = vec![("bindingGeneration", gen.as_str())];
+    if let Some(pair) = scope.query_pair() {
+        query.push(pair);
+    }
+    let path = build_api_path(
+        &["v1", "desktop", "host-account-bindings", host_id, "pairing-grant-requests"],
+        &query,
+    )?;
     request_json::<GrantList>(
         base,
-        &format!("/v1/desktop/host-account-bindings/{host_id}/pairing-grant-requests?bindingGeneration={generation}{query}"),
+        &path,
         "GET",
         None,
         &context.access_token,
@@ -369,9 +412,15 @@ pub fn publish_envelope(
     request_id: &str,
     envelope: &AccountPairingEnvelope,
 ) -> Result<()> {
+    require_opaque_segment("host_id", host_id)?;
+    require_opaque_segment("request_id", request_id)?;
+    let path = build_api_path(
+        &["v1", "desktop", "host-account-bindings", host_id, "pairing-grant-requests", request_id, "envelope"],
+        &[],
+    )?;
     request_unit(
         &crate::account::api_base_url(),
-        &format!("/v1/desktop/host-account-bindings/{host_id}/pairing-grant-requests/{request_id}/envelope"),
+        &path,
         "PUT",
         Some(serde_json::to_value(envelope)?),
         &context.access_token,
@@ -384,9 +433,15 @@ pub fn reject_grant(
     request_id: &str,
     generation: u64,
 ) -> Result<()> {
+    require_opaque_segment("host_id", host_id)?;
+    require_opaque_segment("request_id", request_id)?;
+    let path = build_api_path(
+        &["v1", "desktop", "host-account-bindings", host_id, "pairing-grant-requests", request_id, "reject"],
+        &[],
+    )?;
     request_unit(
         &crate::account::api_base_url(),
-        &format!("/v1/desktop/host-account-bindings/{host_id}/pairing-grant-requests/{request_id}/reject"),
+        &path,
         "POST",
         Some(json!({ "bindingGeneration": generation, "reason": "mint-failed" })),
         &context.access_token,
@@ -400,10 +455,19 @@ pub fn pending_revocations(
     generation: u64,
     scope: GrantScope,
 ) -> Result<Vec<AccountPairingRevocation>> {
-    let query = scope.query();
+    require_opaque_segment("host_id", host_id)?;
+    let gen = generation.to_string();
+    let mut query = vec![("bindingGeneration", gen.as_str())];
+    if let Some(pair) = scope.query_pair() {
+        query.push(pair);
+    }
+    let path = build_api_path(
+        &["v1", "desktop", "host-account-bindings", host_id, "revocations"],
+        &query,
+    )?;
     request_json::<RevocationList>(
         base,
-        &format!("/v1/desktop/host-account-bindings/{host_id}/revocations?bindingGeneration={generation}{query}"),
+        &path,
         "GET",
         None,
         &context.access_token,
@@ -421,9 +485,15 @@ pub fn revoke_host_grant(
     request_id: &str,
     generation: u64,
 ) -> Result<()> {
+    require_opaque_segment("host_id", host_id)?;
+    require_opaque_segment("request_id", request_id)?;
+    let path = build_api_path(
+        &["v1", "desktop", "host-account-bindings", host_id, "pairing-grant-requests", request_id, "revoke"],
+        &[],
+    )?;
     request_unit(
         base,
-        &format!("/v1/desktop/host-account-bindings/{host_id}/pairing-grant-requests/{request_id}/revoke"),
+        &path,
         "POST",
         Some(json!({ "bindingGeneration": generation, "reason": "host-removed" })),
         &context.access_token,
@@ -437,11 +507,15 @@ pub fn acknowledge_revocation(
     revocation_id: &str,
     generation: u64,
 ) -> Result<()> {
+    require_opaque_segment("host_id", host_id)?;
+    require_opaque_segment("revocation_id", revocation_id)?;
+    let path = build_api_path(
+        &["v1", "desktop", "host-account-bindings", host_id, "revocations", revocation_id, "acknowledge"],
+        &[],
+    )?;
     request_unit(
         base,
-        &format!(
-            "/v1/desktop/host-account-bindings/{host_id}/revocations/{revocation_id}/acknowledge"
-        ),
+        &path,
         "POST",
         Some(json!({ "bindingGeneration": generation })),
         &context.access_token,
@@ -1122,5 +1196,21 @@ mod tests {
         assert_eq!(assignment.assignment_epoch, 1);
         assert_eq!(assignment.cell_url, "https://cell-1.relay.terminalx.ai");
         server.join().unwrap();
+    }
+
+    #[test]
+    fn cloud_api_paths_validate_opaque_segments_and_encode_cleanly() {
+        let path = build_api_path(
+            &["v1", "desktop", "host-account-bindings", "host_1-a", "revocations"],
+            &[("bindingGeneration", "3"), ("requestedScope", "runtime")],
+        )
+        .unwrap();
+        assert_eq!(
+            path,
+            "/v1/desktop/host-account-bindings/host_1-a/revocations?bindingGeneration=3&requestedScope=runtime"
+        );
+        for bad in ["../admin", "a/b", "host?x=1", "host#frag", ""] {
+            assert!(require_opaque_segment("host_id", bad).is_err(), "expected rejection for {bad:?}");
+        }
     }
 }

@@ -96,20 +96,28 @@ fn read_refused_public(data_dir: &Path) -> Option<i64> {
 }
 
 pub(crate) fn private_dir(path: &Path) -> Result<()> {
-    std::fs::create_dir_all(path).with_context(|| format!("create {}", path.display()))?;
-    #[cfg(unix)]
+    #[cfg(windows)]
     {
-        use std::os::unix::fs::{MetadataExt, PermissionsExt};
-        let metadata = std::fs::symlink_metadata(path)?;
-        // SAFETY: geteuid has no preconditions.
-        if !metadata.is_dir() || metadata.uid() != unsafe { libc::geteuid() } {
-            bail!("{} is not a directory of this user", path.display());
-        }
-        if metadata.mode() & 0o077 != 0 {
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
-        }
+        crate::win::fs::create_private_dir_all(path).with_context(|| format!("create {}", path.display()))?;
+        return Ok(());
     }
-    Ok(())
+    #[cfg(not(windows))]
+    {
+        std::fs::create_dir_all(path).with_context(|| format!("create {}", path.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{MetadataExt, PermissionsExt};
+            let metadata = std::fs::symlink_metadata(path)?;
+            // SAFETY: geteuid has no preconditions.
+            if !metadata.is_dir() || metadata.uid() != unsafe { libc::geteuid() } {
+                bail!("{} is not a directory of this user", path.display());
+            }
+            if metadata.mode() & 0o077 != 0 {
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+            }
+        }
+        Ok(())
+    }
 }
 
 /// What the runtime gives the host to build its one workspace RPC from.

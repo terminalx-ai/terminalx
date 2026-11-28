@@ -121,7 +121,7 @@ impl KeychainKeys {
         let _ = self.service.set(key_service_name(app_identifier, crate::account::dev_keychain_service().as_deref()));
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows, all(target_os = "linux", feature = "desktop")))]
     fn service(&self) -> Result<&str> {
         self.service.get().map(String::as_str).ok_or_else(|| anyhow!("the key store is not configured"))
     }
@@ -131,28 +131,76 @@ fn key_account(organization_id: &str, workspace_id: &str, key_id: &str) -> Strin
     format!("{organization_id}/{workspace_id}/{key_id}")
 }
 
-// Through `crate::keychain`, which makes Keychain calls one at a time.
-#[cfg(target_os = "macos")]
+// Through `crate::keychain` (macOS Keychain, Windows DPAPI vault, Linux Secret Service).
+#[cfg(any(target_os = "macos", windows, all(target_os = "linux", feature = "desktop")))]
 impl KeyStore for KeychainKeys {
     fn put(&self, organization_id: &str, workspace_id: &str, key_id: &str, key: &[u8; crypto::KEY_LEN]) -> Result<()> {
-        crate::keychain::set(self.service()?, &key_account(organization_id, workspace_id, key_id), key).with_context(|| crate::platform_profile::localize("save a workspace key to the Keychain"))
+        crate::keychain::set(self.service()?, &key_account(organization_id, workspace_id, key_id), key)
+            .with_context(|| crate::platform_profile::localize("save a workspace key to the Keychain"))?;
+        #[cfg(not(target_os = "macos"))]
+        let _ = remove_legacy_key_entry(organization_id, workspace_id, key_id);
+        Ok(())
     }
 
     fn get(&self, organization_id: &str, workspace_id: &str, key_id: &str) -> Result<Option<[u8; crypto::KEY_LEN]>> {
-        let Some(bytes) = crate::keychain::get(self.service()?, &key_account(organization_id, workspace_id, key_id)).with_context(|| crate::platform_profile::localize("read a workspace key from the Keychain"))? else {
-            return Ok(None);
-        };
-        let bytes = Zeroizing::new(bytes);
-        Ok(Some(bytes.as_slice().try_into().map_err(|_| anyhow!("a stored workspace key is not 32 bytes"))?))
+        if let Some(bytes) = crate::keychain::get(self.service()?, &key_account(organization_id, workspace_id, key_id))
+            .with_context(|| crate::platform_profile::localize("read a workspace key from the Keychain"))?
+        {
+            let bytes = Zeroizing::new(bytes);
+            return Ok(Some(bytes.as_slice().try_into().map_err(|_| anyhow!("a stored workspace key is not 32 bytes"))?));
+        }
+        #[cfg(not(target_os = "macos"))]
+        if let Ok(Some(legacy)) = take_legacy_key_entry(organization_id, workspace_id, key_id) {
+            let legacy = Zeroizing::new(legacy);
+            if crate::keychain::set(self.service()?, &key_account(organization_id, workspace_id, key_id), &*legacy).is_ok() {
+                let _ = remove_legacy_key_entry(organization_id, workspace_id, key_id);
+            }
+            return Ok(Some(*legacy));
+        }
+        Ok(None)
     }
 
     fn delete(&self, organization_id: &str, workspace_id: &str, key_id: &str) -> Result<()> {
-        crate::keychain::delete(self.service()?, &key_account(organization_id, workspace_id, key_id)).with_context(|| crate::platform_profile::localize("delete a workspace key from the Keychain"))
+        let res = crate::keychain::delete(self.service()?, &key_account(organization_id, workspace_id, key_id))
+            .with_context(|| crate::platform_profile::localize("delete a workspace key from the Keychain"));
+        #[cfg(not(target_os = "macos"))]
+        let _ = remove_legacy_key_entry(organization_id, workspace_id, key_id);
+        res
     }
 }
 
-/// Elsewhere: a 0600 file per workspace next to the index.
-#[cfg(not(target_os = "macos"))]
+/// Legacy plaintext file cleanup/migration for pre-vault non-macOS installs.
+#[cfg(all(not(target_os = "macos"), any(windows, all(target_os = "linux", feature = "desktop"))))]
+fn legacy_secret_file(organization_id: &str, workspace_id: &str) -> Result<PathBuf> {
+    if !valid_id(organization_id) || !valid_id(workspace_id) {
+        return Err(anyhow!("invalid cloud agent identifier"));
+    }
+    Ok(crate::store::root()?.join("cloud-agent-keys").join(format!("{organization_id}--{workspace_id}.json")))
+}
+
+#[cfg(all(not(target_os = "macos"), any(windows, all(target_os = "linux", feature = "desktop"))))]
+fn take_legacy_key_entry(organization_id: &str, workspace_id: &str, key_id: &str) -> Result<Option<[u8; crypto::KEY_LEN]>> {
+    let path = legacy_secret_file(organization_id, workspace_id)?;
+    let Some(keys) = read_json::<BTreeMap<String, String>>(&path)? else { return Ok(None) };
+    keys.get(key_id).map(|key| crypto::key_from_b64(key)).transpose()
+}
+
+#[cfg(all(not(target_os = "macos"), any(windows, all(target_os = "linux", feature = "desktop"))))]
+fn remove_legacy_key_entry(organization_id: &str, workspace_id: &str, key_id: &str) -> Result<()> {
+    let path = legacy_secret_file(organization_id, workspace_id)?;
+    let Some(mut keys) = read_json::<BTreeMap<String, String>>(&path)? else { return Ok(()) };
+    if keys.remove(key_id).is_some() {
+        if keys.is_empty() {
+            let _ = std::fs::remove_file(&path);
+        } else {
+            write_atomic(&path, &serde_json::to_vec(&keys)?)?;
+        }
+    }
+    Ok(())
+}
+
+/// Headless fallback without an OS vault (e.g. non-desktop Unix).
+#[cfg(not(any(target_os = "macos", windows, all(target_os = "linux", feature = "desktop"))))]
 impl KeyStore for KeychainKeys {
     fn put(&self, organization_id: &str, workspace_id: &str, key_id: &str, key: &[u8; crypto::KEY_LEN]) -> Result<()> {
         let path = secret_file(organization_id, workspace_id)?;
@@ -170,13 +218,17 @@ impl KeyStore for KeychainKeys {
         let path = secret_file(organization_id, workspace_id)?;
         let mut keys: BTreeMap<String, String> = read_json(&path)?.unwrap_or_default();
         if keys.remove(key_id).is_some() {
-            write_atomic(&path, &serde_json::to_vec(&keys)?)?;
+            if keys.is_empty() {
+                let _ = std::fs::remove_file(&path);
+            } else {
+                write_atomic(&path, &serde_json::to_vec(&keys)?)?;
+            }
         }
         Ok(())
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows, all(target_os = "linux", feature = "desktop"))))]
 fn secret_file(organization_id: &str, workspace_id: &str) -> Result<PathBuf> {
     if !valid_id(organization_id) || !valid_id(workspace_id) {
         return Err(anyhow!("invalid cloud agent identifier"));
@@ -595,7 +647,19 @@ impl CloudAgentClient {
     }
 
     fn send_lock(&self, dir: &Path) -> Arc<Mutex<()>> {
-        self.send_locks.lock().unwrap().entry(dir.to_path_buf()).or_default().clone()
+        let mut locks = self.send_locks.lock().unwrap();
+        if locks.len() >= 128 && !locks.contains_key(dir) {
+            locks.retain(|_, lock| Arc::strong_count(lock) > 1);
+        }
+        locks.entry(dir.to_path_buf()).or_default().clone()
+    }
+
+    fn prune_workspace_state(&self, dir: &Path) {
+        self.refused.lock().unwrap().remove(dir);
+        let mut locks = self.send_locks.lock().unwrap();
+        if locks.get(dir).is_some_and(|lock| Arc::strong_count(lock) == 1) {
+            locks.remove(dir);
+        }
     }
 
     fn dir(&self, ctx: &Ctx, workspace_id: &str) -> Result<PathBuf, String> {
@@ -1121,6 +1185,10 @@ impl CloudAgentClient {
             log::warn!("drop a deleted workspace's agent data: {error}");
             "cloud_agent_store_unwritable".to_string()
         })?;
+        drop(_guard);
+        drop(_send);
+        drop(send);
+        self.prune_workspace_state(&dir);
         Ok(Purged { removed: true, unsent_commands, cached_tabs })
     }
 
@@ -1177,6 +1245,20 @@ impl CloudAgentClient {
                 }
             }
         }
+        let org_root = &self.root;
+        self.refused.lock().unwrap().retain(|path, _| {
+            path.strip_prefix(org_root).ok().is_some_and(|rel| {
+                let mut comps = rel.components();
+                match (comps.next(), comps.next()) {
+                    (Some(std::path::Component::Normal(u)), Some(std::path::Component::Normal(o))) => {
+                        let (Some(u), Some(o)) = (u.to_str(), o.to_str()) else { return false };
+                        keep.is_some_and(|(ku, korgs)| ku == u && korgs.contains(o))
+                    }
+                    _ => false,
+                }
+            })
+        });
+        self.send_locks.lock().unwrap().retain(|_, lock| Arc::strong_count(lock) > 1);
     }
 
     // ------------------------------------------------------------ HTTP

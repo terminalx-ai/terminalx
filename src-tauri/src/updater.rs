@@ -21,14 +21,49 @@ pub enum DownloadEvent {
     Finished,
 }
 
+/// Canonical GitHub repository for signed desktop update manifests.
+/// Never rely on the legacy `terminalx-ai/raccoon` rename redirect.
+const CANONICAL_UPDATER_REPO: &str = "terminalx-ai/terminalx";
+
+fn platform_feed_filename() -> &'static str {
+    #[cfg(target_os = "windows")]
+    {
+        "latest-windows.json"
+    }
+    #[cfg(target_os = "linux")]
+    {
+        "latest-linux.json"
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    {
+        "latest.json"
+    }
+}
+
+/// Resolve the canonical HTTPS update manifest endpoint for `channel`.
+/// Static GitHub Releases ignore custom headers like `X-Raccoon-Channel`, so
+/// channels must resolve to distinct feed paths on the canonical repository.
+fn feed_endpoint(channel: &str) -> anyhow::Result<tauri::Url> {
+    let feed = platform_feed_filename();
+    let url = match channel {
+        "stable" => format!("https://github.com/{CANONICAL_UPDATER_REPO}/releases/latest/download/{feed}"),
+        "beta" => format!("https://github.com/{CANONICAL_UPDATER_REPO}/releases/download/beta/{feed}"),
+        _ => anyhow::bail!("Unknown update channel"),
+    };
+    Ok(tauri::Url::parse(&url)?)
+}
+
 #[tauri::command]
 pub async fn app_update_check(app: tauri::AppHandle, window: tauri::WebviewWindow, channel: String) -> Result<Option<Available>, String> {
     crate::commands::require_main_window(&window)?;
     let privacy = crate::data_privacy::Ticket::default();
     let result = async {
-        anyhow::ensure!(matches!(channel.as_str(), "stable" | "beta"), "Unknown update channel");
-        let updater = app.updater_builder().header("X-Raccoon-Channel", channel.as_str())?
-            .timeout(crate::data_privacy::TRANSFER_TIMEOUT).build()?;
+        let endpoint = feed_endpoint(&channel)?;
+        let updater = app
+            .updater_builder()
+            .endpoints(vec![endpoint])?
+            .timeout(crate::data_privacy::TRANSFER_TIMEOUT)
+            .build()?;
         let update = crate::data_privacy::transfer(&privacy, async {
             match updater.check().await {
                 Ok(update) => Ok(update),
@@ -120,5 +155,20 @@ mod tests {
         assert!(crate::commands::require_main_window_label("floating").is_err());
         assert!(crate::commands::require_main_window_label("chat-1234").is_err());
         assert!(crate::commands::require_main_window_label("").is_err());
+    }
+
+    #[test]
+    fn feed_endpoints_target_canonical_terminalx_repo_with_per_channel_isolation() {
+        let stable = super::feed_endpoint("stable").unwrap();
+        let beta = super::feed_endpoint("beta").unwrap();
+        assert_eq!(stable.scheme(), "https");
+        assert_eq!(beta.scheme(), "https");
+        assert!(stable.as_str().starts_with("https://github.com/terminalx-ai/terminalx/releases/latest/download/"));
+        assert!(beta.as_str().starts_with("https://github.com/terminalx-ai/terminalx/releases/download/beta/"));
+        assert!(!stable.as_str().contains("terminalx-ai/raccoon"));
+        assert!(!beta.as_str().contains("terminalx-ai/raccoon"));
+        assert_ne!(stable, beta);
+        assert!(super::feed_endpoint("nightly").is_err());
+        assert!(super::feed_endpoint("").is_err());
     }
 }

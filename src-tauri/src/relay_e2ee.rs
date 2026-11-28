@@ -15,11 +15,18 @@ use hmac::{Hmac, Mac};
 use rand_core::{OsRng, RngCore};
 use sha2::{Digest, Sha256};
 use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
+use zeroize::{Zeroize, Zeroizing};
 
 #[derive(Clone)]
 pub struct HostKeypair {
     secret: [u8; 32],
     public: [u8; 32],
+}
+
+impl Drop for HostKeypair {
+    fn drop(&mut self) {
+        self.secret.zeroize();
+    }
 }
 
 impl HostKeypair {
@@ -92,15 +99,24 @@ pub fn answer_relay_challenge(
     context: &RelayProofContext<'_>,
 ) -> Result<String> {
     let relay_key: [u8; 32] = decode_standard(relay_key_b64, 32)?.try_into().unwrap();
+    // Reject low-order X25519 public keys before performing Box decryption.
+    if !StaticSecret::from(*keypair.secret())
+        .diffie_hellman(&X25519PublicKey::from(relay_key))
+        .was_contributory()
+    {
+        bail!("relay host challenge used a low-order X25519 public key");
+    }
     let nonce = decode_standard(nonce_b64, 24)?;
     let ciphertext = decode_standard(ciphertext_b64, 1)?;
     let cipher = SalsaBox::new(
         &PublicKey::from(relay_key),
         &SecretKey::from(*keypair.secret()),
     );
-    let plaintext = cipher
-        .decrypt(GenericArray::from_slice(&nonce), ciphertext.as_ref())
-        .map_err(|_| anyhow!("relay host challenge was not issued for this host key"))?;
+    let plaintext = Zeroizing::new(
+        cipher
+            .decrypt(GenericArray::from_slice(&nonce), ciphertext.as_ref())
+            .map_err(|_| anyhow!("relay host challenge was not issued for this host key"))?,
+    );
     let prefix = b"terminalx-relay-host-challenge/v1\0";
     if !plaintext.starts_with(prefix) || plaintext.len() < prefix.len() + 4 + 32 {
         bail!("relay host challenge has an invalid envelope");
@@ -159,15 +175,20 @@ fn validate_relay_transcript(
     if fields.len() != 16 {
         bail!("relay transcript has the wrong field count");
     }
-    let issued_at = field_u64(&fields, "issuedAt")? as i64;
-    let transcript_expires_at = field_u64(&fields, "expiresAt")? as i64;
-    let skew = 30_000;
-    if issued_at - skew > context.now_ms
-        || context.now_ms - skew > challenge_expires_at
-        || issued_at > challenge_expires_at
-        || challenge_expires_at - issued_at > 10_000
-        || transcript_expires_at != challenge_expires_at
-    {
+    let issued_at = field_u64(&fields, "issuedAt")?;
+    let transcript_expires_at = field_u64(&fields, "expiresAt")?;
+    let challenge_expires_at = u64::try_from(challenge_expires_at)
+        .map_err(|_| anyhow!("relay transcript expiry is negative"))?;
+    let now_ms = u64::try_from(context.now_ms)
+        .map_err(|_| anyhow!("relay clock timestamp is negative"))?;
+    const SKEW_MS: u64 = 30_000;
+    const MAX_WINDOW_MS: u64 = 10_000;
+    let valid_window = transcript_expires_at == challenge_expires_at
+        && issued_at <= challenge_expires_at
+        && challenge_expires_at.saturating_sub(issued_at) <= MAX_WINDOW_MS
+        && issued_at <= now_ms.saturating_add(SKEW_MS)
+        && now_ms <= challenge_expires_at.saturating_add(SKEW_MS);
+    if !valid_window {
         bail!("relay transcript is outside its validity window");
     }
     require_field(&fields, "protocol", b"terminalx-relay-host-proof/v1")?;
@@ -291,6 +312,8 @@ pub struct E2eeHello {
     pub kind: String,
     pub v: u8,
     pub client_public_key_b64: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_ephemeral_public_key_b64: Option<String>,
     pub client_nonce_b64: String,
     pub capabilities: E2eeCapabilities,
     pub context: E2eeContext,
@@ -310,6 +333,8 @@ pub struct E2eeReady {
     pub kind: &'static str,
     pub v: u8,
     pub desktop_public_key_b64: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desktop_ephemeral_public_key_b64: Option<String>,
     pub client_nonce_b64: String,
     pub desktop_nonce_b64: String,
     pub selection: E2eeSelection,
@@ -329,6 +354,14 @@ pub struct E2eeSession {
     initiator: bool,
 }
 
+impl Drop for E2eeSession {
+    fn drop(&mut self) {
+        self.inbound_key.zeroize();
+        self.outbound_key.zeroize();
+        self.session_id.zeroize();
+    }
+}
+
 pub fn begin_e2ee_session(
     keypair: &HostKeypair,
     hello: E2eeHello,
@@ -339,15 +372,33 @@ pub fn begin_e2ee_session(
     let client_key: [u8; 32] = decode_standard(&hello.client_public_key_b64, 32)?
         .try_into()
         .unwrap();
+    let client_ephemeral_key: Option<[u8; 32]> = hello
+        .client_ephemeral_public_key_b64
+        .as_deref()
+        .map(|b64| -> Result<[u8; 32]> { Ok(decode_standard(b64, 32)?.try_into().unwrap()) })
+        .transpose()?;
     let client_nonce: [u8; 32] = decode_standard(&hello.client_nonce_b64, 32)?
         .try_into()
         .unwrap();
     let mut desktop_nonce = [0u8; 32];
     OsRng.fill_bytes(&mut desktop_nonce);
+
+    // Hybrid ss + ee forward secrecy whenever the initiator provides an
+    // ephemeral X25519 key; legacy v2 clients without one remain interoperable
+    // while still enforcing contributory X25519 point checks.
+    let (desktop_ephemeral_secret, desktop_ephemeral_public) = if client_ephemeral_key.is_some() {
+        let secret = Zeroizing::new(StaticSecret::random_from_rng(OsRng).to_bytes());
+        let public = *X25519PublicKey::from(&StaticSecret::from(*secret)).as_bytes();
+        (Some(secret), Some(public))
+    } else {
+        (None, None)
+    };
+
     let ready = E2eeReady {
         kind: "e2ee_ready",
         v: 2,
         desktop_public_key_b64: keypair.public_key_b64(),
+        desktop_ephemeral_public_key_b64: desktop_ephemeral_public.map(|k| general_purpose::STANDARD.encode(k)),
         client_nonce_b64: hello.client_nonce_b64.clone(),
         desktop_nonce_b64: general_purpose::STANDARD.encode(desktop_nonce),
         selection: E2eeSelection {
@@ -356,23 +407,35 @@ pub fn begin_e2ee_session(
         },
         context: hello.context.clone(),
     };
-    let transcript = encode_e2ee_transcript(
+    let transcript = encode_e2ee_transcript_with_ephemeral(
         &hello,
         &ready,
         &client_key,
         keypair.public(),
+        client_ephemeral_key.as_ref().map(|k| k.as_slice()),
+        desktop_ephemeral_public.as_ref().map(|k| k.as_slice()),
         &client_nonce,
         &desktop_nonce,
     );
-    let shared_secret = nacl_box_before(keypair.secret(), &client_key);
-    let keys = derive_session_keys(&shared_secret, &transcript, &client_nonce, &desktop_nonce)?;
+    let ss = Zeroizing::new(nacl_box_before(keypair.secret(), &client_key)?);
+    let ikm = match (desktop_ephemeral_secret.as_ref(), client_ephemeral_key.as_ref()) {
+        (Some(eph_secret), Some(peer_eph)) => {
+            let ee = Zeroizing::new(nacl_box_before(eph_secret, peer_eph)?);
+            let mut combined = Zeroizing::new(Vec::with_capacity(64));
+            combined.extend_from_slice(ss.as_slice());
+            combined.extend_from_slice(ee.as_slice());
+            combined
+        }
+        _ => Zeroizing::new(ss.as_slice().to_vec()),
+    };
+    let keys = derive_session_keys(&ikm, &transcript, &client_nonce, &desktop_nonce)?;
     Ok((
         ready,
         E2eeSession {
             inbound_key: keys.mobile_to_desktop,
             outbound_key: keys.desktop_to_mobile,
             session_id: keys.session_id,
-            transcript_hash_b64: keys.transcript_hash_b64,
+            transcript_hash_b64: keys.transcript_hash_b64.clone(),
             client_public_key_b64: hello.client_public_key_b64,
             inbound_counter: 0,
             outbound_counter: 0,
@@ -388,8 +451,16 @@ struct SessionKeys {
     transcript_hash_b64: String,
 }
 
+impl Drop for SessionKeys {
+    fn drop(&mut self) {
+        self.mobile_to_desktop.zeroize();
+        self.desktop_to_mobile.zeroize();
+        self.session_id.zeroize();
+    }
+}
+
 fn derive_session_keys(
-    shared_secret: &[u8; 32],
+    shared_secret: &[u8],
     transcript: &[u8],
     client_nonce: &[u8; 32],
     desktop_nonce: &[u8; 32],
@@ -401,9 +472,9 @@ fn derive_session_keys(
     let salt = Sha256::digest(salt_input);
     let mut info = b"terminalx-mobile-e2ee/v2/session\0".to_vec();
     info.extend_from_slice(&transcript_hash);
-    let mut expanded = [0u8; 96];
+    let mut expanded = Zeroizing::new([0u8; 96]);
     Hkdf::<Sha256>::new(Some(&salt), shared_secret)
-        .expand(&info, &mut expanded)
+        .expand(&info, expanded.as_mut())
         .map_err(|_| anyhow!("could not derive E2EE session keys"))?;
     Ok(SessionKeys {
         mobile_to_desktop: expanded[..32].try_into().unwrap(),
@@ -418,9 +489,18 @@ fn derive_session_keys(
 /// it pinned from the pairing offer.
 pub struct E2eeClientHandshake {
     secret: [u8; 32],
+    ephemeral_secret: [u8; 32],
+    ephemeral_public: [u8; 32],
     desktop_key: [u8; 32],
     client_nonce: [u8; 32],
     hello: E2eeHello,
+}
+
+impl Drop for E2eeClientHandshake {
+    fn drop(&mut self) {
+        self.secret.zeroize();
+        self.ephemeral_secret.zeroize();
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -430,6 +510,8 @@ struct E2eeReadyWire {
     kind: String,
     v: u8,
     desktop_public_key_b64: String,
+    #[serde(default)]
+    desktop_ephemeral_public_key_b64: Option<String>,
     client_nonce_b64: String,
     desktop_nonce_b64: String,
     selection: E2eeSelectionWire,
@@ -449,17 +531,21 @@ impl E2eeClientHandshake {
     }
 
     /// [`Self::new`] for a client whose long-lived key is `secret`: a phone
-    /// racing its direct and Relay candidates sends the same key on both.
+    /// racing its direct and Relay candidates sends the same static key on both,
+    /// paired with a fresh ephemeral X25519 key for forward secrecy.
     pub fn with_secret(secret: [u8; 32], desktop_public_key_b64: &str, transport: &str, relay_host_id: Option<&str>) -> Result<Self> {
         let desktop_key: [u8; 32] = decode_standard(desktop_public_key_b64, 32)?.try_into().unwrap();
         let secret = StaticSecret::from(secret);
         let public = X25519PublicKey::from(&secret);
+        let ephemeral = StaticSecret::random_from_rng(OsRng);
+        let ephemeral_public = *X25519PublicKey::from(&ephemeral).as_bytes();
         let mut client_nonce = [0u8; 32];
         OsRng.fill_bytes(&mut client_nonce);
         let hello = E2eeHello {
             kind: "e2ee_hello".into(),
             v: 2,
             client_public_key_b64: general_purpose::STANDARD.encode(public.as_bytes()),
+            client_ephemeral_public_key_b64: Some(general_purpose::STANDARD.encode(ephemeral_public)),
             client_nonce_b64: general_purpose::STANDARD.encode(client_nonce),
             capabilities: E2eeCapabilities { framing: [2], payload_kinds: ["text".into(), "binary".into()] },
             context: E2eeContext {
@@ -470,7 +556,14 @@ impl E2eeClientHandshake {
                 relay_host_id: relay_host_id.map(str::to_string),
             },
         };
-        Ok(Self { secret: secret.to_bytes(), desktop_key, client_nonce, hello })
+        Ok(Self {
+            secret: secret.to_bytes(),
+            ephemeral_secret: ephemeral.to_bytes(),
+            ephemeral_public,
+            desktop_key,
+            client_nonce,
+            hello,
+        })
     }
 
     pub fn hello(&self) -> &E2eeHello {
@@ -483,6 +576,11 @@ impl E2eeClientHandshake {
         let wire: E2eeReadyWire = serde_json::from_str(ready).map_err(|_| anyhow!("invalid E2EE ready"))?;
         let desktop_nonce: [u8; 32] = decode_standard(&wire.desktop_nonce_b64, 32)?.try_into().unwrap();
         let desktop_key = decode_standard(&wire.desktop_public_key_b64, 32)?;
+        let desktop_ephemeral_key: Option<[u8; 32]> = wire
+            .desktop_ephemeral_public_key_b64
+            .as_deref()
+            .map(|b64| -> Result<[u8; 32]> { Ok(decode_standard(b64, 32)?.try_into().unwrap()) })
+            .transpose()?;
         if wire.kind != "e2ee_ready"
             || wire.v != 2
             || !bool::from(subtle::ConstantTimeEq::ct_eq(desktop_key.as_slice(), self.desktop_key.as_slice()))
@@ -497,28 +595,45 @@ impl E2eeClientHandshake {
             kind: "e2ee_ready",
             v: 2,
             desktop_public_key_b64: wire.desktop_public_key_b64,
+            desktop_ephemeral_public_key_b64: wire.desktop_ephemeral_public_key_b64,
             client_nonce_b64: wire.client_nonce_b64,
             desktop_nonce_b64: wire.desktop_nonce_b64,
             selection: E2eeSelection { framing: 2, payload_kinds: ["text".into(), "binary".into()] },
             context: wire.context,
         };
         let client_public = X25519PublicKey::from(&StaticSecret::from(self.secret));
-        let transcript = encode_e2ee_transcript(
+        let (client_eph_for_transcript, desktop_eph_for_transcript) = match desktop_ephemeral_key.as_ref() {
+            Some(desktop_eph) => (Some(self.ephemeral_public.as_slice()), Some(desktop_eph.as_slice())),
+            None => (None, None),
+        };
+        let transcript = encode_e2ee_transcript_with_ephemeral(
             &self.hello,
             &ready,
             client_public.as_bytes(),
             &self.desktop_key,
+            client_eph_for_transcript,
+            desktop_eph_for_transcript,
             &self.client_nonce,
             &desktop_nonce,
         );
-        let shared_secret = nacl_box_before(&self.secret, &self.desktop_key);
-        let keys = derive_session_keys(&shared_secret, &transcript, &self.client_nonce, &desktop_nonce)?;
+        let ss = Zeroizing::new(nacl_box_before(&self.secret, &self.desktop_key)?);
+        let ikm = match desktop_ephemeral_key.as_ref() {
+            Some(peer_eph) => {
+                let ee = Zeroizing::new(nacl_box_before(&self.ephemeral_secret, peer_eph)?);
+                let mut combined = Zeroizing::new(Vec::with_capacity(64));
+                combined.extend_from_slice(ss.as_slice());
+                combined.extend_from_slice(ee.as_slice());
+                combined
+            }
+            None => Zeroizing::new(ss.as_slice().to_vec()),
+        };
+        let keys = derive_session_keys(&ikm, &transcript, &self.client_nonce, &desktop_nonce)?;
         Ok(E2eeSession {
             inbound_key: keys.desktop_to_mobile,
             outbound_key: keys.mobile_to_desktop,
             session_id: keys.session_id,
-            transcript_hash_b64: keys.transcript_hash_b64,
-            client_public_key_b64: self.hello.client_public_key_b64,
+            transcript_hash_b64: keys.transcript_hash_b64.clone(),
+            client_public_key_b64: self.hello.client_public_key_b64.clone(),
             inbound_counter: 0,
             outbound_counter: 0,
             initiator: true,
@@ -546,15 +661,19 @@ fn validate_e2ee_hello(
     Ok(())
 }
 
-fn nacl_box_before(secret: &[u8; 32], public: &[u8; 32]) -> [u8; 32] {
+fn nacl_box_before(secret: &[u8; 32], public: &[u8; 32]) -> Result<[u8; 32]> {
     let raw = StaticSecret::from(*secret).diffie_hellman(&X25519PublicKey::from(*public));
+    if !raw.was_contributory() {
+        bail!("peer X25519 public key is a low-order point");
+    }
     let derived = <salsa20::Salsa20 as Kdf>::kdf(
         GenericArray::from_slice(raw.as_bytes()),
         &GenericArray::default(),
     );
-    derived.into()
+    Ok(derived.into())
 }
 
+#[cfg(test)]
 fn encode_e2ee_transcript(
     hello: &E2eeHello,
     ready: &E2eeReady,
@@ -563,10 +682,24 @@ fn encode_e2ee_transcript(
     client_nonce: &[u8],
     desktop_nonce: &[u8],
 ) -> Vec<u8> {
+    encode_e2ee_transcript_with_ephemeral(hello, ready, client_key, desktop_key, None, None, client_nonce, desktop_nonce)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_e2ee_transcript_with_ephemeral(
+    hello: &E2eeHello,
+    ready: &E2eeReady,
+    client_key: &[u8],
+    desktop_key: &[u8],
+    client_ephemeral_key: Option<&[u8]>,
+    desktop_ephemeral_key: Option<&[u8]>,
+    client_nonce: &[u8],
+    desktop_nonce: &[u8],
+) -> Vec<u8> {
     let framing_list = encode_number_list(&[2]);
     let payload_kinds = encode_string_list(&["text", "binary"]);
     let relay_id = hello.context.relay_host_id.as_deref().unwrap_or("");
-    let fields: Vec<(&str, Vec<u8>)> = vec![
+    let mut fields: Vec<(&str, Vec<u8>)> = vec![
         ("domain", b"terminalx-mobile-e2ee/v2/transcript".to_vec()),
         ("mobile-to-desktop.type", hello.kind.as_bytes().to_vec()),
         (
@@ -637,6 +770,10 @@ fn encode_e2ee_transcript(
             relay_id.as_bytes().to_vec(),
         ),
     ];
+    if let (Some(c_eph), Some(d_eph)) = (client_ephemeral_key, desktop_ephemeral_key) {
+        fields.push(("mobile-to-desktop.client-ephemeral-public-key", c_eph.to_vec()));
+        fields.push(("desktop-to-mobile.desktop-ephemeral-public-key", d_eph.to_vec()));
+    }
     let mut output = Vec::new();
     for (name, value) in fields {
         output.extend_from_slice(&(name.len() as u32).to_be_bytes());
@@ -779,6 +916,7 @@ mod tests {
             kind: "e2ee_hello".into(),
             v: 2,
             client_public_key_b64: general_purpose::STANDARD.encode([1; 32]),
+            client_ephemeral_public_key_b64: None,
             client_nonce_b64: general_purpose::STANDARD.encode([2; 32]),
             capabilities: E2eeCapabilities {
                 framing: [2],
@@ -790,6 +928,7 @@ mod tests {
             kind: "e2ee_ready",
             v: 2,
             desktop_public_key_b64: general_purpose::STANDARD.encode([3; 32]),
+            desktop_ephemeral_public_key_b64: None,
             client_nonce_b64: general_purpose::STANDARD.encode([2; 32]),
             desktop_nonce_b64: general_purpose::STANDARD.encode([4; 32]),
             selection: E2eeSelection {
@@ -867,5 +1006,112 @@ mod tests {
 
     fn hex(bytes: &[u8]) -> String {
         bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    #[test]
+    fn rejects_low_order_x25519_public_keys() {
+        let host = HostKeypair::generate();
+        let all_zero = [0u8; 32];
+        assert!(nacl_box_before(host.secret(), &all_zero).is_err());
+        let mut order_two = [0u8; 32];
+        order_two[0] = 1;
+        assert!(nacl_box_before(host.secret(), &order_two).is_err());
+
+        let hello = E2eeHello {
+            kind: "e2ee_hello".into(),
+            v: 2,
+            client_public_key_b64: general_purpose::STANDARD.encode(all_zero),
+            client_ephemeral_public_key_b64: None,
+            client_nonce_b64: general_purpose::STANDARD.encode([9u8; 32]),
+            capabilities: E2eeCapabilities {
+                framing: [2],
+                payload_kinds: ["text".into(), "binary".into()],
+            },
+            context: E2eeContext {
+                protocol: "terminalx-mobile-e2ee".into(),
+                initiator: "mobile".into(),
+                responder: "desktop".into(),
+                transport: "direct".into(),
+                relay_host_id: None,
+            },
+        };
+        assert!(begin_e2ee_session(&host, hello, "direct", None).is_err());
+    }
+
+    #[test]
+    fn hybrid_ephemeral_handshake_provides_forward_secrecy_with_same_static_keys() {
+        let host = HostKeypair::generate();
+        let static_client = [42u8; 32];
+        let h1 = E2eeClientHandshake::with_secret(static_client, &host.public_key_b64(), "direct", None).unwrap();
+        let h2 = E2eeClientHandshake::with_secret(static_client, &host.public_key_b64(), "direct", None).unwrap();
+        assert!(h1.hello().client_ephemeral_public_key_b64.is_some());
+        assert_ne!(h1.hello().client_ephemeral_public_key_b64, h2.hello().client_ephemeral_public_key_b64);
+
+        let (r1, mut srv1) = begin_e2ee_session(&host, h1.hello().clone(), "direct", None).unwrap();
+        let (r2, mut srv2) = begin_e2ee_session(&host, h2.hello().clone(), "direct", None).unwrap();
+        assert!(r1.desktop_ephemeral_public_key_b64.is_some());
+        assert_ne!(r1.desktop_ephemeral_public_key_b64, r2.desktop_ephemeral_public_key_b64);
+
+        let mut cli1 = h1.accept_ready(&serde_json::to_string(&r1).unwrap()).unwrap();
+        let cli2 = h2.accept_ready(&serde_json::to_string(&r2).unwrap()).unwrap();
+        assert_ne!(cli1.inbound_key, cli2.inbound_key);
+        assert_ne!(cli1.outbound_key, cli2.outbound_key);
+
+        let frame = cli1.seal(b"hello-forward-secret", PayloadKind::Text).unwrap();
+        assert_eq!(srv1.open(&frame, PayloadKind::Text).unwrap(), b"hello-forward-secret");
+        assert!(srv2.open(&frame, PayloadKind::Text).is_err());
+    }
+
+    #[test]
+    fn relay_transcript_rejects_overflowing_and_negative_timestamps() {
+        let host = HostKeypair::generate();
+        let encode_fields = |issued_at: u64, expires_at: u64| -> Vec<u8> {
+            let mut out = Vec::new();
+            let fields: [(&str, Vec<u8>); 16] = [
+                ("protocol", b"terminalx-relay-host-proof/v1".to_vec()),
+                ("version", vec![1]),
+                ("relayOrigin", b"https://relay.terminalx.ai".to_vec()),
+                ("relayEphemeralPublicKey", vec![1u8; 32]),
+                ("challengeNonce", vec![2u8; 24]),
+                ("challengeId", b"chg_1".to_vec()),
+                ("userId", b"u1".to_vec()),
+                ("profileId", b"p1".to_vec()),
+                ("organizationId", b"o1".to_vec()),
+                ("relayHostId", host.host_id().into_bytes()),
+                ("hostPublicKey", host.public().to_vec()),
+                ("assignmentEpoch", 1u64.to_be_bytes().to_vec()),
+                ("previousGeneration", vec![]),
+                ("resumeRequested", vec![0]),
+                ("issuedAt", issued_at.to_be_bytes().to_vec()),
+                ("expiresAt", expires_at.to_be_bytes().to_vec()),
+            ];
+            for (k, v) in fields {
+                out.extend_from_slice(&(k.len() as u32).to_be_bytes());
+                out.extend_from_slice(k.as_bytes());
+                out.extend_from_slice(&(v.len() as u32).to_be_bytes());
+                out.extend_from_slice(&v);
+            }
+            out
+        };
+        let host_id = host.host_id();
+        let ctx = RelayProofContext {
+            relay_origin: "https://relay.terminalx.ai",
+            user_id: "u1",
+            profile_id: "p1",
+            organization_id: "o1",
+            relay_host_id: &host_id,
+            assignment_epoch: 1,
+            previous_generation: None,
+            resume_requested: false,
+            now_ms: 1_700_000_000_000,
+        };
+        // u64::MAX must never wrap to negative i64 and pass skew checks.
+        let overflow = encode_fields(u64::MAX, 1_700_000_005_000);
+        assert!(validate_relay_transcript(&overflow, "chg_1", &[1u8; 32], &[2u8; 24], 1_700_000_005_000, &host, &ctx).is_err());
+        // Negative challenge expiry must be rejected cleanly.
+        let valid_ts = encode_fields(1_700_000_000_000, 1_700_000_005_000);
+        assert!(validate_relay_transcript(&valid_ts, "chg_1", &[1u8; 32], &[2u8; 24], -1, &host, &ctx).is_err());
+        // Valid window passes.
+        assert!(validate_relay_transcript(&valid_ts, "chg_1", &[1u8; 32], &[2u8; 24], 1_700_000_005_000, &host, &ctx).is_ok());
     }
 }

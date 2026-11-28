@@ -182,11 +182,16 @@ fn save_to(path: &Path, session: &Session) -> Result<()> {
     let temporary = dir.join(format!(".session.{}.json", std::process::id()));
     let _ = std::fs::remove_file(&temporary);
     let write = || -> Result<()> {
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-        let mut file = options.open(&temporary)?;
+        #[cfg(windows)]
+        let mut file = crate::win::fs::create_new_private(&temporary)?;
+        #[cfg(not(windows))]
+        let mut file = {
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+            options.open(&temporary)?
+        };
         file.write_all(&serde_json::to_vec_pretty(session)?)?;
         file.sync_all()?;
         std::fs::rename(&temporary, path)?;
@@ -331,13 +336,37 @@ impl Api {
         Self { base: base.trim_end_matches('/').to_string(), agent: crate::data_privacy::http_agent().timeout(REQUEST_TIMEOUT).redirects(0).build() }
     }
 
+    fn build_path(segments: &[&str], query: &[(&str, String)]) -> Result<String> {
+        let mut url = url::Url::parse("https://placeholder.invalid")?;
+        {
+            let mut path_segments = url.path_segments_mut().map_err(|_| anyhow!("invalid account API URL"))?;
+            path_segments.extend(segments.iter().copied());
+        }
+        if !query.is_empty() {
+            let mut pairs = url.query_pairs_mut();
+            for (k, v) in query {
+                pairs.append_pair(k, v);
+            }
+        }
+        let mut out = url.path().to_string();
+        if let Some(q) = url.query() {
+            out.push('?');
+            out.push_str(q);
+        }
+        Ok(out)
+    }
+
     #[cfg(unix)]
     pub(crate) fn phone_revocations(&self, session: &Session, host_id: &str, generation: u64) -> Result<Vec<crate::local_runtime::mobile::model::AccountPairingRevocation>> {
         #[derive(Deserialize)]
         struct Pending {
             revocations: Vec<crate::local_runtime::mobile::model::AccountPairingRevocation>,
         }
-        let path = format!("/v1/desktop/host-account-bindings/{host_id}/revocations?bindingGeneration={generation}");
+        anyhow::ensure!(crate::remote::host::valid_opaque_id(host_id), "invalid host id");
+        let path = Self::build_path(
+            &["v1", "desktop", "host-account-bindings", host_id, "revocations"],
+            &[("bindingGeneration", generation.to_string())],
+        )?;
         let answer = self.request_with_body("GET", &path, None, Some(&session.access_token), Duration::from_secs(10))?;
         match answer {
             Ok(body) => Ok(serde_json::from_value::<Pending>(body).context("decode pending phone revocations")?.revocations),
@@ -347,7 +376,12 @@ impl Api {
 
     #[cfg(unix)]
     pub(crate) fn acknowledge_phone_revocation(&self, session: &Session, host_id: &str, generation: u64, revocation_id: &str) -> Result<()> {
-        let path = format!("/v1/desktop/host-account-bindings/{host_id}/revocations/{revocation_id}/acknowledge");
+        anyhow::ensure!(crate::remote::host::valid_opaque_id(host_id), "invalid host id");
+        anyhow::ensure!(crate::remote::host::valid_opaque_id(revocation_id), "invalid revocation id");
+        let path = Self::build_path(
+            &["v1", "desktop", "host-account-bindings", host_id, "revocations", revocation_id, "acknowledge"],
+            &[],
+        )?;
         let answer = self.request("POST", &path, json!({"bindingGeneration": generation}), Some(&session.access_token), Duration::from_secs(10))?;
         match answer {
             Ok(_) => Ok(()),
@@ -925,5 +959,20 @@ pub(crate) mod tests {
         assert_eq!(dev_origin(true, Some("http://127.0.0.1:42220")).as_deref(), Some("http://127.0.0.1:42220"));
         assert_eq!(dev_origin(true, Some("http://example.com")), None);
         assert_eq!(dev_origin(true, Some("https://api.example.com/v1")), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn phone_revocation_api_rejects_traversal_and_query_ids_before_network() {
+        let api = Api::new("http://127.0.0.1:1");
+        let session: Session = serde_json::from_value(session_body()).unwrap();
+        for bad in ["../other", "a/b", "id?extra=1", "id#frag", ""] {
+            assert!(api.phone_revocations(&session, bad, 1).is_err(), "host_id {bad:?}");
+            assert!(api.acknowledge_phone_revocation(&session, "host_1", 1, bad).is_err(), "revocation_id {bad:?}");
+        }
+        assert_eq!(
+            Api::build_path(&["v1", "desktop", "host-account-bindings", "host_1", "revocations"], &[("bindingGeneration", "4".into())]).unwrap(),
+            "/v1/desktop/host-account-bindings/host_1/revocations?bindingGeneration=4"
+        );
     }
 }

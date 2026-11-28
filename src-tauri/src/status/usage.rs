@@ -874,6 +874,24 @@ fn apply_codex(inner: &mut Inner, result: &Value, updated_at: i64) -> String {
     received
 }
 
+#[derive(Clone, PartialEq, Eq)]
+struct ClaudeIdentityStamp {
+    modified: std::time::SystemTime,
+    len: u64,
+    #[cfg(unix)]
+    ino: u64,
+}
+
+fn claude_identity_stamp(meta: &std::fs::Metadata) -> Option<ClaudeIdentityStamp> {
+    let modified = meta.modified().ok()?;
+    Some(ClaudeIdentityStamp {
+        modified,
+        len: meta.len(),
+        #[cfg(unix)]
+        ino: std::os::unix::fs::MetadataExt::ino(meta),
+    })
+}
+
 /// Only compare windows attributed to the same system Claude account. Tokens
 /// never leave the credential reader; this opaque identity hashes config path
 /// and account UUID, and is also captured when the CLI starts.
@@ -886,11 +904,32 @@ pub fn claude_account_identity() -> Option<String> {
         None => dirs::home_dir()?.join(".claude.json"),
     };
     let path = path.canonical().ok()?;
-    let config: Value = serde_json::from_str(&std::fs::read_to_string(&path).ok()?).ok()?;
-    let account = config.pointer("/oauthAccount/accountUuid")?.as_str()?;
-    if account.is_empty() { return None; }
-    let organization = config.pointer("/oauthAccount/organizationUuid").and_then(Value::as_str).unwrap_or_default();
-    Some(format!("{:x}", Sha256::digest(format!("{}\0{account}\0{organization}", path.display()).as_bytes())))
+    let stamp = std::fs::metadata(&path).ok().and_then(|meta| claude_identity_stamp(&meta));
+    type ClaudeIdentityCache = HashMap<std::path::PathBuf, (ClaudeIdentityStamp, Option<String>)>;
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<ClaudeIdentityCache>> = std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    if let Some(ref stamp) = stamp {
+        if let Some((cached_stamp, cached_id)) = cache.lock().unwrap_or_else(|e| e.into_inner()).get(&path) {
+            if cached_stamp == stamp {
+                return cached_id.clone();
+            }
+        }
+    }
+    let identity = (|| -> Option<String> {
+        let config: Value = serde_json::from_str(&std::fs::read_to_string(&path).ok()?).ok()?;
+        let account = config.pointer("/oauthAccount/accountUuid")?.as_str()?;
+        if account.is_empty() { return None; }
+        let organization = config.pointer("/oauthAccount/organizationUuid").and_then(Value::as_str).unwrap_or_default();
+        Some(format!("{:x}", Sha256::digest(format!("{}\0{account}\0{organization}", path.display()).as_bytes())))
+    })();
+    if let Some(stamp) = stamp {
+        let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.len() >= 16 && !guard.contains_key(&path) {
+            guard.clear();
+        }
+        guard.insert(path, (stamp, identity.clone()));
+    }
+    identity
 }
 
 fn select_claude_account(inner: &mut Inner, account: Option<String>) -> bool {

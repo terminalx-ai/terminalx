@@ -18,7 +18,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use tokio::sync::{mpsc, watch};
 
-use super::cdp::{find_marked_page, PageConnection};
+use super::cdp::{connect_target_id, resolve_target_id, PageConnection};
 use super::{BrowserError, BrowserResult, BrowserRuntime, FRAME_EVENT, SCREENCAST_STATE_EVENT};
 
 /// Chromium sends a frame only when the page repaints, so the budget is
@@ -99,8 +99,7 @@ impl Screencasts {
         }
         let page = rt.pages.get(page_id).ok_or_else(|| BrowserError::new("browser_tab_not_found", format!("No browser page {page_id}.")))?;
         let target = rt.target(page)?;
-        let port = super::cdp::cdp_port(&rt, &target)?;
-        super::cdp::mark_page(&rt, &target)?;
+        let (port, cdp_target_id) = resolve_target_id(&rt, &target)?;
         let (stop_tx, mut stop_rx) = watch::channel(false);
         let (input_tx, mut input_rx) = mpsc::unbounded_channel();
         let generation = self.generations.fetch_add(1, Ordering::Relaxed) + 1;
@@ -109,7 +108,7 @@ impl Screencasts {
         let page_id = page_id.to_string();
         let owner = rt.clone();
         tauri::async_runtime::spawn(async move {
-            let outcome = stream(&owner, &page_id, port, &mut stop_rx, &mut input_rx).await;
+            let outcome = stream(&owner, &page_id, port, &cdp_target_id, &mut stop_rx, &mut input_rx).await;
             if !owner.screencasts.retire(&page_id, generation) {
                 // A newer stream has the page now; its state is the page's.
                 return;
@@ -144,6 +143,7 @@ impl Screencasts {
         if inputs.get(page_id).is_some_and(|(owner, _)| *owner == generation) {
             inputs.remove(page_id);
         }
+        self.frames.lock().unwrap_or_else(|e| e.into_inner()).remove(page_id);
         true
     }
 
@@ -152,11 +152,12 @@ impl Screencasts {
         for stop in stops {
             let _ = stop.send(true);
         }
+        self.frames.lock().unwrap_or_else(|e| e.into_inner()).clear();
     }
 }
 
-async fn stream(rt: &Arc<BrowserRuntime>, page_id: &str, port: u16, stop: &mut watch::Receiver<bool>, inputs: &mut mpsc::UnboundedReceiver<InputBatch>) -> Result<(), String> {
-    let (_found, mut connection) = find_marked_page(port, page_id).await?;
+async fn stream(rt: &Arc<BrowserRuntime>, page_id: &str, port: u16, cdp_target_id: &str, stop: &mut watch::Receiver<bool>, inputs: &mut mpsc::UnboundedReceiver<InputBatch>) -> Result<(), String> {
+    let (_found, mut connection) = connect_target_id(port, cdp_target_id).await?;
     // Events seen while one of our own commands waited for its reply.
     let mut backlog: VecDeque<(String, Value)> = VecDeque::new();
     call_keeping(&mut connection, "Page.enable", json!({}), &mut backlog).await?;
@@ -261,9 +262,12 @@ mod tests {
         assert!(casts.is_live("bp-1"));
         assert_eq!(casts.inputs.lock().unwrap().get("bp-1").map(|(g, _)| *g), Some(new));
         // The new stream, stopped in turn, clears its own and reports.
+        casts.count_frame("bp-1");
+        assert_eq!(casts.frame_count("bp-1"), 1);
         casts.stop("bp-1");
         assert!(casts.retire("bp-1", new));
         assert!(!casts.is_live("bp-1"));
         assert!(casts.inputs.lock().unwrap().get("bp-1").is_none());
+        assert_eq!(casts.frame_count("bp-1"), 0, "retire must prune frames counter");
     }
 }

@@ -19,6 +19,9 @@ pub struct BrowserPage {
     pub profile_id: String,
     /// agent-browser's stable tab id inside the profile's session (`t1`…).
     pub tab_id: String,
+    /// Immutable Chrome DevTools Protocol `targetId` bound to this page once discovered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cdp_target_id: Option<String>,
     pub url: String,
     pub title: String,
     /// The workspace (session cwd) the page belongs to; `None` for a tab the
@@ -154,6 +157,36 @@ impl PageStore {
         })
     }
 
+    /// Add a page without hijacking the workspace's active tab when one is
+    /// already active (used for external deep links so an unprompted link
+    /// cannot silently replace the active workspace tab).
+    #[allow(dead_code)]
+    pub fn insert_background(&self, page: BrowserPage) -> BrowserResult<()> {
+        self.mutate(|s| {
+            if let Some(w) = &page.workspace_path {
+                s.active.entry(w.clone()).or_insert_with(|| page.id.clone());
+            }
+            s.pages.retain(|p| p.id != page.id);
+            s.pages.push(page);
+            Ok(())
+        })
+    }
+
+    /// Persist the immutable CDP `targetId` bound to `page_id`.
+    pub fn set_cdp_target_id(&self, page_id: &str, cdp_target_id: Option<&str>) -> BrowserResult<bool> {
+        self.mutate(|s| {
+            let Some(page) = s.pages.iter_mut().find(|p| p.id == page_id) else {
+                return Ok(false);
+            };
+            let next = cdp_target_id.map(String::from);
+            if page.cdp_target_id == next {
+                return Ok(false);
+            }
+            page.cdp_target_id = next;
+            Ok(true)
+        })
+    }
+
     pub fn set_active(&self, page_id: &str) -> BrowserResult<BrowserPage> {
         self.mutate(|s| {
             let page = s.pages.iter().find(|p| p.id == page_id).cloned().ok_or_else(|| BrowserError::new("browser_tab_not_found", format!("No browser page {page_id}.")))?;
@@ -221,6 +254,7 @@ impl PageStore {
                             id: new_page_id(),
                             profile_id: profile_id.to_string(),
                             tab_id: tab.tab_id.clone(),
+                            cdp_target_id: None,
                             url: tab.url.clone(),
                             title: tab.title.clone(),
                             workspace_path: fallback_workspace.map(String::from),
@@ -282,7 +316,7 @@ mod tests {
     use super::*;
 
     fn page(id: &str, tab: &str, ws: &str) -> BrowserPage {
-        BrowserPage { id: id.into(), profile_id: "default".into(), tab_id: tab.into(), url: format!("https://{id}"), title: id.into(), workspace_path: Some(ws.into()), created: "now".into() }
+        BrowserPage { id: id.into(), profile_id: "default".into(), tab_id: tab.into(), cdp_target_id: None, url: format!("https://{id}"), title: id.into(), workspace_path: Some(ws.into()), created: "now".into() }
     }
 
     fn store() -> (tempfile::TempDir, PageStore) {
@@ -353,5 +387,15 @@ mod tests {
         assert_eq!(reopened.snapshot().pages.len(), 1);
         reopened.reset().unwrap();
         assert!(reopened.snapshot().pages.is_empty());
+    }
+
+    #[test]
+    fn insert_background_preserves_existing_active_tab_and_tracks_cdp_target_id() {
+        let (_tmp, store) = store();
+        store.insert(page("bp-active", "t1", "/ws")).unwrap();
+        store.insert_background(page("bp-ext", "t2", "/ws")).unwrap();
+        assert_eq!(store.active_for("/ws").unwrap().id, "bp-active", "background insert must not hijack active workspace tab");
+        assert!(store.set_cdp_target_id("bp-active", Some("TARGET-123")).unwrap());
+        assert_eq!(store.get("bp-active").unwrap().cdp_target_id.as_deref(), Some("TARGET-123"));
     }
 }
