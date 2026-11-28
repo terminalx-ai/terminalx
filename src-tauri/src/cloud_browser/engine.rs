@@ -354,6 +354,14 @@ async fn lease() -> Result<(Arc<Cdp>, Lease), String> {
     TEST_CDP.lock().unwrap().clone().map(|cdp| (cdp, ())).ok_or_else(|| "No desktop in this test.".to_string())
 }
 
+/// The engine's runtime in tests, set once for the whole test binary.
+#[cfg(test)]
+pub(super) fn runtime_for_tests() -> &'static tokio::runtime::Runtime {
+    static RT: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap());
+    let _ = RUNTIME.set(RT.handle().clone());
+    &RT
+}
+
 #[cfg(test)]
 static TEST_CDP: Mutex<Option<Arc<Cdp>>> = Mutex::new(None);
 
@@ -605,12 +613,6 @@ mod tests {
         pipes.hand_to(&mut chrome);
         let child = chrome.spawn().unwrap();
         (child, pipes.connect())
-    }
-
-    fn runtime_for_tests() -> &'static tokio::runtime::Runtime {
-        static RT: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap());
-        let _ = RUNTIME.set(RT.handle().clone());
-        &RT
     }
 
     fn caller(key: &str, asks: bool) -> Caller<'static> {

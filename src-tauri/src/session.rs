@@ -49,6 +49,9 @@ use crate::remote::collab::v2::{self as collaboration_v2, Permit as Collaboratio
 
 #[cfg(test)]
 static ACP_FULL_PIPE: Mutex<Option<std::sync::mpsc::Sender<()>>> = Mutex::new(None);
+/// Open cloud browser cards in Codex app-server tabs (PRO-209), by request
+/// id: the waiting hook's answer. Codex never sees these cards.
+static BROWSER_ASKS: std::sync::LazyLock<Mutex<HashMap<String, std::sync::mpsc::Sender<bool>>>> = std::sync::LazyLock::new(Default::default);
 #[cfg(test)]
 static COLLABORATION_PTY_CAPACITY: Mutex<Option<std::sync::mpsc::Sender<()>>> = Mutex::new(None);
 
@@ -5507,7 +5510,11 @@ impl SessionManager {
     /// cloud browser session never outlives it.
     pub fn cli_launch_alive(&self, session_id: &str, tab_id: &str, token: &str) -> bool {
         let runtime = self.tabs.lock().unwrap().get(&key_of(session_id, tab_id)).cloned();
-        runtime.is_some_and(|rt| matches!(&rt.lock().unwrap().engine, Engine::Cli(cli) if cli.origin.token == token))
+        runtime.is_some_and(|rt| match &rt.lock().unwrap().engine {
+            Engine::Cli(cli) => cli.origin.token == token,
+            Engine::CodexStdio(engine) => !engine.exited && !engine.hook_token.is_empty() && crate::hooks::token_matches(&engine.hook_token, token),
+            _ => false,
+        })
     }
 
     pub fn close_tab(&self, session_id: &str, tab_id: &str) -> Result<()> {
@@ -5656,6 +5663,26 @@ impl SessionManager {
         if let Some(permit) = &policy { permit.check_approval()?; }
         let rt_arc = self.runtime(session_id, tab_id)?;
         let mut rt = rt_arc.lock().unwrap();
+        // A cloud browser card in a Codex app-server tab (PRO-209): its hook
+        // waits for the answer, which never goes to Codex.
+        if rt.pending.contains_key(request_id) && BROWSER_ASKS.lock().unwrap().contains_key(request_id) {
+            let allow = match option_id {
+                "allow" => true,
+                "deny" => false,
+                _ => bail!("unknown option"),
+            };
+            let tx = BROWSER_ASKS.lock().unwrap().remove(request_id).ok_or_else(|| anyhow!("the agent stopped waiting for that request"))?;
+            tx.send(allow).map_err(|_| anyhow!("the agent stopped waiting for that request"))?;
+            rt.pending.remove(request_id);
+            let label = if allow { "Allowed for this browser session" } else { "Denied" };
+            self.publish(&mut rt, Payload::PermissionDecided { request_id: request_id.into(), tool_use_id: None, allowed: allow, label: label.into(), automatic: false }, None);
+            if rt.pending.is_empty() {
+                self.set_status(&mut rt, TabStatus::InProgress);
+            }
+            drop(rt);
+            self.observer.answered(session_id, tab_id);
+            return Ok(());
+        }
         if rt.child.is_none() && !matches!(rt.engine, Engine::Cli(_)) {
             rt.pending.remove(request_id);
             self.publish(&mut rt, Payload::PermissionDecided { request_id: request_id.into(), tool_use_id: None, allowed: false, label: "Lapsed".into(), automatic: true }, None);
@@ -8536,6 +8563,11 @@ impl SessionManager {
             Ok(rt_arc) => rt_arc,
             Err(error) => return refuse(format!("this TerminalX has no such tab ({error:#})")),
         };
+        // A Codex app-server tab's cloud browser calls (PRO-209): the only
+        // hook frames such a tab sends.
+        if frame.event == crate::cloud_browser::HOOK_EVENT && matches!(&rt_arc.lock().unwrap().engine, Engine::CodexStdio(_)) {
+            return self.cloud_browser_stdio_hook(&rt_arc, &frame);
+        }
         let (kind, tail, asks_every_tool, origin, usage_account) = {
             let rt = rt_arc.lock().unwrap();
             match &rt.engine {
@@ -9229,6 +9261,76 @@ impl SessionManager {
         let approve = |input: Value| self.ask_cloud_browser(rt_arc, frame, kind, input);
         let caller = crate::cloud_browser::Caller { key, agent, tab_title, asks: !crate::cloud_browser::runs_without_asking(&mode) };
         HookReply { output: Some(crate::cloud_browser::call(caller, &frame.payload, &approve)), refused: None }
+    }
+
+    /// The cloud browser's calls from a Codex app-server tab: the same rules as
+    /// a terminal tab's, its launch token naming the launch.
+    fn cloud_browser_stdio_hook(&self, rt_arc: &Arc<Mutex<TabRuntime>>, frame: &HookFrame) -> HookReply {
+        let (mode, key) = {
+            let rt = rt_arc.lock().unwrap();
+            let Engine::CodexStdio(engine) = &rt.engine else { return HookReply::default() };
+            if engine.exited || engine.hook_token.is_empty() || !crate::hooks::token_matches(&engine.hook_token, &frame.token) {
+                return HookReply::refused("the frame's token is not the one this tab's Codex launch was given");
+            }
+            (engine.mode().to_string(), format!("{}/{}/{}", rt.session_id, rt.tab_id, engine.hook_token))
+        };
+        if !crate::cloud_browser::launched_with_tool(&frame.token) {
+            return HookReply::refused("This agent was not started with the cloud browser.");
+        }
+        let tab_title = index::get(&frame.session).ok().and_then(|entry| entry.tab(&frame.tab).and_then(|tab| tab.title.clone()));
+        let approve = |input: Value| self.ask_cloud_browser_stdio(rt_arc, frame, input);
+        let caller = crate::cloud_browser::Caller { key, agent: "Codex", tab_title, asks: !crate::cloud_browser::runs_without_asking(&mode) };
+        HookReply { output: Some(crate::cloud_browser::call(caller, &frame.payload, &approve)), refused: None }
+    }
+
+    /// The browser session's one card in a Codex app-server tab. Its answer
+    /// comes back through `respond_permission` (`BROWSER_ASKS`), not Codex.
+    fn ask_cloud_browser_stdio(&self, rt_arc: &Arc<Mutex<TabRuntime>>, frame: &HookFrame, input: Value) -> bool {
+        let request_id = uuid::Uuid::now_v7().to_string();
+        let tool_name = crate::cloud_browser::OPEN_TOOL.to_string();
+        let (tx, rx) = std::sync::mpsc::channel::<bool>();
+        let current = |rt: &TabRuntime| matches!(&rt.engine, Engine::CodexStdio(engine) if !engine.exited && crate::hooks::token_matches(&engine.hook_token, &frame.token));
+        {
+            let mut rt = rt_arc.lock().unwrap();
+            if !current(&rt) { return false; }
+            BROWSER_ASKS.lock().unwrap().insert(request_id.clone(), tx);
+            let options = vec![
+                crate::events::PermissionOption { id: "allow".into(), label: "Allow for this browser session".into(), kind: crate::events::PermissionOptionKind::AllowOnce },
+                crate::events::PermissionOption { id: "deny".into(), label: "Deny".into(), kind: crate::events::PermissionOptionKind::Deny },
+            ];
+            let payload = Payload::PermissionRequested {
+                request_id: request_id.clone(),
+                tool_use_id: String::new(),
+                title: Some("Use the browser on the cloud desktop?".into()),
+                description: input["plan"].as_str().filter(|plan| !plan.trim().is_empty()).map(String::from),
+                reason: None,
+                cwd: None,
+                options,
+                tool_name: tool_name.clone(),
+                input: input.clone(),
+            };
+            rt.pending.insert(request_id.clone(), PendingAsk { tool_use_id: String::new(), tool_name, input, suggestions: Vec::new() });
+            self.apply(&mut rt, payload, None);
+        }
+        // Answered, or lapsed: the hook's own wait ends first, or the launch is gone.
+        let deadline = std::time::Instant::now() + crate::cloud_browser::HOOK_WAIT.saturating_sub(Duration::from_secs(10));
+        loop {
+            match rx.recv_timeout(Duration::from_millis(500)) {
+                Ok(allow) => return allow,
+                // Its card still open (a stop or a reset clears it), its launch still running.
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) if std::time::Instant::now() < deadline && {
+                    let rt = rt_arc.lock().unwrap();
+                    current(&rt) && rt.pending.contains_key(&request_id)
+                } => continue,
+                Err(_) => break,
+            }
+        }
+        BROWSER_ASKS.lock().unwrap().remove(&request_id);
+        let mut rt = rt_arc.lock().unwrap();
+        if rt.pending.remove(&request_id).is_some() {
+            self.publish(&mut rt, Payload::PermissionDecided { request_id, tool_use_id: None, allowed: false, label: "Lapsed".into(), automatic: true }, None);
+        }
+        false
     }
 
     /// The browser session's one card: allowed or not.

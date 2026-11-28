@@ -141,6 +141,12 @@ pub(crate) fn test_offer() -> Option<&'static str> {
     TEST_OFFER.with(std::cell::Cell::get).or_else(|| TASK_OFFER.try_with(|offer| *offer).ok().flatten())
 }
 
+/// Start the engine's runtime, for tests that call through to it.
+#[cfg(all(test, unix))]
+pub(crate) fn runtime_for_tests() {
+    let _ = engine::runtime_for_tests();
+}
+
 /// Tests that touch the engine's process-wide state take this first.
 #[cfg(test)]
 pub(crate) static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -186,21 +192,44 @@ pub(crate) fn launch_args(harness: &str, exe: &str, token: &str, session: &str, 
     if offer() != "on" || !matches!(harness, "claude" | "codex") {
         return String::new();
     }
-    let server = format!("{SERVER}_{}", &uuid::Uuid::new_v4().simple().to_string()[..12]);
-    let args = match harness {
+    let server = register(token, session, tab);
+    match harness {
         "claude" => {
             let config = json!({ "mcpServers": { &server: { "command": exe, "args": [SUBCOMMAND] } } });
             format!(" --mcp-config {}", crate::container_vm::shell_quote(&config.to_string()))
         }
-        _ => {
-            let mut table = toml::map::Map::new();
-            table.insert("command".into(), toml::Value::String(exe.into()));
-            table.insert("args".into(), toml::Value::Array(vec![toml::Value::String(SUBCOMMAND.into())]));
-            table.insert("env_vars".into(), toml::Value::Array(HOOK_ENV.iter().map(|name| toml::Value::String((*name).into())).collect()));
-            let inline = toml::Value::Table(table).to_string();
-            format!(" -c {}", crate::container_vm::shell_quote(&format!("mcp_servers.{server}={}", inline.trim())))
-        }
-    };
+        _ => format!(" -c {}", crate::container_vm::shell_quote(&codex_server(&server, exe, false))),
+    }
+}
+
+/// The tool for one Codex app-server launch (`session_codex_stdio`), as
+/// arguments ahead of `app-server`, only while it is offered. Codex itself
+/// asks no approval for this server's tools: the server asks once per browser
+/// session, in tabs that ask, as it does for the other launches.
+pub(crate) fn codex_stdio_args(exe: &str, token: &str, session: &str, tab: &str) -> Vec<String> {
+    if offer() != "on" {
+        return Vec::new();
+    }
+    let server = register(token, session, tab);
+    vec!["-c".into(), codex_server(&server, exe, true)]
+}
+
+/// `mcp_servers.<server>={…}` for Codex. The hook environment goes by name
+/// (`env_vars`), so no token is on a command line.
+fn codex_server(server: &str, exe: &str, approved: bool) -> String {
+    let mut table = toml::map::Map::new();
+    table.insert("command".into(), toml::Value::String(exe.into()));
+    table.insert("args".into(), toml::Value::Array(vec![toml::Value::String(SUBCOMMAND.into())]));
+    table.insert("env_vars".into(), toml::Value::Array(HOOK_ENV.iter().map(|name| toml::Value::String((*name).into())).collect()));
+    if approved {
+        table.insert("default_tools_approval_mode".into(), toml::Value::String("approve".into()));
+    }
+    format!("mcp_servers.{server}={}", toml::Value::Table(table).to_string().trim())
+}
+
+/// A server name of this launch's own, remembered by its token.
+fn register(token: &str, session: &str, tab: &str) -> String {
+    let server = format!("{SERVER}_{}", &uuid::Uuid::new_v4().simple().to_string()[..12]);
     let mut launched = LAUNCHED.lock().unwrap();
     // Bounded by dropping launches that have ended, never running ones.
     if launched.len() >= LAUNCHED_LIMIT {
@@ -208,8 +237,8 @@ pub(crate) fn launch_args(harness: &str, exe: &str, token: &str, session: &str, 
             launched.retain(|token, launch| alive(&launch.session, &launch.tab, token));
         }
     }
-    launched.insert(token.to_string(), Launched { server, session: session.into(), tab: tab.into() });
-    args
+    launched.insert(token.to_string(), Launched { server: server.clone(), session: session.into(), tab: tab.into() });
+    server
 }
 
 /// Whether this launch was given the tool.
