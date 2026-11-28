@@ -26,6 +26,7 @@ const { invoke, sessionStore, takeNewIssueRequest } = vi.hoisted(() => ({
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: vi.fn() }));
+vi.mock("@/icons", () => new Proxy({}, { has: () => true, get: (_, prop) => (prop === "then" || typeof prop === "symbol" ? undefined : prop === "__esModule" ? true : () => null) }));
 vi.mock("@/components/chat/Markdown", () => ({ Markdown: ({ text }: { text: string }) => <div>{text}</div> }));
 vi.mock("@/components/ui/tooltip", () => ({ WithTooltip: ({ children }: { children: ReactNode }) => children }));
 vi.mock("@/components/session/SessionAgentControls", () => ({ SessionAgentControls: () => null }));
@@ -60,7 +61,12 @@ function rows(provider: IssueProvider): Issue[] {
     .map(({ issue: { provider: p, id, identifier, number, title, url, state, stateType, labels, assignee, updatedAt, body, team } }) => ({ provider: p, id, identifier, number, title, url, state, stateType, labels, assignee, updatedAt, body, team }));
 }
 
+const nativeSetTimeout = window.setTimeout;
+let timerSpy: ReturnType<typeof vi.spyOn> | null = null;
+
 beforeEach(() => {
+  timerSpy = vi.spyOn(window, "setTimeout").mockImplementation(((fn: TimerHandler, delay?: number, ...args: unknown[]) =>
+    nativeSetTimeout(fn, delay === 250 ? 0 : delay, ...args)) as typeof window.setTimeout);
   localStorage.clear();
   mock = createIssueOpsMock();
   gate = null;
@@ -84,6 +90,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  timerSpy?.mockRestore();
+  timerSpy = null;
   cleanup();
   vi.clearAllMocks();
 });

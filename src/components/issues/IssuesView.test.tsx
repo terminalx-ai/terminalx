@@ -39,6 +39,7 @@ const { invoke, openAutomation, catalog, sessionStore, pipelineStore, startPipel
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: vi.fn() }));
+vi.mock("@/icons", () => new Proxy({}, { has: () => true, get: (_, prop) => (prop === "then" || typeof prop === "symbol" ? undefined : prop === "__esModule" ? true : () => null) }));
 vi.mock("@/components/chat/Markdown", () => ({ Markdown: ({ text }: { text: string }) => <div>{text}</div> }));
 vi.mock("@/components/ui/tooltip", () => ({
   WithTooltip: ({ children }: { children: ReactNode }) => children,
@@ -229,7 +230,12 @@ function pipelineOf(issue: Pick<(typeof issues)[number], "provider" | "id" | "id
   };
 }
 
+const nativeSetTimeout = window.setTimeout;
+let timerSpy: ReturnType<typeof vi.spyOn> | null = null;
+
 beforeEach(() => {
+  timerSpy = vi.spyOn(window, "setTimeout").mockImplementation(((fn: TimerHandler, delay?: number, ...args: unknown[]) =>
+    nativeSetTimeout(fn, delay === 250 ? 0 : delay, ...args)) as typeof window.setTimeout);
   invoke.mockReset();
   openAutomation.mockReset();
   pipelineStore.pipelines = [];
@@ -254,7 +260,11 @@ beforeEach(() => {
   });
 });
 
-afterEach(cleanup);
+afterEach(() => {
+  timerSpy?.mockRestore();
+  timerSpy = null;
+  cleanup();
+});
 
 describe("issue session targets", () => {
   it("does not clear the workspace destination during Strict Mode effect replay", async () => {
@@ -737,6 +747,8 @@ describe("an issue its merge closed", () => {
   });
 
   it("is read again, with the list, a moment after its pipeline merges", async () => {
+    timerSpy?.mockRestore();
+    timerSpy = null;
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
       pipelineStore.pipelines = [pipelineOf(issues[0], { stage: "merge", state: "readyToMerge", round: 1 })];
@@ -1176,6 +1188,8 @@ describe("who is working on an issue (#441)", () => {
   });
 
   it("shows work that starts elsewhere without a refresh", async () => {
+    timerSpy?.mockRestore();
+    timerSpy = null;
     vi.useFakeTimers({ shouldAdvanceTime: true });
     render(<IssuesView />);
     const listed = await row("Fix login timeout");

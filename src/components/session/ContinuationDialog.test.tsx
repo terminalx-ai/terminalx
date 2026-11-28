@@ -7,6 +7,14 @@ import type { ContinuationContext } from "@/lib/continuation";
 const mocks = vi.hoisted(() => ({ prepare: vi.fn(), providers: vi.fn(), launch: vi.fn(), move: vi.fn(), submit: vi.fn(), workspaces: vi.fn(), launchDestination: vi.fn(), projects: [] as Project[] }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn(async () => []) }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) }));
+vi.mock("@/icons", () => new Proxy({}, { has: () => true, get: (_, prop) => (prop === "then" || typeof prop === "symbol" ? undefined : prop === "__esModule" ? true : () => null) }));
+vi.mock("@/components/ui/tooltip", () => ({
+  TooltipProvider: ({ children }: { children: React.ReactNode }) => children,
+  WithTooltip: ({ children }: { children: React.ReactNode }) => children,
+  Tooltip: ({ children }: { children: React.ReactNode }) => children,
+  TooltipTrigger: ({ children }: { children: React.ReactNode }) => children,
+  TooltipContent: () => null,
+}));
 vi.mock("@/lib/api", async (original) => ({ ...await original<typeof import("@/lib/api")>(), agent: { prepareContinuation: mocks.prepare, submitWaiting: mocks.submit }, api: { listHarnesses: mocks.providers, listWorkspaces: mocks.workspaces }, errorMessage: String }));
 vi.mock("@/lib/continuation", async (original) => ({ ...await original<typeof import("@/lib/continuation")>(), launchContinuation: mocks.launch, launchContinuationInDestination: mocks.launchDestination, moveChatToProject: mocks.move }));
 vi.mock("@/lib/sessions", async (original) => ({ ...await original<typeof import("@/lib/sessions")>(), useSessionStore: () => ({ projects: mocks.projects }) }));
