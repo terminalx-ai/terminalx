@@ -438,6 +438,8 @@ impl Rig {
             reported_mode_to_judge: None,
             restart_claim: None,
             route_switch_after_turn: false,
+            route_turn_unfinished: false,
+            route_notice: None,
             stopping: false,
             stop_in_flight: false,
             stopping_pid: None,
@@ -4275,75 +4277,195 @@ fn wait_for_card(rig: &Rig, worker: &std::thread::JoinHandle<HookReply>) -> Stri
 
 // ------------------------------------------------- organization routes (PRO-310)
 
-fn route_notices(rig: &Rig) -> Vec<String> {
-    rig.notices().into_iter().filter(|text| text.starts_with("The organization's")).collect()
+use crate::cloud_grants::{Replacement, RouteSwitch};
+
+const OWN_ROUTE: &str = "The organization's Claude Code route no longer applies to this workspace, so Claude Code in this session now uses the workspace creator's own route.";
+const SIGN_IN: &str = "The organization's Claude Code route no longer applies to this workspace, and Claude Code has no other login in this workspace. Sign in to continue.";
+const AFTER_TURN_LOGIN: &str = "The organization's Claude Code route no longer applies to this workspace. The turn that was running finished on it; Claude Code in this session now uses the organization's login.";
+const AFTER_TURN_SIGN_IN: &str = "The organization's Claude Code route no longer applies to this workspace. The turn that was running finished on it, and Claude Code has no other login in this workspace. Sign in to continue.";
+
+impl Rig {
+    /// Say `switch` of the tab's organization route, and record each move
+    /// (left under way when `hold`) instead of doing it.
+    fn route(&self, switch: Option<RouteSwitch>, hold: bool) {
+        let mut stand_in = self.manager.route_stand_in.lock().unwrap();
+        let taken = stand_in.take().map(|stand_in| stand_in.taken).unwrap_or_default();
+        *stand_in = Some(super::RouteStandIn { switch, record: true, hold, taken });
+    }
+
+    /// The moves recorded so far, once there are `count` of them.
+    fn moves(&self, count: usize) -> Vec<(RouteAction, std::thread::ThreadId)> {
+        let until = Instant::now() + Duration::from_secs(10);
+        loop {
+            let taken = self.manager.route_stand_in.lock().unwrap().as_ref().map(|stand_in| stand_in.taken.clone()).unwrap_or_default();
+            if taken.len() >= count || Instant::now() > until { return taken; }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    fn route_notices(&self) -> Vec<String> {
+        self.notices().into_iter().filter(|text| text.starts_with("The organization's")).collect()
+    }
+
+    fn save_entry(&self) {
+        let entry: index::SessionEntry = serde_json::from_value(json!({
+            "id": SESSION, "projectPath": self._dir.path(), "cwd": self._dir.path(),
+            "title": "routed", "created": index::now(), "modified": index::now(),
+            "tabs": [{ "id": TAB, "harness": "claude", "created": index::now() }]
+        })).unwrap();
+        index::save(&[entry]).unwrap();
+    }
 }
 
 /// A route removed while the tab is between turns: the agent moves at once,
 /// starting again on the next login or, with none, stopping at "Sign in to
-/// continue", the session told either way. A route that still applies moves
-/// nothing.
+/// continue", off the calling thread; the session is told once it moved. A
+/// route that still applies moves nothing.
 #[test]
 fn an_idle_tab_leaves_an_organization_route_that_went_for_the_next_login() {
-    use crate::cloud_grants::{Replacement, RouteSwitch};
-    for (switch, action, notice) in [
-        (
-            RouteSwitch::Login(Replacement::OwnRoute),
-            RouteAction::Restart,
-            "The organization's Claude Code route no longer applies to this workspace, so Claude Code now uses your own route.",
-        ),
-        (
-            RouteSwitch::SignIn,
-            RouteAction::Stop,
-            "The organization's Claude Code route no longer applies to this workspace, and Claude Code has no other login here. Sign in to continue.",
-        ),
-    ] {
+    for (switch, action, notice) in [(RouteSwitch::Login(Replacement::OwnRoute), RouteAction::Restart, OWN_ROUTE), (RouteSwitch::SignIn, RouteAction::Stop, SIGN_IN)] {
         let rig = Rig::new();
-        let taken = super::tests::stand_in_route_switch(None);
-        taken.lock().unwrap().clear();
+        rig.route(None, false);
         rig.manager.switch_organization_routes();
-        assert!(taken.lock().unwrap().is_empty() && route_notices(&rig).is_empty(), "the route still applies");
-        super::tests::stand_in_route_switch(Some(switch));
+        assert!(rig.moves(0).is_empty() && rig.route_notices().is_empty(), "the route still applies");
+        rig.route(Some(switch), false);
         rig.manager.switch_organization_routes();
-        assert_eq!(*taken.lock().unwrap(), [action]);
-        assert_eq!(route_notices(&rig), [notice]);
+        let moves = rig.moves(1);
+        assert_eq!(moves.iter().map(|(action, _)| *action).collect::<Vec<_>>(), [action]);
+        assert_ne!(moves[0].1, std::thread::current().id(), "the CLI is moved off the calling thread");
+        let until = Instant::now() + Duration::from_secs(10);
+        while rig.route_notices().is_empty() && Instant::now() < until { std::thread::sleep(Duration::from_millis(5)); }
+        assert_eq!(rig.route_notices(), [notice]);
+        assert!(!rig.manager.switching_route(SESSION, TAB));
     }
 }
 
-/// A route removed while a turn runs (PRO-310): the turn is left to finish
-/// on the route it started with, and only its end moves the agent, with a
-/// notice that says the turn finished on the route.
+/// A route removed while a turn runs: the turn is left to finish on the
+/// route it started with, the tab stays busy to whatever would start the
+/// next turn, and the turn's end moves the agent with a notice that says
+/// the turn finished on the route. Through the transcript watcher.
 #[test]
 fn a_turn_running_when_its_organization_route_goes_finishes_on_it() {
-    use crate::cloud_grants::{Replacement, RouteSwitch};
-    for (switch, action, notice) in [
-        (
-            RouteSwitch::Login(Replacement::OrganizationLogin),
-            RouteAction::Restart,
-            "The organization's Claude Code route no longer applies to this workspace. The turn that was running finished on it; Claude Code now uses the organization's login.",
-        ),
-        (
-            RouteSwitch::SignIn,
-            RouteAction::Stop,
-            "The organization's Claude Code route no longer applies to this workspace. The turn that was running finished on it, and Claude Code has no other login here. Sign in to continue.",
-        ),
-    ] {
+    for (switch, action, notice) in [(RouteSwitch::Login(Replacement::OrganizationLogin), RouteAction::Restart, AFTER_TURN_LOGIN), (RouteSwitch::SignIn, RouteAction::Stop, AFTER_TURN_SIGN_IN)] {
         let rig = Rig::new();
         rig.start_turn();
-        let taken = super::tests::stand_in_route_switch(Some(switch));
-        taken.lock().unwrap().clear();
+        rig.route(Some(switch), false);
         rig.manager.switch_organization_routes();
-        assert!(taken.lock().unwrap().is_empty(), "nothing interrupts the running turn");
-        assert!(route_notices(&rig).is_empty());
+        assert!(rig.moves(0).is_empty(), "nothing interrupts the running turn");
+        assert!(rig.route_notices().is_empty());
         assert!(rig.turn_open());
-        assert!(rig.rt.lock().unwrap().route_switch_after_turn);
+        assert!(rig.manager.switching_route(SESSION, TAB), "busy for the next message");
         rig.end_turn_in_transcript();
         rig.advance(PATIENCE.settle);
         rig.tick();
         assert!(!rig.turn_open());
         assert_eq!(rig.completed_turns(), 1, "the turn completed as it would have");
-        assert_eq!(*taken.lock().unwrap(), [action]);
-        assert_eq!(route_notices(&rig), [notice]);
-        assert!(!rig.rt.lock().unwrap().route_switch_after_turn);
+        assert_eq!(rig.moves(1).iter().map(|(action, _)| *action).collect::<Vec<_>>(), [action]);
+        let until = Instant::now() + Duration::from_secs(10);
+        while rig.route_notices().is_empty() && Instant::now() < until { std::thread::sleep(Duration::from_millis(5)); }
+        assert_eq!(rig.route_notices(), [notice]);
+        assert!(!rig.manager.switching_route(SESSION, TAB));
     }
+}
+
+/// The same through Claude Code's Stop hook: its reply goes back before
+/// anything stops the CLI, which is moved on another thread.
+#[test]
+fn a_stop_hook_replies_before_the_cli_leaves_an_organization_route() {
+    let rig = Rig::new();
+    rig.start_turn();
+    rig.route(Some(RouteSwitch::Login(Replacement::OrganizationLogin)), false);
+    rig.manager.switch_organization_routes();
+    let reply = rig.manager.on_hook(HookFrame { tab: TAB.into(), session: SESSION.into(), token: rig.token.clone(), event: "Stop".into(), payload: json!({}) });
+    assert!(reply.refused.is_none(), "{reply:?}");
+    let moves = rig.moves(1);
+    assert_eq!(moves.iter().map(|(action, _)| *action).collect::<Vec<_>>(), [RouteAction::Restart]);
+    assert_ne!(moves[0].1, std::thread::current().id(), "not on the hook's thread");
+    let until = Instant::now() + Duration::from_secs(10);
+    while rig.route_notices().is_empty() && Instant::now() < until { std::thread::sleep(Duration::from_millis(5)); }
+    assert_eq!(rig.route_notices(), [AFTER_TURN_LOGIN]);
+}
+
+/// A turn that ends stopped is not said to have finished on the route; a
+/// route that applies again by the turn's end moves nothing.
+#[test]
+fn an_interrupted_turn_or_a_route_back_is_not_reported_as_finished() {
+    {
+        let rig = Rig::new();
+        rig.start_turn();
+        rig.route(Some(RouteSwitch::SignIn), false);
+        rig.manager.switch_organization_routes();
+        rig.manager.end_open_turn(&mut rig.rt.lock().unwrap(), TurnStatus::Aborted, None);
+        rig.manager.switch_organization_routes();
+        assert_eq!(rig.moves(1).iter().map(|(action, _)| *action).collect::<Vec<_>>(), [RouteAction::Stop]);
+        let until = Instant::now() + Duration::from_secs(10);
+        while rig.route_notices().is_empty() && Instant::now() < until { std::thread::sleep(Duration::from_millis(5)); }
+        assert_eq!(rig.route_notices(), [SIGN_IN]);
+    }
+    // One rig at a time: each holds the test home.
+    let rig = Rig::new();
+    rig.start_turn();
+    rig.route(Some(RouteSwitch::SignIn), false);
+    rig.manager.switch_organization_routes();
+    assert!(rig.manager.switching_route(SESSION, TAB));
+    rig.route(None, false);
+    rig.end_turn_in_transcript();
+    rig.advance(PATIENCE.settle);
+    rig.tick();
+    assert!(!rig.manager.switching_route(SESSION, TAB), "the route applies again");
+    assert!(rig.moves(0).is_empty() && rig.route_notices().is_empty());
+}
+
+/// What would start the next turn while the agent moves goes to the agent
+/// on the next login: a message sent to the tab is held rather than typed
+/// into the old CLI, a prompt Claude Code starts from its own queue is
+/// refused there and held, and the session is told once, when the move is
+/// done.
+#[test]
+fn a_message_sent_while_the_agent_moves_waits_for_the_next_login() {
+    let rig = Rig::new();
+    rig.save_entry();
+    rig.start_turn();
+    rig.route(Some(RouteSwitch::Login(Replacement::OrganizationLogin)), true);
+    rig.manager.switch_organization_routes();
+    // Sent during the turn, once the removal is known.
+    let outcome = rig.manager.send(SESSION, TAB, "sent mid-turn".into(), Vec::new()).unwrap();
+    assert!(outcome.queued);
+    rig.end_turn_in_transcript();
+    rig.advance(PATIENCE.settle);
+    rig.tick();
+    assert_eq!(rig.moves(1).len(), 1);
+    assert!(rig.manager.switching_route(SESSION, TAB), "the move is under way");
+    // Claude Code starts the turn it queued itself.
+    let reply = rig.manager.on_hook(HookFrame { tab: TAB.into(), session: SESSION.into(), token: rig.token.clone(), event: "UserPromptSubmit".into(), payload: json!({ "prompt": "typed in its terminal", "source": "user" }) });
+    assert_eq!(reply.output.as_ref().unwrap()["decision"], "block");
+    assert!(!rig.turn_open(), "no turn runs on the old route");
+    let held: Vec<String> = rig.rt.lock().unwrap().held_queue.items.iter().map(|item| item.text.clone()).collect();
+    assert_eq!(held, ["sent mid-turn", "typed in its terminal"]);
+    {
+        let rt = rig.rt.lock().unwrap();
+        let Engine::Cli(cli) = &rt.engine else { panic!("the CLI is still the old one") };
+        assert!(cli.echoed.is_empty(), "nothing was typed into the old CLI");
+    }
+    // Asked again while under way: one move, and nothing said yet.
+    rig.manager.switch_organization_routes();
+    assert_eq!(rig.moves(1).len(), 1);
+    assert!(rig.route_notices().is_empty());
+    // Done: told once.
+    rig.manager.route_switch_done(&mut rig.rt.lock().unwrap(), RouteAction::Restart, true);
+    rig.manager.route_switch_done(&mut rig.rt.lock().unwrap(), RouteAction::Restart, true);
+    assert_eq!(rig.route_notices(), [AFTER_TURN_LOGIN]);
+    assert!(!rig.manager.switching_route(SESSION, TAB));
+}
+
+/// A move that did not happen says nothing, and the tab is not left busy.
+#[test]
+fn a_move_that_failed_is_not_announced() {
+    let rig = Rig::new();
+    rig.route(Some(RouteSwitch::SignIn), true);
+    rig.manager.switch_organization_routes();
+    assert_eq!(rig.moves(1).len(), 1);
+    rig.manager.route_switch_done(&mut rig.rt.lock().unwrap(), RouteAction::Stop, false);
+    assert!(rig.route_notices().is_empty());
+    assert!(!rig.manager.switching_route(SESSION, TAB));
 }

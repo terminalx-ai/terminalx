@@ -91,6 +91,9 @@ impl Queue {
     }
 
     pub(super) fn blocked(&self, rt: &TabRuntime) -> Option<Block> {
+        // Moving off an organization route (PRO-310): held follow-ups go to
+        // the agent on the next login, once it runs.
+        if rt.switching_route() { return Some(Block::WaitingForCli); }
         let reason = if rt.stopping || rt.stop_in_flight {
             "Stop has not finished. Retry Stop, then resume the queue."
         } else if rt.restart_claim.is_some() || rt.stdio_starting {

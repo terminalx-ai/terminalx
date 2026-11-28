@@ -211,7 +211,7 @@ fn owned_stdio_lifecycle_is_process_bounded() {
         "phone-input", "phone-compact", "phone-revoked", "phone-reconcile-race", "share-input", "share-slow-start", "share-ended", "host-while-shared",
         "continuation-delivered", "continuation-undelivered", "continuation-stopped", "resend-after-restart", "resend-no-helper-tools",
         "native-fallback-send", "native-fallback-start", "native-supported-start", "cloud-launch", "streamed-reply", "streamed-stopped",
-        "mailbox-after-refusal", "mailbox-cli-waiting", "busy-while-working", "queued-while-working", "queued-stop", "queued-interrupt", "queued-share-ended", "queued-overflow", "handover-stop", "handover-exit", "handover-descendant"] {
+        "mailbox-after-refusal", "mailbox-route-gone", "mailbox-cli-waiting", "busy-while-working", "queued-while-working", "queued-stop", "queued-interrupt", "queued-share-ended", "queued-overflow", "handover-stop", "handover-exit", "handover-descendant"] {
         let dir = tempfile::tempdir().unwrap();
         let log = std::fs::File::create(dir.path().join("child.log")).unwrap();
         let mut child = std::process::Command::new(std::env::current_exe().unwrap())
@@ -1272,7 +1272,7 @@ fn mailbox_fixture(case: &str) {
     std::env::set_var("CODEX_HOME", root.join("user-codex"));
     let bin = root.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
-    let native = case == "mailbox-after-refusal";
+    let native = matches!(case, "mailbox-after-refusal" | "mailbox-route-gone");
     std::fs::write(bin.join("codex"), if native { SIGNED_OUT_CODEX } else { FIRST_LAUNCH_CODEX }).unwrap();
     std::fs::set_permissions(bin.join("codex"), std::fs::Permissions::from_mode(0o755)).unwrap();
     std::fs::write(bin.join("version"), "codex-cli 0.166.0\n").unwrap();
@@ -1326,6 +1326,9 @@ fn mailbox_fixture(case: &str) {
     let launches = || std::fs::read_to_string(bin.join("launches")).unwrap_or_default().lines().count();
     let threads = || frames().iter().filter(|frame| matches!(frame["method"].as_str(), Some("thread/start" | "thread/resume")))
         .map(|frame| format!("{} {}", frame["method"].as_str().unwrap(), frame["params"]["threadId"].as_str().unwrap_or("-"))).collect::<Vec<_>>();
+    if case == "mailbox-route-gone" {
+        return route_gone(&manager, &agents, &rt, &bin, &starts, &settled, &launches, &threads);
+    }
     const REFUSED: (TurnStatus, bool) = (TurnStatus::Error, true);
     const LIMITED: (TurnStatus, bool) = (TurnStatus::Error, false);
     const ANSWERED: (TurnStatus, bool) = (TurnStatus::Ok, false);
@@ -1894,7 +1897,7 @@ fn child_fixture() {
     if matches!(case.as_str(), "native-fallback-send" | "native-fallback-start" | "native-supported-start") { return first_launch_fixture(&case); }
     if case == "cloud-launch" { return cloud_launch_fixture(); }
     if case.starts_with("bot-approval-") { return bot_approval_fixture(&case); }
-    if matches!(case.as_str(), "mailbox-after-refusal" | "mailbox-cli-waiting") { return mailbox_fixture(&case); }
+    if matches!(case.as_str(), "mailbox-after-refusal" | "mailbox-route-gone" | "mailbox-cli-waiting") { return mailbox_fixture(&case); }
     if matches!(case.as_str(), "streamed-reply" | "streamed-stopped") { return streamed_fixture(&case); }
     if matches!(case.as_str(), "busy-while-working" | "queued-while-working" | "queued-stop" | "queued-interrupt" | "queued-share-ended" | "queued-overflow") { return busy_fixture(); }
     let _home = store::temp_home();
@@ -2751,4 +2754,41 @@ fn a_switched_native_thread_is_brought_into_the_home_it_resumes_in() {
     assert_eq!(std::fs::read_to_string(brought).unwrap(), "{\"turn\":1}\n");
     // A thread no home has is left for Codex to report.
     bring_native_thread(&env, "019a0000-0000-7000-8000-0000000000bb").unwrap();
+}
+
+/// PRO-310, the Codex stdio branch: the organization route Codex runs on
+/// goes while a turn runs. The turn finishes on it; a message the cloud
+/// mailbox gets meanwhile waits, never reaching that connection; the turn's
+/// end lets the connection go, and the message starts Codex again (on the
+/// login there is then) on the same thread. The session is told once.
+#[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
+fn route_gone(
+    manager: &SessionManager, agents: &crate::cloud_agents::CloudAgents, rt: &Arc<Mutex<TabRuntime>>, bin: &std::path::Path,
+    starts: &dyn Fn() -> Vec<String>, settled: &dyn Fn(usize), launches: &dyn Fn() -> usize, threads: &dyn Fn() -> Vec<String>,
+) {
+    use crate::cloud_grants::{Replacement, RouteSwitch};
+    *manager.route_stand_in.lock().unwrap() = Some(super::RouteStandIn { switch: Some(RouteSwitch::Login(Replacement::OrganizationLogin)), ..Default::default() });
+    std::fs::write(bin.join("hold"), "").unwrap();
+    assert_eq!(mailbox_send(agents, "c1", "on the route").1["queued"], false);
+    let until = Instant::now() + WAIT;
+    while starts().is_empty() {
+        assert!(Instant::now() < until, "Codex did not take the turn");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    manager.switch_organization_routes();
+    assert!(rt.lock().unwrap().turn_open, "the running turn is left alone");
+    assert!(manager.switching_route("stdio-owner", "tab"));
+    let (outcome, receipt) = mailbox_send(agents, "c2", "after the removal");
+    assert_eq!((outcome.as_str(), &receipt["queued"]), ("applied", &json!(true)));
+    std::fs::remove_file(bin.join("hold")).unwrap();
+    settled(2);
+    assert_eq!(starts(), ["on the route", "after the removal"]);
+    assert_eq!(launches(), 2, "the message went to a new connection");
+    assert_eq!(threads(), ["thread/start -", "thread/resume thread-1"]);
+    let notices: Vec<String> = store::read_lines::<AgentEvent>(&store::log_path("stdio-owner", "tab").unwrap()).unwrap().into_iter()
+        .filter_map(|event| match event.payload { Payload::Status { text, .. } if text.starts_with("The organization's") => Some(text), _ => None }).collect();
+    assert_eq!(notices, ["The organization's Codex route no longer applies to this workspace. The turn that was running finished on it; Codex in this session now uses the organization's login."]);
+    assert!(!manager.switching_route("stdio-owner", "tab"));
+    manager.stop("stdio-owner", "tab").unwrap();
 }

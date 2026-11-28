@@ -771,7 +771,7 @@ impl Agent for ManagerAgent {
         if tab.harness != run.agent || tab.by_hand() || !modes.into_iter().flatten().all(|mode| MODES.contains(&mode)) {
             return Err(TargetError::Unfit);
         }
-        if self.manager.turn_open(session_id, tab_id) || self.awaiting_approval(session_id, tab_id) {
+        if self.manager.turn_open(session_id, tab_id) || self.manager.switching_route(session_id, tab_id) || self.awaiting_approval(session_id, tab_id) {
             return Err(TargetError::Busy);
         }
         if self.manager.sign_in_required(session_id, tab_id, &tab.harness).is_some() {
