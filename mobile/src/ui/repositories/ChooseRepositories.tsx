@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from "react";
-import { Alert, Keyboard, View } from "react-native";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Alert, FlatList, Keyboard, StyleSheet, View } from "react-native";
 import * as WebBrowser from "expo-web-browser";
 import { ExternalLink, FolderGit2, SearchX } from "lucide-react-native";
 import { CloudApiError, MAX_GITHUB_QUERY, MAX_GITHUB_REPOSITORIES, type CloudApi, type CloudGithubApp, type GithubLiveRepositories } from "@mobile/cloud/api";
@@ -10,10 +10,14 @@ import { PickRow } from "../PickRow";
 import { Button, Card, EmptyState } from "../primitives";
 import { RepositoryRow, SkeletonRows } from "../RepositoryRow";
 import { TextField } from "../TextField";
+import { useTheme } from "../theme";
 import { CountLine, Help, Lede, type RepositoriesPage } from "./parts";
 
 /** How long typing rests before GitHub is searched, through the server. */
 export const SEARCH_PAUSE_MS = 350;
+
+type LiveRepository = GithubLiveRepositories["repositories"][number];
+const keyOfLiveRepository = (repository: LiveRepository) => String(repository.githubRepositoryId);
 
 /**
  * Choose the repositories the organization's cloud workspaces may clone
@@ -34,6 +38,7 @@ export function ChooseRepositories({ api, orgId, app, installationId: opened, pa
   /** What the organization has may differ from what is shown: read it again. */
   onReload(): void;
 }) {
+  const { palette } = useTheme();
   const installations = chooseableInstallations(app);
   const [installationId, setInstallationId] = useState(opened);
   const [typed, setTyped] = useState("");
@@ -89,6 +94,8 @@ export function ChooseRepositories({ api, orgId, app, installationId: opened, pa
   const again = (refresh: boolean) => setTurn((was) => { fresh.current = refresh ? was + 1 : null; return was + 1; });
   const shown = list && list.installation.id === installationId ? list : null;
   const ticked = draft[installationId] ?? [];
+  // O(1) membership check per row instead of O(N*M) Array.includes (P-79).
+  const tickedSet = useMemo(() => new Set(ticked), [ticked]);
   const total = setChoices(draft, app).length;
   const changed = setChanged(draft, app);
   // Leaving asks only about what the person ticked; what a save drops by itself is not their unsaved work.
@@ -127,40 +134,90 @@ export function ChooseRepositories({ api, orgId, app, installationId: opened, pa
     ]);
   };
 
+  const toggleGrant = useCallback(
+    (githubRepositoryId: number) => setDraft((held) => toggled(held, installationId, githubRepositoryId)),
+    [installationId],
+  );
+
+  const shownRepositories = shown?.repositories ?? [];
+  const renderGrant = useCallback(
+    ({ item: repository, index }: { item: LiveRepository; index: number }) => (
+      <View style={[styles.cardRow, { backgroundColor: palette.card, borderColor: palette.border }, index === 0 && styles.cardTop, index === shownRepositories.length - 1 && styles.cardBottom]}>
+        <RepositoryRow
+          testID={`grant-${repository.fullName}`}
+          fullName={repository.fullName}
+          isPrivate={repository.private}
+          branch={repository.defaultBranch}
+          first={index === 0}
+          on={tickedSet.has(repository.githubRepositoryId)}
+          off={saving}
+          onPress={() => toggleGrant(repository.githubRepositoryId)}
+        />
+      </View>
+    ),
+    [palette.border, palette.card, saving, shownRepositories.length, tickedSet, toggleGrant],
+  );
+
   const account = installations.find((installation) => installation.id === installationId);
+  const foot = <Button testID="save-repositories" label={saving ? "Saving…" : total ? `Save · ${total} chosen` : "Save"} disabled={!shown || saving || tooMany || !changed} accessibilityState={{ disabled: !shown || saving || tooMany || !changed, busy: saving }} onPress={() => void save()} />;
+
+  const headerPrefix = <>
+    <Lede small>{WORDS.organizationLede}</Lede>
+    {installations.length > 1 ? <Card><PickRow testID="pick-github-account" label="GitHub account" value={account?.accountLogin ?? "Choose"} onPress={() => { Keyboard.dismiss(); setPicking(true); }} first /></Card> : null}
+    {refusal ? <Notice testID="save-refusal" tone="danger" text={refusal} /> : null}
+    {shown && dropped.length ? <Help testID="organization-dropped">{droppedNote(dropped.map((repository) => repository.fullName))}</Help> : null}
+  </>;
+
+  const useList = !(failure && !loading) && !!shown && (shown.repositories.length > 0 || !!query);
+
   return <>
-    {page("Choose repositories", leave, <>
-      <Lede small>{WORDS.organizationLede}</Lede>
-      {installations.length > 1 ? <Card><PickRow testID="pick-github-account" label="GitHub account" value={account?.accountLogin ?? "Choose"} onPress={() => { Keyboard.dismiss(); setPicking(true); }} first /></Card> : null}
-      {refusal ? <Notice testID="save-refusal" tone="danger" text={refusal} /> : null}
-      {shown && dropped.length ? <Help testID="organization-dropped">{droppedNote(dropped.map((repository) => repository.fullName))}</Help> : null}
-      {failure && !loading ? <Notice testID="list-failed" tone="danger" text={failure} action={{ label: "Try again", onPress: () => again(false) }} />
-        : !shown ? <>
-          <TextField testID="organization-search" accessibilityLabel="Search repositories" value={typed} onChangeText={setTyped} placeholder="Search repositories" disabled />
-          <Card><SkeletonRows testID="organization-loading" count={6} /></Card>
-        </>
-        : !shown.repositories.length && !query ? <>
-          <View testID="grants-none"><EmptyState title="No repositories" detail={WORDS.grantsNone} icon={(color) => <FolderGit2 size={34} color={color} strokeWidth={1.6} />} /></View>
+    {useList ? page("Choose repositories", leave, <FlatList
+      testID={shown.repositories.length ? "organization-list" : undefined}
+      data={shown.repositories}
+      keyExtractor={keyOfLiveRepository}
+      renderItem={renderGrant}
+      keyboardShouldPersistTaps="handled"
+      contentContainerStyle={styles.listContent}
+      initialNumToRender={20}
+      maxToRenderPerBatch={20}
+      windowSize={7}
+      ListHeaderComponent={<View style={styles.sectionGap}>
+        {headerPrefix}
+        <TextField testID="organization-search" accessibilityLabel="Search repositories" value={typed} onChangeText={setTyped} placeholder="Search repositories" maxLength={MAX_GITHUB_QUERY} autoCapitalize="none" autoCorrect={false} returnKeyType="search" />
+        {shown.repositories.length ? <CountLine testID="organization-count" label="All repositories it grants" count={total ? `${total} chosen` : ""} /> : null}
+      </View>}
+      ListEmptyComponent={<View testID="organization-no-match"><EmptyState title="No repositories match." detail={WORDS.noMatchOrganization} icon={(color) => <SearchX size={34} color={color} strokeWidth={1.6} />} /></View>}
+      ListFooterComponent={<View style={styles.footerGap}>
+        {shown.truncated ? <Help testID="organization-truncated">{WORDS.truncated}</Help> : null}
+        {shown.missing.length ? <>
+          <Help testID="organization-missing">{missingNote(shown.missing.map((repository) => repository.fullName))}</Help>
           {manageUrl ? <Button testID="manage-on-github" label="Manage on GitHub" kind="secondary" icon={(color) => <ExternalLink size={16} color={color} />} onPress={manage} /> : null}
-        </>
-        : <>
-          <TextField testID="organization-search" accessibilityLabel="Search repositories" value={typed} onChangeText={setTyped} placeholder="Search repositories" maxLength={MAX_GITHUB_QUERY} autoCapitalize="none" autoCorrect={false} returnKeyType="search" />
-          {shown.repositories.length ? <>
-            <CountLine testID="organization-count" label="All repositories it grants" count={total ? `${total} chosen` : ""} />
-            <Card testID="organization-list">
-              {shown.repositories.map((repository, index) => <RepositoryRow key={repository.githubRepositoryId} testID={`grant-${repository.fullName}`} fullName={repository.fullName} isPrivate={repository.private} branch={repository.defaultBranch} first={index === 0}
-                on={ticked.includes(repository.githubRepositoryId)} off={saving} onPress={() => setDraft((held) => toggled(held, installationId, repository.githubRepositoryId))} />)}
-            </Card>
-          </> : <View testID="organization-no-match"><EmptyState title="No repositories match." detail={WORDS.noMatchOrganization} icon={(color) => <SearchX size={34} color={color} strokeWidth={1.6} />} /></View>}
-          {shown.truncated ? <Help testID="organization-truncated">{WORDS.truncated}</Help> : null}
-          {shown.missing.length ? <>
-            <Help testID="organization-missing">{missingNote(shown.missing.map((repository) => repository.fullName))}</Help>
+        </> : null}
+        {tooMany ? <Notice testID="too-many" tone="danger" text={WORDS.tooMany} /> : null}
+      </View>}
+    />, foot, "For every workspace", { scroll: false })
+      : page("Choose repositories", leave, <>
+        {headerPrefix}
+        {failure && !loading ? <Notice testID="list-failed" tone="danger" text={failure} action={{ label: "Try again", onPress: () => again(false) }} />
+          : !shown ? <>
+            <TextField testID="organization-search" accessibilityLabel="Search repositories" value={typed} onChangeText={setTyped} placeholder="Search repositories" disabled />
+            <Card><SkeletonRows testID="organization-loading" count={6} /></Card>
+          </>
+          : <>
+            <View testID="grants-none"><EmptyState title="No repositories" detail={WORDS.grantsNone} icon={(color) => <FolderGit2 size={34} color={color} strokeWidth={1.6} />} /></View>
             {manageUrl ? <Button testID="manage-on-github" label="Manage on GitHub" kind="secondary" icon={(color) => <ExternalLink size={16} color={color} />} onPress={manage} /> : null}
-          </> : null}
-          {tooMany ? <Notice testID="too-many" tone="danger" text={WORDS.tooMany} /> : null}
-        </>}
-    </>, <Button testID="save-repositories" label={saving ? "Saving…" : total ? `Save · ${total} chosen` : "Save"} disabled={!shown || saving || tooMany || !changed} accessibilityState={{ disabled: !shown || saving || tooMany || !changed, busy: saving }} onPress={() => void save()} />, "For every workspace")}
+          </>}
+      </>, foot, "For every workspace")}
     {picking ? <ChoiceSheet title="GitHub account" chosen={installationId} choices={installations.map((installation) => ({ id: installation.id, label: installation.accountLogin, ...(installation.state === "suspended" ? { detail: "Suspended on GitHub" } : {}) }))}
       onChoose={(id) => { setTyped(""); setQuery(""); setInstallationId(id); }} onClose={() => setPicking(false)} /> : null}
   </>;
 }
+
+const styles = StyleSheet.create({
+  listContent: { paddingHorizontal: 16, paddingTop: 8, paddingBottom: 16 },
+  sectionGap: { gap: 12, marginBottom: 12 },
+  footerGap: { gap: 12, marginTop: 12 },
+  cardRow: { borderLeftWidth: StyleSheet.hairlineWidth, borderRightWidth: StyleSheet.hairlineWidth, overflow: "hidden" },
+  cardTop: { borderTopWidth: StyleSheet.hairlineWidth, borderTopLeftRadius: 16, borderTopRightRadius: 16 },
+  cardBottom: { borderBottomWidth: StyleSheet.hairlineWidth, borderBottomLeftRadius: 16, borderBottomRightRadius: 16 },
+});

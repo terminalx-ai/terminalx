@@ -1,3 +1,4 @@
+import { memo } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import { Check, Globe, Lock, TriangleAlert } from "lucide-react-native";
 import { useTheme } from "./theme";
@@ -36,7 +37,7 @@ export function RepositoryFacts({ isPrivate, branch }: { isPrivate: boolean; bra
  * be chosen for another reason (five are chosen already), with no words of
  * its own: the list says why once.
  */
-export function RepositoryRow({ fullName, isPrivate, branch, on, off, why, first, onPress, testID }: {
+export const RepositoryRow = memo(function RepositoryRow({ fullName, isPrivate, branch, on, off, why, first, onPress, testID }: {
   fullName: string;
   isPrivate: boolean;
   branch?: string | null;
@@ -60,7 +61,7 @@ export function RepositoryRow({ fullName, isPrivate, branch, on, off, why, first
       {why ? <Text style={[styles.detail, { color: palette.warning }]}>{why}</Text> : null}
     </View>
   </Pressable>;
-}
+});
 
 const WIDTHS = ["62%", "48%", "70%", "55%", "40%"] as const;
 

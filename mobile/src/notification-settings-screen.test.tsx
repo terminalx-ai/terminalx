@@ -109,7 +109,7 @@ describe("the Notifications page (22.07 frames 2 and 3)", () => {
     expect(button("All sessions")!.getAttribute("aria-selected")).toBe("true");
     expect(["Studio MacBook", "Mac mini", "Office iMac"].map((name) => on(`Notifications from ${name}`))).toEqual([true, true, true]);
     expect(text()).toContain("10:00 PM to 7:00 AM");
-    expect(button("Show, Everything")).toBeDefined();
+    expect(button("Show, Session name only")).toBeDefined();
     expect(button("Sound, Default")).toBeDefined();
   });
 
@@ -125,15 +125,15 @@ describe("the Notifications page (22.07 frames 2 and 3)", () => {
     await click(button("Starts, 10:00 PM"));
     await click(button("11:30 PM"));
     await click(toggle("Still notify when an agent needs me"));
-    await click(button("Show, Everything"));
-    await click(button("Session name only"));
+    await click(button("Show, Session name only"));
+    await click(button("Everything"));
     await settle();
     const value = saved();
     expect(value.kinds).toMatchObject({ usage_limit: true, pr_merged: true });
     expect(value.sessions).toBe("mine");
     expect(value.machines).toEqual({ imac: false });
     expect(value.quietHours).toEqual({ on: true, start: 23 * 60 + 30, end: 7 * 60, stillNotifyNeedsMe: true });
-    expect(value.lockScreen).toEqual({ show: "sessionName", sound: true });
+    expect(value.lockScreen).toEqual({ show: "everything", sound: true });
     expect(button("Ends, 7:00 AM")).toBeDefined();
   });
 });

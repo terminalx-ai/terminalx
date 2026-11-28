@@ -118,7 +118,7 @@ export async function exchangeAuthorizationCode(args: {
   const callback = parseCallbackUrl(args.callbackUrl);
   if (callback.error) return { ok: false, reason: callback.error };
   if (!callback.code || !args.verifier || !args.nonce) return { ok: false, reason: "missing_authorization_code" };
-  if (!callback.state || !args.expectedState || callback.state !== args.expectedState) return { ok: false, reason: "state_mismatch" };
+  if (!callback.state || !args.expectedState || !constantTimeEqual(callback.state, args.expectedState)) return { ok: false, reason: "state_mismatch" };
   try {
     const response = await postJson(args.config.sessionEndpoint, {
       code: callback.code,
@@ -221,6 +221,15 @@ function parseAccessHold(value: unknown): AccessHold | null {
   const record = value as Record<string, unknown>;
   if (record.error !== "access_code_required" || typeof record.accessTicket !== "string" || !record.accessTicket || typeof record.accessTicketExpiresAt !== "number" || !Number.isInteger(record.accessTicketExpiresAt) || record.accessTicketExpiresAt <= 0 || typeof record.email !== "string" || !record.email) return null;
   return { ticket: record.accessTicket, expiresAt: record.accessTicketExpiresAt, email: record.email };
+}
+
+function constantTimeEqual(left: string, right: string): boolean {
+  const max = Math.max(left.length, right.length);
+  let diff = left.length ^ right.length;
+  for (let i = 0; i < max; i++) {
+    diff |= (left.charCodeAt(i) || 0) ^ (right.charCodeAt(i) || 0);
+  }
+  return diff === 0;
 }
 
 async function postJson(url: string, body: Record<string, unknown>, fetchImpl: typeof fetch, accessToken?: string): Promise<Response> {

@@ -60,7 +60,7 @@ export function defaultSettings(): NotificationSettings {
     sessions: "all",
     machines: {},
     quietHours: { on: false, start: 22 * 60, end: 7 * 60, stillNotifyNeedsMe: false },
-    lockScreen: { show: "everything", sound: true },
+    lockScreen: { show: "sessionName", sound: true },
     perSession: {},
     started: {},
   };
@@ -119,7 +119,7 @@ export function parseSettings(value: unknown): NotificationSettings {
       stillNotifyNeedsMe: typeof quiet.stillNotifyNeedsMe === "boolean" ? quiet.stillNotifyNeedsMe : defaults.quietHours.stillNotifyNeedsMe,
     },
     lockScreen: {
-      show: lock.show === "sessionName" || lock.show === "nothing" ? lock.show : "everything",
+      show: lock.show === "everything" || lock.show === "sessionName" || lock.show === "nothing" ? lock.show : defaults.lockScreen.show,
       sound: typeof lock.sound === "boolean" ? lock.sound : defaults.lockScreen.sound,
     },
     perSession,

@@ -14,7 +14,7 @@ describe("notification settings model", () => {
     expect(settings.kinds).toEqual({ question: true, approval: true, finished: true, failed: true, pr_checks_failed: true, usage_limit: false, pr_merged: false });
     expect(settings.sessions).toBe("all");
     expect(settings.quietHours).toEqual({ on: false, start: 1320, end: 420, stillNotifyNeedsMe: false });
-    expect(settings.lockScreen).toEqual({ show: "everything", sound: true });
+    expect(settings.lockScreen).toEqual({ show: "sessionName", sound: true });
     expect(settingsSummary(settings)).toBe("Off");
     expect(settingsSummary(on())).toBe("Questions, approvals, finished, failed");
     expect(settingsSummary(on({ kinds: { ...defaultSettings().kinds, usage_limit: true, question: false } }))).toBe("Approvals, finished, failed, usage limits");
@@ -30,7 +30,7 @@ describe("notification settings model", () => {
     expect(read.allow).toBe(false);
     expect(read.kinds.question).toBe(false);
     expect(read.quietHours.start).toBe(1320);
-    expect(read.lockScreen.show).toBe("everything");
+    expect(read.lockScreen.show).toBe("sessionName");
     expect(read.perSession).toEqual({ mac: { b: "needsMe" } });
   });
 
@@ -119,17 +119,18 @@ describe("lock-screen levels", () => {
 
   it("everything: title, body and the machine, with the answer for the actions", () => {
     // iOS heads it with the app's name; the machine's is the line under the title, not "TerminalX" twice (22.07).
-    expect(present(on(), "mac", "Studio MacBook", question)).toEqual({
+    expect(present(on({ lockScreen: { show: "everything", sound: true } }), "mac", "Studio MacBook", question)).toEqual({
       title: "Review and merge needs your answer", body: "Merge now, or wait for the macOS job?", subtitle: "Studio MacBook", thread: "mac:s-1", sound: true,
       data: { hostId: "mac", sessionId: "s-1", tabId: "t-1", kind: "question", detailsHidden: false, requestId: "r-1", options: [{ label: "Merge now" }, { label: "Wait for it" }] },
     });
   });
 
-  it("session name only: the title, not the text or the machine", () => {
+  it("session name only: the title, not the text, the machine, or sensitive answer metadata (S-58)", () => {
     const shown = present(on({ lockScreen: { show: "sessionName", sound: true } }), "mac", "Studio MacBook", question);
     expect(shown.title).toBe("Review and merge needs your answer");
     expect(shown.body).toBe("Open TerminalX to see the question.");
     expect(shown.subtitle).toBeUndefined();
+    expect(shown.data).toEqual({ hostId: "mac", sessionId: "s-1", tabId: "t-1", kind: "question", detailsHidden: true });
   });
 
   it("nothing: generic text per kind, no machine or session, no answer; a tap still opens the session", () => {
@@ -172,10 +173,14 @@ describe("a bot's question", () => {
     expect(shouldShow(on({ quietHours: { ...quiet, stillNotifyNeedsMe: false } }), "mac", asked, noon)).toBe(false);
   });
 
-  it("carries which bot and item, and its answers only when the lock screen shows the question", () => {
-    const everything = present(on(), "mac", "Studio", asked);
+  it("carries which bot and item, and its answers only when the lock screen shows everything (S-58)", () => {
+    const everything = present(on({ lockScreen: { show: "everything", sound: true } }), "mac", "Studio", asked);
     expect(everything.data).toEqual({ hostId: "mac", sessionId: "home", tabId: "t", kind: "bot_question", detailsHidden: false, botId: "b1", number: 4, question: "q1", answers: ["Fix it now", "File an issue"], recommended: 0 });
     expect(everything.thread).toBe("mac:bot:b1");
+    const sessionOnly = present(on({ lockScreen: { show: "sessionName", sound: true } }), "mac", "Studio", asked);
+    expect(sessionOnly.title).toBe("Sentry asks");
+    expect(sessionOnly.body).toBe("Open TerminalX to see the question.");
+    expect(sessionOnly.data).toEqual({ hostId: "mac", sessionId: "home", tabId: "t", kind: "bot_question", detailsHidden: true, botId: "b1", number: 4 });
     const nothing = present(on({ lockScreen: { show: "nothing", sound: true } }), "mac", "Studio", asked);
     expect(nothing.title).toBe("A bot needs your answer");
     expect(nothing.data).toEqual({ hostId: "mac", sessionId: "home", tabId: "t", kind: "bot_question", detailsHidden: true, botId: "b1", number: 4 });

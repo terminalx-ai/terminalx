@@ -1125,6 +1125,7 @@ export class CloudApi {
         method,
         headers: { authorization: `Bearer ${token}`, "content-type": "application/json", ...CONTRACT_HEADERS, ...headers },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        redirect: "error",
         signal: controller.signal,
       });
     } catch {

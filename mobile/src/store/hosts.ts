@@ -1,6 +1,6 @@
 import { endPairingInstance } from "./pairing-instance";
 import { clearTranscriptCaches } from "../data/transcript-cache";
-import { DirectEndpointsSchema } from "../pairing/contracts";
+import { canonicalHttpsOrigin, canonicalRelayCellUrl, DirectEndpointsSchema } from "../pairing/contracts";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as SecureStore from "expo-secure-store";
 import { z } from "zod";
@@ -11,8 +11,8 @@ const OPTIONS: SecureStore.SecureStoreOptions = { keychainAccessible: SecureStor
 
 const relaySchema = z.object({
   v: z.literal(1),
-  directorUrl: z.string().url(),
-  cellUrl: z.string().url(),
+  directorUrl: z.string().refine(canonicalHttpsOrigin),
+  cellUrl: z.string().refine(canonicalRelayCellUrl),
   assignmentEpoch: z.number().int().nonnegative(),
   relayHostId: z.string().regex(/^[A-Za-z0-9_-]{16}$/),
   e2eeFraming: z.literal(2),

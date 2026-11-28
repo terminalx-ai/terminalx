@@ -1,4 +1,5 @@
 import { forgetConversationState, sendHeldMessages } from "./conversation-state";
+import { clearLocalStorageKey } from "../data/local-crypto";
 import { cacheEpoch, clearTranscriptCaches, readSaved, reclaimOrphanChunks, writeSaved } from "../data/transcript-cache";
 import { keepPrefetched, startPrefetch, stopPrefetch } from "../data/prefetch";
 import { usePrefetchSetting } from "../data/prefetch-setting";
@@ -308,7 +309,10 @@ export function AppProvider({ children }: PropsWithChildren) {
       setSessions([]);
       setAccountHosts([]);
       forgetConversationState("");
+      connectionLogStore.reset();
+      await AsyncStorage.removeItem(LOG_KEY).catch(() => undefined);
       await clearTranscriptCaches();
+      await clearLocalStorageKey();
       api.resetConnection(true);
       await unregisterCloudPushRegistration({ session: stored, remote: false }).catch(() => undefined);
       await signOutPairing(stored);
@@ -422,7 +426,11 @@ export function AppProvider({ children }: PropsWithChildren) {
         const outcome = await refreshStoredSession();
         if (outcome.status === "rejected") {
           forgetConversationState("");
+          connectionLogStore.reset();
+          await AsyncStorage.removeItem(LOG_KEY).catch(() => undefined);
+          rawLogs = null;
           await clearTranscriptCaches();
+          await clearLocalStorageKey();
           api.resetConnection(true);
           await unregisterCloudPushRegistration({ session: storedSession, remote: false }).catch(() => undefined);
           await signOutPairing(storedSession);
@@ -659,7 +667,10 @@ export function AppProvider({ children }: PropsWithChildren) {
       activeHostRef.current = null;
       setActiveHost(null);
       forgetConversationState("");
+      connectionLogStore.reset();
+      await AsyncStorage.removeItem(LOG_KEY).catch(() => undefined);
       await clearTranscriptCaches();
+      await clearLocalStorageKey();
       api.resetConnection(true);
       await unregisterCloudPushRegistration({ session, remote }).catch(() => undefined);
       await signOutPairing(session, { remote });

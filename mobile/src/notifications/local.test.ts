@@ -294,7 +294,7 @@ describe("delivery", () => {
     ];
     const { local } = await modules();
     await local.restoreLocalNotifications(state.connection, "mac");
-    expect(fake.scheduled.map((request) => request.content)).toEqual([{ title: "Done", body: "Finished", subtitle: "Studio MacBook", threadIdentifier: "mac:s-1", sound: "default", data: { hostId: "mac", sessionId: "s-1", tabId: "t-1", kind: "finished", detailsHidden: false, silent: false } }]);
+    expect(fake.scheduled.map((request) => request.content)).toEqual([{ title: "Done", body: "Open TerminalX to see the result.", threadIdentifier: "mac:s-1", sound: "default", data: { hostId: "mac", sessionId: "s-1", tabId: "t-1", kind: "finished", detailsHidden: true, silent: false } }]);
     expect(fake.scheduled[0]!.trigger).toBeNull();
     expect(JSON.parse(fake.storage.get("terminalx:notifications:mac")!)).toEqual({ lastSeenSeq: 3, epoch: "e" });
     // A live event already seen is not shown again; a new one is.
@@ -365,7 +365,8 @@ describe("a bot's question", () => {
   it("reads the notice's bot, item, question and answers, and shows it", async () => {
     fake.storage.set("terminalx:notifications-enabled:mac", "enabled");
     const state = mac({ notificationFilters: 1, bots: 1 });
-    const { local } = await modules();
+    const { store, local } = await modules();
+    await store.updateNotificationSettings((settings) => ({ ...settings, lockScreen: { ...settings.lockScreen, show: "everything" } }));
     const notice = { seq: 7, epoch: "e", kind: "bot_question", title: "Sentry asks", body: "Fix now or file it?", sessionId: "home", tabId: "t", botQuestion: { botId: "b1", number: 4, question: "q1", answers: ["Fix it now", "File an issue", 7], recommended: 5 } };
     expect(local.parseNotification(notice)?.botQuestion).toEqual({ botId: "b1", number: 4, question: "q1", answers: ["Fix it now", "File an issue"] });
     expect(local.parseNotification({ ...notice, botQuestion: { botId: "", number: 4, question: "q1" } })?.botQuestion).toBeUndefined();

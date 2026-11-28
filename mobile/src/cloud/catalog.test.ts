@@ -40,6 +40,7 @@ function harness(phone: { secrets?: Map<string, string>; blobs?: Map<string, str
     blobs.set(`terminalx:cloud-checkpoint:${orgId}:${workspaceId}:t1`, "{}");
     blobs.set(`terminalx:cloud-outbox:${orgId}:${workspaceId}`, "{}");
     secrets.set(HELD, JSON.stringify([...JSON.parse(secrets.get(HELD) ?? "[]"), [orgId, workspaceId]]));
+    catalog.invalidateHeldCache();
   };
   /** The workspace keys on the phone (the list of what is held, and the titles, are kept beside them). */
   const keys = () => [...secrets.keys()].filter((name) => name !== HELD && name !== TITLES);

@@ -84,7 +84,7 @@ vi.mock("../transport/relay-client", () => ({
         return { ok: true, value: state.installed };
       }
       if (method === "pairing.getEndpoints") return { ok: true, value: {
-        v: 1, relay: endpoint, directEndpoints: ["ws://example.test:6768"],
+        v: 1, relay: endpoint, directEndpoints: ["ws://192.168.1.10:6768"],
         installStatus: { v: 1, reqId: state.installed!.reqId, state: "committed", result: state.installed },
       } };
       throw new Error("Unexpected RPC");
@@ -262,5 +262,27 @@ describe("approval on the computer", () => {
     const { result } = await progressOf(parsePairingCode(btoa(JSON.stringify(direct)))!);
     expect(await readHosts()).toEqual([result]);
     expect(state.calls).toEqual(["status.get", "device.describe"]);
+  });
+
+  it("passes redirect:'error' on relay resolution and ignores non-https/wss cellUrl responses (S-46)", async () => {
+    const fetchSpy = vi.fn(async () => new Response(JSON.stringify({
+      v: 1,
+      cellUrl: "http://insecure.example.test",
+      assignmentEpoch: 2,
+      leaseExpiresAt: Date.now() + 60_000,
+    })));
+    vi.stubGlobal("fetch", fetchSpy);
+    state.relay = true;
+    state.failSave = true;
+    await expect(pair(parsePairingCode(btoa(JSON.stringify(freshOffer())))!)).rejects.toThrow();
+    state.failSave = false;
+    state.approval = "decline";
+    const host = await recoverPendingPairing();
+    expect(fetchSpy).toHaveBeenCalledWith(
+      expect.any(URL),
+      expect.objectContaining({ redirect: "error" }),
+    );
+    // Insecure http:// cellUrl was rejected by RelayResolvedSchema, falling back to pinned https:// offer relay.
+    expect(host?.relay?.cellUrl).toBe("https://relay.example.test");
   });
 });

@@ -248,7 +248,26 @@ export class CloudWorkspaceSession {
   listChanged(): void {
     this.link.listChanged();
     if (this.followable()) this.startPolling();
-    this.publish();
+    if (this.closed) return;
+    const prev = this.getSnapshot();
+    const next = this.build();
+    if (
+      prev.connection === next.connection &&
+      prev.problem === next.problem &&
+      prev.role === next.role &&
+      prev.checkingAccess === next.checkingAccess &&
+      prev.canApprove === next.canApprove &&
+      prev.hasKey === next.hasKey &&
+      prev.interrupts === next.interrupts &&
+      prev.error === next.error &&
+      prev.outbox === next.outbox &&
+      prev.startOffer === next.startOffer &&
+      prev.tabs.length === next.tabs.length
+    ) {
+      return;
+    }
+    this.snapshot = next;
+    for (const listener of [...this.listeners]) listener();
   }
 
   /** Whether the list should be read again soon: the workspace is changing state, or was asked to start. */

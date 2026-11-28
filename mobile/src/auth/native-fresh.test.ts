@@ -25,18 +25,20 @@ vi.mock("./protocol", () => ({
   refreshSession: mocks.refresh,
   parseStoredSession: (value: string) => JSON.parse(value),
 }));
-const { beginSignIn, forgetStoredSession, refreshStoredSession } = await import("./native");
+const { beginSignIn, forgetStoredSession, refreshStoredSession, resetSessionCacheForTests } = await import("./native");
 
 const SESSION_KEY = "terminalx.cloud.session.v1";
+const MOCK_STATE = "BwcHBwcHBwcHBwcHBwcHBw";
 const ada = { accessToken: "a2", refreshToken: "r2", expiresAt: 1, user: { userId: "user-ada", email: "ada@example.com" } };
 const other = { accessToken: "b", refreshToken: "rb", expiresAt: 1, user: { userId: "user-other", email: "other@example.com" } };
 
 beforeEach(() => {
+  resetSessionCacheForTests();
   mocks.store = new Map([[SESSION_KEY, JSON.stringify({ ...ada, accessToken: "a1" })]]);
   mocks.exchange.mockReset();
   mocks.revoke.mockClear();
   mocks.refresh.mockReset();
-  mocks.open.mockReset().mockResolvedValue({ type: "success", url: "terminalx://auth/callback?code=c&state=s" });
+  mocks.open.mockReset().mockResolvedValue({ type: "success", url: `terminalx://auth/callback?code=c&state=${MOCK_STATE}` });
 });
 
 it("asks the browser sheet for a private session when the sign-in must be fresh", async () => {

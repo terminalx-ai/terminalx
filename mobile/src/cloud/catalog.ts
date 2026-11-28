@@ -139,6 +139,10 @@ export class CloudCatalog {
   private watchers = 0;
   /** One change to the held list at a time. */
   private heldChain: Promise<unknown> = Promise.resolve();
+  /** In-memory cache of the held workspace ids (`HELD`), avoiding Keychain reads on every poll (P-75). */
+  private heldCache: [string, string][] | null = null;
+  /** Last serialized `SAVED_LIST` written or restored, to skip identical AsyncStorage writes (P-75). */
+  private lastSavedList: string | null = null;
   /** Resumes this phone asked for, by workspace, until the list says how they ended. */
   private readonly resumes = new Map<string, string>();
 
@@ -207,8 +211,8 @@ export class CloudCatalog {
   }
 
   /** Read the organizations and each one's workspaces. One read at a time. */
-  refresh(): Promise<void> {
-    return (this.flight ??= this.read().finally(() => {
+  refresh(options?: { silent?: boolean }): Promise<void> {
+    return (this.flight ??= this.read(options?.silent === true).finally(() => {
       this.flight = null;
       // Also after a read that failed: the next one is still due (#500).
       this.followChanges();
@@ -437,11 +441,18 @@ export class CloudCatalog {
     await this.options.secrets.delete(HELD).catch(() => undefined);
     await this.options.secrets.delete(TITLES).catch(() => undefined);
     await this.options.storage.removeItem(SAVED_LIST).catch(() => undefined);
+    this.heldCache = null;
+    this.lastSavedList = null;
     this.organizations = [];
     this.everRead = new Set();
     this.titles = {};
     this.saved = false;
     this.publish();
+  }
+
+  /** Drops the in-memory `HELD` cache (for tests that seed secret storage directly). */
+  invalidateHeldCache(): void {
+    this.heldCache = null;
   }
 
   /** The app went away for now: connections are closed, nothing is forgotten. */
@@ -453,9 +464,11 @@ export class CloudCatalog {
     this.sessions.clear();
   }
 
-  private async read(): Promise<void> {
-    this.loading = true;
-    this.publish();
+  private async read(silent = false): Promise<void> {
+    if (!silent) {
+      this.loading = true;
+      this.publish();
+    }
     let organizations: CloudOrganization[];
     try {
       organizations = (await this.options.api.organizations()).filter((organization) => !this.removed.has(organization.orgId));
@@ -507,13 +520,15 @@ export class CloudCatalog {
       return !!workspace && !notShared(workspace);
     };
     // Open sessions first, whether or not anything was kept for them: the screen is cleared before the storage is.
+    let purged = false;
     for (const [key, session] of [...this.sessions]) {
       const [orgId, workspaceId] = key.split("\0") as [string, string];
       if (mayKeep(orgId, workspaceId)) continue;
       this.sessions.delete(key);
+      purged = true;
       await session.purge();
     }
-    this.publish();
+    if (purged) this.publish();
     for (const [orgId, workspaceId] of await this.held()) if (!mayKeep(orgId, workspaceId)) await this.forget(orgId, workspaceId);
     for (const session of this.sessions.values()) session.listChanged();
   }
@@ -540,7 +555,7 @@ export class CloudCatalog {
     this.changingDue = now + delay;
     this.changingTimer = setTimeout(() => {
       this.changingTimer = null;
-      void this.refresh();
+      void this.refresh({ silent: true });
     }, delay);
   }
 
@@ -563,6 +578,7 @@ export class CloudCatalog {
       // Merged: a read in flight may already have marked an organization.
       for (const orgId of saved.read) this.everRead.add(orgId);
       this.saved = true;
+      this.lastSavedList = list;
     }
     this.publish();
   }
@@ -578,7 +594,12 @@ export class CloudCatalog {
         ? { organization: entry.organization, workspaces: entry.workspaces }
         : { organization: entry.organization, workspaces: entry.workspaces, unread: entry.error ?? "cloud_workspace_unavailable" },
     );
-    await this.options.storage.setItem(SAVED_LIST, JSON.stringify({ v: 1, providers: SUPPORTED_PROVIDERS, organizations })).catch(() => undefined);
+    const serialized = JSON.stringify({ v: 1, providers: SUPPORTED_PROVIDERS, organizations });
+    if (serialized === this.lastSavedList) return;
+    this.lastSavedList = serialized;
+    await this.options.storage.setItem(SAVED_LIST, serialized).catch(() => {
+      if (this.lastSavedList === serialized) this.lastSavedList = null;
+    });
   }
 
   /** The runtime named the workspace's agent tab: that is its title, here and in the list. */
@@ -602,10 +623,13 @@ export class CloudCatalog {
   }
 
   private async held(): Promise<[string, string][]> {
+    if (this.heldCache !== null) return [...this.heldCache];
     try {
       const raw = await this.options.secrets.get(HELD);
       const parsed: unknown = raw ? JSON.parse(raw) : [];
-      return Array.isArray(parsed) ? parsed.filter((entry): entry is [string, string] => Array.isArray(entry) && typeof entry[0] === "string" && typeof entry[1] === "string") : [];
+      const entries = Array.isArray(parsed) ? parsed.filter((entry): entry is [string, string] => Array.isArray(entry) && typeof entry[0] === "string" && typeof entry[1] === "string") : [];
+      this.heldCache = entries;
+      return [...entries];
     } catch {
       return [];
     }
@@ -615,7 +639,12 @@ export class CloudCatalog {
   private changeHeld(change: (held: [string, string][]) => [string, string][] | null): Promise<void> {
     const next = this.heldChain.then(async () => {
       const changed = change(await this.held());
-      if (changed) await this.options.secrets.set(HELD, JSON.stringify(changed)).catch(() => undefined);
+      if (changed) {
+        this.heldCache = changed;
+        await this.options.secrets.set(HELD, JSON.stringify(changed)).catch(() => {
+          this.heldCache = null;
+        });
+      }
     });
     this.heldChain = next.catch(() => undefined);
     return next;

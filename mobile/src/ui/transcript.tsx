@@ -206,17 +206,17 @@ function WorkRow({ item }: { item: WorkItem }) {
   return <LinkedText style={[styles.reasoning, { color: palette.muted }]}>{item.text}</LinkedText>;
 }
 
-function MessageTime({ ts, align = "left" }: { ts?: string; align?: "left" | "right" }) {
+const MessageTime = memo(function MessageTime({ ts, align = "left" }: { ts?: string; align?: "left" | "right" }) {
   const { palette } = useTheme();
   const [open, setOpen] = useState(false);
-  const time = messageTime(ts);
+  const time = useMemo(() => messageTime(ts), [ts]);
   if (!time) return null;
   return <View>
     <Pressable accessibilityRole="button" accessibilityLabel={`Message time: ${time.full}`} accessibilityState={{ expanded: open }} onPress={() => setOpen(!open)} hitSlop={{ top: 12, bottom: 12, left: 16, right: 16 }} style={[styles.time, { alignSelf: align === "right" ? "flex-end" : "flex-start" }]}>
       <Text style={[styles.timeText, { color: palette.faint }]}>{open ? time.full : time.short}</Text>
     </Pressable>
   </View>;
-}
+});
 
 function safeJson(value: unknown) { try { return JSON.stringify(value, null, 2).slice(0, 2_000); } catch { return "Input unavailable"; } }
 

@@ -11,6 +11,7 @@ import type { PendingAsk } from "@terminalx/portable/transcript";
 import type { AgentEvent } from "@terminalx/portable/events";
 import { mergeEvents, type AttachmentInput, type ChatNote } from "@mobile/data/host-api";
 import { draftContent, draftIdFor, readDraftId, type DraftId } from "@mobile/data/draft-id";
+import { isSealedLocalEnvelope, openLocalString, sealLocalString } from "@mobile/data/local-crypto";
 import { retryHaltedTranscript, TranscriptHaltedError, watchTranscript } from "@mobile/data/transcript-sync";
 import { useApp } from "@mobile/state/AppProvider";
 import { useHostWords, type HostWords } from "@mobile/state/host-words";
@@ -39,7 +40,7 @@ import { StatusLine, statusLineState } from "@mobile/ui/StatusLine";
 import { conversationItems, type ConversationItem } from "@mobile/ui/conversation-items";
 import { TranscriptList } from "@mobile/ui/TranscriptList";
 import { evictConversationKey, holdSend, releaseSend, showConversation, takeHeldSend, useConversationState } from "@mobile/state/conversation-state";
-import { addPasteImageListener } from "../../modules/paste-image";
+import { addPasteImageListener, type PastedImage } from "../../modules/paste-image";
 import { PromptImageContext } from "@mobile/ui/PromptImages";
 import { useHostFeatures } from "@mobile/state/host-features";
 import { BotQuestionOver } from "@mobile/ui/BotQuestionSheet";
@@ -429,10 +430,20 @@ const ChatComposer = memo(function ChatComposer({ hostId, sessionId, tabId, stat
   const cacheKey = `terminalx:draft:${hostId}:${sessionId}:${tabId}`;
   const draftIdKey = `terminalx:draft-id:${hostId}:${sessionId}:${tabId}`;
 
-  // Debounced draft persistence to AsyncStorage (flushed on unmount, cancelled on send success).
+  // Debounced encrypted draft persistence to AsyncStorage (flushed on unmount, cancelled on send success; P-45, S-48).
   const draftSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingDraftValue = useRef<string | null>(null);
+  const draftSaveSeq = useRef(0);
+  const persistEncryptedDraft = useCallback((value: string) => {
+    const seq = ++draftSaveSeq.current;
+    void sealLocalString(value, cacheKey)
+      .then((sealed) => {
+        if (draftSaveSeq.current === seq) return AsyncStorage.setItem(cacheKey, sealed);
+      })
+      .catch(() => undefined);
+  }, [cacheKey]);
   const cancelDraftSave = useCallback(() => {
+    draftSaveSeq.current++;
     if (draftSaveTimer.current) {
       clearTimeout(draftSaveTimer.current);
       draftSaveTimer.current = null;
@@ -447,8 +458,8 @@ const ChatComposer = memo(function ChatComposer({ hostId, sessionId, tabId, stat
     const next = pendingDraftValue.current;
     if (next === null) return;
     pendingDraftValue.current = null;
-    void AsyncStorage.setItem(cacheKey, next);
-  }, [cacheKey]);
+    persistEncryptedDraft(next);
+  }, [persistEncryptedDraft]);
   const scheduleDraftSave = useCallback((value: string) => {
     pendingDraftValue.current = value;
     if (draftSaveTimer.current) clearTimeout(draftSaveTimer.current);
@@ -456,15 +467,17 @@ const ChatComposer = memo(function ChatComposer({ hostId, sessionId, tabId, stat
       draftSaveTimer.current = null;
       const toSave = pendingDraftValue.current;
       pendingDraftValue.current = null;
-      if (toSave !== null) void AsyncStorage.setItem(cacheKey, toSave);
+      if (toSave !== null) persistEncryptedDraft(toSave);
     }, DRAFT_SAVE_DEBOUNCE_MS);
-  }, [cacheKey]);
+  }, [persistEncryptedDraft]);
   useEffect(() => () => flushDraftSave(), [flushDraftSave]);
   useEffect(() => { onSendingChange(sending); }, [onSendingChange, sending]);
 
   useEffect(() => {
     let active = true;
-    void AsyncStorage.getItem(cacheKey).then((value) => {
+    void AsyncStorage.getItem(cacheKey).then(async (raw) => {
+      if (!active || draftEdited.current || !raw) return;
+      const value = isSealedLocalEnvelope(raw) ? await openLocalString(raw, cacheKey) : raw;
       if (active && !draftEdited.current && value) setDraft((current) => current || value);
     });
     // A draft whose send failed goes again under the same id after the app
@@ -654,14 +667,16 @@ const ChatComposer = memo(function ChatComposer({ hostId, sessionId, tabId, stat
 
   // An image pasted into the message field becomes an attachment, as a chat app's does.
   const composerFocused = useRef(false);
-  const onPastedImage = useRef<(data: string) => void>(() => undefined);
-  onPastedImage.current = (data) => {
+  const onPastedImage = useRef<(image: PastedImage) => void>(() => undefined);
+  onPastedImage.current = (image) => {
     if (!sendToAgent) return setAttachmentError("Images go to the agent: switch back from the worktree note to attach one.");
+    const uri = image.uri ?? (image.data ? `data:image/jpeg;base64,${image.data}` : "");
+    if (!uri) return;
     setAttachmentError(null);
     const id = `paste:${Date.now()}`;
-    void addPicked([{ id, uri: `data:image/jpeg;base64,${data}`, name: "Pasted image.jpg", mimeType: "image/jpeg", size: null, base64: data }]);
+    void addPicked([{ id, uri, name: "Pasted image.jpg", mimeType: "image/jpeg", size: null, base64: image.data ?? null }]);
   };
-  useEffect(() => addPasteImageListener((image) => { if (composerFocused.current) onPastedImage.current(image.data); }), []);
+  useEffect(() => addPasteImageListener((image) => { if (composerFocused.current) onPastedImage.current(image); }), []);
 
   // Once the wait is a real one, the box says a message waits for the connection.
   const placeholder = state === "waiting" || state === "offline" ? "Message sends when connected" : harness ? `Message ${providerName(harness)}` : "Message this session";
