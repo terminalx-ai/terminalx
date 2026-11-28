@@ -342,7 +342,7 @@ function BuildPanel({
  * organization layer): applied when a workspace is created, so saving them
  * needs no build. Secrets stay in Settings' write-only vault.
  */
-function SharedVariables({ disabled }: { disabled: boolean }) {
+function SharedVariables({ disabled, onDirtyChange }: { disabled: boolean; onDirtyChange?: (dirty: boolean) => void }) {
   const [view, setView] = useState<OrganizationConfigView | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -351,6 +351,11 @@ function SharedVariables({ disabled }: { disabled: boolean }) {
   const [notice, setNotice] = useState<string | null>(null);
   const alive = useRef(true);
   const file = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    onDirtyChange?.(draft !== null);
+  }, [draft, onDirtyChange]);
+  useEffect(() => () => onDirtyChange?.(false), [onDirtyChange]);
 
   const load = useCallback(async (keepError = false) => {
     setLoading(true);
@@ -508,6 +513,7 @@ export function EnvironmentStep(props: StepProps) {
   const [status, setStatus] = useState<EnvironmentStatus | null>(null);
   const [setup, setSetup] = useState<CloudWorkspaceSetup | null | "failed">(null);
   const [edits, setEdits] = useState<Edits | null>(null);
+  const [sharedVarsDirty, setSharedVarsDirty] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -589,36 +595,47 @@ export function EnvironmentStep(props: StepProps) {
     }
   }, []);
 
+  const loadProviders = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const response = await api.cloudProviders();
+      if (!alive.current) return;
+      const listed = listedProviders(response.providers);
+      const wanted = machine.current?.provider;
+      // The provider the organization connected, else one TerminalX provides (PRO-452), which needs no connection.
+      const summary = (wanted ? listed.find((option) => option.id === wanted) : undefined) ?? listed.find((option) => option.connection !== null) ?? listed.find(cloudProviderIsPlatform);
+      const id = wanted ?? summary?.id ?? null;
+      setProvider(id ? { id, name: summary?.displayName ?? providerLabel(id) } : null);
+      if (!id) setLoading(false);
+    } catch {
+      if (!alive.current) return;
+      setProvider(null);
+      setError("TerminalX could not load this organization's cloud providers. Try again.");
+      setLoading(false);
+    }
+  }, []);
+
+  const loadSetup = useCallback(async (providerId: string) => {
+    setSetup(null);
+    try {
+      const next = await api.cloudWorkspaceSetup(providerId as CloudWorkspaceProviderId, organization.id);
+      if (alive.current) setSetup(next);
+    } catch {
+      if (alive.current) setSetup("failed");
+    }
+  }, [organization.id]);
+
   useEffect(() => {
     void loadChosen();
-    void api
-      .cloudProviders()
-      .then((response) => {
-        if (!alive.current) return;
-        const listed = listedProviders(response.providers);
-        const wanted = machine.current?.provider;
-        // The provider the organization connected, else one TerminalX provides (PRO-452), which needs no connection.
-        const summary = (wanted ? listed.find((option) => option.id === wanted) : undefined) ?? listed.find((option) => option.connection !== null) ?? listed.find(cloudProviderIsPlatform);
-        const id = wanted ?? summary?.id ?? null;
-        setProvider(id ? { id, name: summary?.displayName ?? providerLabel(id) } : null);
-        if (!id) setLoading(false);
-      })
-      .catch(() => {
-        if (!alive.current) return;
-        setProvider(null);
-        setError("TerminalX could not load this organization's cloud providers. Try again.");
-        setLoading(false);
-      });
-  }, [organization.id, loadChosen]);
+    void loadProviders();
+  }, [organization.id, loadChosen, loadProviders]);
 
   useEffect(() => {
     if (!provider) return;
     void load(provider.id);
-    void api
-      .cloudWorkspaceSetup(provider.id as CloudWorkspaceProviderId, organization.id)
-      .then((next) => alive.current && setSetup(next))
-      .catch(() => alive.current && setSetup("failed"));
-  }, [provider, organization.id, load]);
+    void loadSetup(provider.id);
+  }, [provider, organization.id, load, loadSetup]);
 
   // A build in flight is followed without anyone pressing anything: plain reads, they start nothing.
   const building = Boolean(status?.versions.some(isBuilding));
@@ -638,7 +655,7 @@ export function EnvironmentStep(props: StepProps) {
   const shownVersion = buildingVersion ?? [...(status?.versions ?? [])].sort((left, right) => right.number - left.number)[0] ?? null;
 
   // Leaving with changes no build has taken asks first (14.15). A build this step just started has taken them.
-  const unbuilt = manage && (dirty || (Boolean(status?.rebuildRequired) && !building && !buildStarted));
+  const unbuilt = (manage && (dirty || (Boolean(status?.rebuildRequired) && !building && !buildStarted))) || sharedVarsDirty;
   useLeaveGuard(
     unbuilt
       ? (leave) => {
@@ -801,12 +818,10 @@ export function EnvironmentStep(props: StepProps) {
   } else if (!provider || !status) {
     body = error ? (
       <div className="flex items-center gap-2">
-        <p className="text-[13px] text-destructive">{error}</p>
-        {provider && (
-          <Button size="sm" variant="outline" onClick={() => void load(provider.id)}>
-            Try again
-          </Button>
-        )}
+        <p className="text-[13px] text-destructive" role="alert">{error}</p>
+        <Button size="sm" variant="outline" onClick={() => (provider ? void load(provider.id) : void loadProviders())}>
+          Try again
+        </Button>
       </div>
     ) : (
       <p className="text-[13px] text-muted-foreground">Connect a compute provider in the Compute step to build an environment. Workspaces need one to start at all.</p>
@@ -852,7 +867,12 @@ export function EnvironmentStep(props: StepProps) {
           }}
         />
         {setup === "failed" ? (
-          <p className="mt-2 text-[12px] text-muted-foreground">TerminalX could not read {name}'s base images.</p>
+          <div className="mt-2 flex items-center gap-2">
+            <p className="text-[12px] text-muted-foreground">TerminalX could not read {name}'s base images.</p>
+            <Button size="xs" variant="ghost" onClick={() => void loadSetup(provider.id)}>
+              Retry
+            </Button>
+          </div>
         ) : setup && sources.length > 1 ? (
           <label className="mt-3 flex items-center gap-3 text-[12.5px]">
             <span className="font-medium">Base image</span>
@@ -952,7 +972,7 @@ export function EnvironmentStep(props: StepProps) {
           </ul>
         )}
 
-        <SharedVariables disabled={disabled} />
+        <SharedVariables disabled={disabled} onDirtyChange={setSharedVarsDirty} />
 
         <p className="mt-4 text-[12px] text-muted-foreground">
           Saving makes a new revision; it builds nothing. Edits after this build show as unbuilt changes until you build again.
@@ -966,14 +986,6 @@ export function EnvironmentStep(props: StepProps) {
         ) : !dirty && status.rebuildRequired && !building && status.pendingChanges.length > 0 ? (
           <p className="mt-2 text-[12px] text-warning">Not built yet: {status.pendingChanges.map(changeLabel).join(", ")}.</p>
         ) : null}
-        <div className="xl:hidden">
-          {panel && (
-            <div className="mt-6">
-              {panel}
-              {fixPanel}
-            </div>
-          )}
-        </div>
       </>
     );
     actions =

@@ -5,6 +5,7 @@ import { openExternalWebUrl } from "@/lib/externalUrl";
 import { PRIVACY_MESSAGE } from "@/lib/dataPrivacy";
 import { api, fs, type GitHubConnectionStatus, type PullRequest, type PrAssociation } from "@/lib/api";
 import { openCheckLog, openPr, useEditors } from "@/lib/editors";
+import { showError } from "@/lib/errorToasts";
 import { useVisibleSessionTab } from "@/lib/visibleTab";
 import { checksMarkOf, noteChecksMark, noteDraftPushes } from "@/lib/panelMarks";
 import { showRerunFailed } from "@/lib/checkToasts";
@@ -551,7 +552,7 @@ export function PrPanel({
         const pr = row.pr;
         const onUnlink = unlink(row);
         if (!pr) return <div key={row.identity} role="alert" className="border-b border-hairline px-3 py-3 text-xs">
-          <button type="button" onClick={() => void openExternalWebUrl(row.identity)} className="hover:underline">{row.identity}</button>
+          <button type="button" onClick={() => void openExternalWebUrl(row.identity).catch((e) => showError("Open pull request", e))} className="hover:underline">{row.identity}</button>
           <div className="text-destructive">Could not refresh this pull request.</div>
           <CommandDetails details={row.error} />
           {onUnlink && <Button size="xs" variant="outline" disabled={!!working} onClick={onUnlink}>Unlink #{row.association?.number}</Button>}
@@ -571,7 +572,7 @@ export function PrPanel({
           onRerunCheck={(check) => rerun(pr, isFailingCheck(check), check)}
           onOpenLog={onOpenLog}
           viewing={shown?.kind === "checkLog" && shown.check.prUrl === pr.url ? shown.check.url : null}
-          onFix={onFixErrors && pr.state === "OPEN" && ownWork(row) ? () => { void onFixErrors(pr).catch(() => {}); } : undefined} />;
+          onFix={onFixErrors && pr.state === "OPEN" && ownWork(row) ? () => { void onFixErrors(pr).catch((e) => showError("Fix check errors", e)); } : undefined} />;
         const isMerged = pr.state === "MERGED";
         // Once merged: what to do with this session next, said under WHAT NEXT (design 05.12).
         const whatNext = isMerged && inline && row.current
@@ -617,7 +618,7 @@ export function PrPanel({
               {openInTab && <WithTooltip label={`Open PR #${pr.number} in centre tab`}><Button size="icon-xs" variant="ghost" aria-label={`Open PR #${pr.number} in centre tab`} onClick={() => openInTab(row)}><Maximize2 /></Button></WithTooltip>}
               {onUnlink && <WithTooltip label={`Unlink #${pr.number}`}><Button size="icon-xs" variant="ghost" aria-label={`Unlink #${pr.number}`} disabled={!!working} onClick={onUnlink}><Unplug /></Button></WithTooltip>}
               <div className="min-w-0 flex-1">
-                <button type="button" onClick={() => void openExternalWebUrl(pr.url)} className="group flex items-center gap-1 text-left text-[13px] font-medium hover:underline">
+                <button type="button" onClick={() => void openExternalWebUrl(pr.url).catch((e) => showError("Open pull request", e))} className="group flex items-center gap-1 text-left text-[13px] font-medium hover:underline">
                   <span className="truncate">{pr.title}</span>
                   <ExternalLink className="size-3 shrink-0 text-faint opacity-0 group-hover:opacity-100" />
                 </button>
@@ -726,17 +727,19 @@ export function PrPanel({
         >
           <input
             autoFocus
+            aria-label="Pull request title"
             value={title}
             onChange={(e) => setTitle(e.target.value)}
             placeholder="Title"
-            className="h-8 rounded-md border border-hairline bg-transparent px-2 text-[13px] outline-none focus:border-ring"
+            className="h-8 rounded-md border border-hairline bg-transparent px-2 text-[13px] outline-none focus:border-ring focus-visible:ring-2 focus-visible:ring-ring/40"
           />
           <textarea
+            aria-label="Pull request description"
             value={body}
             onChange={(e) => setBody(e.target.value)}
             rows={4}
             placeholder="Description (markdown)"
-            className="rounded-md border border-hairline bg-transparent px-2 py-1.5 text-[13px] outline-none focus:border-ring"
+            className="rounded-md border border-hairline bg-transparent px-2 py-1.5 text-[13px] outline-none focus:border-ring focus-visible:ring-2 focus-visible:ring-ring/40"
           />
           <label className="flex items-center gap-2 text-xs text-muted-foreground">
             Into

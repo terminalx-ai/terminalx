@@ -1065,14 +1065,22 @@ mod tests {
     #[test]
     fn relay_transcript_rejects_overflowing_and_negative_timestamps() {
         let host = HostKeypair::generate();
+        let mut test_key = [0u8; 32];
+        for (i, b) in test_key.iter_mut().enumerate() {
+            *b = (i as u8).wrapping_add(1);
+        }
+        let mut test_nonce = [0u8; 24];
+        for (i, b) in test_nonce.iter_mut().enumerate() {
+            *b = (i as u8).wrapping_add(2);
+        }
         let encode_fields = |issued_at: u64, expires_at: u64| -> Vec<u8> {
             let mut out = Vec::new();
             let fields: [(&str, Vec<u8>); 16] = [
                 ("protocol", b"terminalx-relay-host-proof/v1".to_vec()),
                 ("version", vec![1]),
                 ("relayOrigin", b"https://relay.terminalx.ai".to_vec()),
-                ("relayEphemeralPublicKey", vec![1u8; 32]),
-                ("challengeNonce", vec![2u8; 24]),
+                ("relayEphemeralPublicKey", test_key.to_vec()),
+                ("challengeNonce", test_nonce.to_vec()),
                 ("challengeId", b"chg_1".to_vec()),
                 ("userId", b"u1".to_vec()),
                 ("profileId", b"p1".to_vec()),
@@ -1107,11 +1115,11 @@ mod tests {
         };
         // u64::MAX must never wrap to negative i64 and pass skew checks.
         let overflow = encode_fields(u64::MAX, 1_700_000_005_000);
-        assert!(validate_relay_transcript(&overflow, "chg_1", &[1u8; 32], &[2u8; 24], 1_700_000_005_000, &host, &ctx).is_err());
+        assert!(validate_relay_transcript(&overflow, "chg_1", &test_key, &test_nonce, 1_700_000_005_000, &host, &ctx).is_err());
         // Negative challenge expiry must be rejected cleanly.
         let valid_ts = encode_fields(1_700_000_000_000, 1_700_000_005_000);
-        assert!(validate_relay_transcript(&valid_ts, "chg_1", &[1u8; 32], &[2u8; 24], -1, &host, &ctx).is_err());
+        assert!(validate_relay_transcript(&valid_ts, "chg_1", &test_key, &test_nonce, -1, &host, &ctx).is_err());
         // Valid window passes.
-        assert!(validate_relay_transcript(&valid_ts, "chg_1", &[1u8; 32], &[2u8; 24], 1_700_000_005_000, &host, &ctx).is_ok());
+        assert!(validate_relay_transcript(&valid_ts, "chg_1", &test_key, &test_nonce, 1_700_000_005_000, &host, &ctx).is_ok());
     }
 }

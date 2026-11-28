@@ -459,7 +459,10 @@ pub fn read_lines<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Vec<T>>
         }
         match serde_json::from_str::<T>(line) {
             Ok(v) => out.push(v),
-            Err(e) => log::warn!("skipping unreadable log line in {}: {e}", path.display()),
+            Err(e) => {
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("log");
+                log::warn!("skipping unreadable log line in {name}: {e}");
+            }
         }
     }
     Ok(out)

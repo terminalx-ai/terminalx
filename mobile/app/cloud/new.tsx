@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { Alert, Keyboard, KeyboardAvoidingView, Pressable, ScrollView, StyleSheet, Text, View, type ScrollViewInstance } from "react-native";
-import { Stack, useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
+import { Alert, BackHandler, Keyboard, KeyboardAvoidingView, Pressable, ScrollView, StyleSheet, Text, View, type ScrollViewInstance } from "react-native";
+import { Stack, useFocusEffect, useLocalSearchParams, usePreventRemove, useRouter } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import * as Crypto from "expo-crypto";
 import { Check, CirclePause, CloudOff, ServerOff, WifiOff } from "lucide-react-native";
@@ -181,6 +181,28 @@ function LaunchFlow({ catalog, organization, organizations, onOrganization, agai
   const inFlight = useRef(false);
   const alive = useRef(true);
   useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
+
+  // U-61: Intercept OS swipe/hardware Back on internal steps and block dismissal while a launch is in-flight or unanswered.
+  const launchPending = busy === "launching" || busy === "checking" || noAnswer;
+  const blockLeave = step !== "form" || launchPending || sheet !== null;
+  const repoBackRef = useRef<(() => void) | null>(null);
+  usePreventRemove(blockLeave, () => {
+    if (launchPending) return;
+    if (sheet !== null) { setSheet(null); return; }
+    if (step === "review") { setStep("form"); return; }
+    if (step === "repository") { (repoBackRef.current ?? (() => setStep("form")))(); }
+  });
+  useEffect(() => {
+    if (!blockLeave) return;
+    const subscription = BackHandler.addEventListener("hardwareBackPress", () => {
+      if (launchPending) return true;
+      if (sheet !== null) { setSheet(null); return true; }
+      if (step === "review") { setStep("form"); return true; }
+      if (step === "repository") { (repoBackRef.current ?? (() => setStep("form")))(); return true; }
+      return false;
+    });
+    return () => subscription.remove();
+  }, [blockLeave, launchPending, sheet, step]);
 
   const closed = useCallback((error: unknown): Offer => {
     const said = launchRefusal(error);
@@ -374,6 +396,7 @@ function LaunchFlow({ catalog, organization, organizations, onOrganization, agai
 
   // `subtitle`: a page about every workspace of the organization says so in place of its name (25.11's Choose repositories).
   const page = (title: string, onBack: () => void, body: ReactNode, foot: ReactNode, subtitle?: string, options?: { scroll?: boolean }) => <KeyboardAvoidingView style={styles.page} behavior={keyboardAvoidingBehavior()}>
+    <Stack.Screen options={{ title: "New workspace", headerShown: false, gestureEnabled: !blockLeave }} />
     {subtitle ? <ScreenHeader title={title} subtitle={subtitle} onBack={onBack} /> : header(title, onBack)}
     {options?.scroll === false ? <View style={styles.page}>{body}</View> : <ScrollView ref={scroller} keyboardShouldPersistTaps="handled" contentContainerStyle={styles.content}
       onContentSizeChange={() => { if (typing.current) scroller.current?.scrollToEnd({ animated: false }); }}>{body}</ScrollView>}
@@ -382,6 +405,7 @@ function LaunchFlow({ catalog, organization, organizations, onOrganization, agai
 
   if (step === "repository") {
     return <RepositoriesStep api={api} orgId={orgId} organization={organization.name} repositories={draft.repositories} problems={problems} page={page}
+      onRegisterBack={(handler) => { repoBackRef.current = handler; }}
       onUse={(repositories) => { change({ repositories }); setStep("form"); }}
       onBack={() => setStep("form")} onToken={toOrganization} />;
   }

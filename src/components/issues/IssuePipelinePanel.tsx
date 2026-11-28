@@ -309,36 +309,48 @@ export function IssuePipelinePanel({ pipeline }: { pipeline: IssuePipeline }) {
         <div className="flex flex-wrap items-center gap-1.5">
           {failedChecks.length > 0 && (
             <>
-              {!place && (
-                <Button
-                  size="sm"
-                  variant="accent"
-                  disabled={busy != null || !authorHere || failedRuns.length === 0}
-                  title={!authorHere ? "The author session is not on this computer." : failedRuns.length === 0 ? "Only a GitHub Actions run's logs can be sent." : "Send the failed check logs to the author session"}
-                  onClick={() => void run("sendFailure", () => sendFailedChecks(pipeline.author.sessionId, pipeline.author.tabId, pipeline.pr!.url, prefs.fixErrorsInstructions).then((said) => said && "Sent the failure to the author session."))}
-                >
-                  {busy === "sendFailure" ? <Loader2 className="animate-spin" /> : <CornerUpLeft />}
-                  Send the failure to the author
-                </Button>
-              )}
-              {!place && (
-                <Button
-                  size="sm"
-                  variant="outline"
-                  disabled={busy != null || !authorCwd || failedRuns.length === 0}
-                  title={failedRuns.length === 0 ? "Only a GitHub Actions run can be re-run from here." : undefined}
-                  onClick={() =>
-                    void run("rerun", async () => {
-                      const authority = await gh.checkAuthority();
-                      for (const check of failedRuns) await gh.rerunCheck(authorCwd!, pipeline.pr!.url, check.url!, true, authority);
-                      return `Re-run requested for ${countOf(failedRuns.length, "Actions run")}. The pipeline waits on ${failedRuns.length === 1 ? "it" : "them"} once GitHub starts ${failedRuns.length === 1 ? "it" : "them"}.`;
-                    })
-                  }
-                >
-                  {busy === "rerun" ? <Loader2 className="animate-spin" /> : <RotateCw />}
-                  Re-run check
-                </Button>
-              )}
+              {!place && (() => {
+                const sendTitle = !authorHere ? "The author session is not on this computer." : failedRuns.length === 0 ? "Only a GitHub Actions run's logs can be sent." : "Send the failed check logs to the author session";
+                const sendDisabled = busy != null || !authorHere || failedRuns.length === 0;
+                return (
+                  <span className="inline-flex" title={sendTitle}>
+                    <Button
+                      size="sm"
+                      variant="accent"
+                      disabled={sendDisabled}
+                      title={sendTitle}
+                      onClick={() => void run("sendFailure", () => sendFailedChecks(pipeline.author.sessionId, pipeline.author.tabId, pipeline.pr!.url, prefs.fixErrorsInstructions).then((said) => said && "Sent the failure to the author session."))}
+                    >
+                      {busy === "sendFailure" ? <Loader2 className="animate-spin" /> : <CornerUpLeft />}
+                      Send the failure to the author
+                    </Button>
+                  </span>
+                );
+              })()}
+              {!place && (() => {
+                const rerunTitle = failedRuns.length === 0 ? "Only a GitHub Actions run can be re-run from here." : undefined;
+                const rerunDisabled = busy != null || !authorCwd || failedRuns.length === 0;
+                return (
+                  <span className="inline-flex" title={rerunTitle}>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={rerunDisabled}
+                      title={rerunTitle}
+                      onClick={() =>
+                        void run("rerun", async () => {
+                          const authority = await gh.checkAuthority();
+                          for (const check of failedRuns) await gh.rerunCheck(authorCwd!, pipeline.pr!.url, check.url!, true, authority);
+                          return `Re-run requested for ${countOf(failedRuns.length, "Actions run")}. The pipeline waits on ${failedRuns.length === 1 ? "it" : "them"} once GitHub starts ${failedRuns.length === 1 ? "it" : "them"}.`;
+                        })
+                      }
+                    >
+                      {busy === "rerun" ? <Loader2 className="animate-spin" /> : <RotateCw />}
+                      Re-run check
+                    </Button>
+                  </span>
+                );
+              })()}
               <Button size="sm" variant="outline" disabled={!runUrl} onClick={() => void openExternalWebUrl(runUrl!)}>
                 <ExternalLink />
                 Open the run

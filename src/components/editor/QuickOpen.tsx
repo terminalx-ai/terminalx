@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { Eye, EyeOff, FileX2, Search, TextSearch } from "@/icons";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { Kbd } from "@/components/ui/tooltip";
@@ -66,6 +66,9 @@ export function QuickOpen({ sessionId, root, source, branch, initialOpen = false
   const [sel, setSel] = useState(0);
   const [copied, setCopied] = useState(false);
   const input = useRef<HTMLInputElement>(null);
+  const listRef = useRef<HTMLUListElement>(null);
+  const listId = useId();
+  const optionId = (idx: number) => `${listId}-opt-${idx}`;
   const searchKeys = useShortcutKeys("files.search");
 
   useShortcut("files.quickOpen", () => setOpen(true));
@@ -154,7 +157,14 @@ export function QuickOpen({ sessionId, root, source, branch, initialOpen = false
     return { rows, files };
   }, [typed, hits, recent]);
   const noMatch = typed && !!current && !hits.length && !!reader.findFiles;
-  const selected = files[Math.min(sel, files.length - 1)];
+  const clampedSel = files.length ? Math.min(sel, files.length - 1) : -1;
+  const selected = clampedSel >= 0 ? files[clampedSel] : undefined;
+
+  useEffect(() => {
+    if (!open || clampedSel < 0) return;
+    const el = listRef.current?.querySelector<HTMLElement>(`#${CSS.escape(optionId(clampedSel))}`);
+    el?.scrollIntoView?.({ block: "nearest" });
+  }, [open, clampedSel, rows]);
 
   /**
    * The file a key acts on. The list answers a moment after each keystroke;
@@ -218,11 +228,16 @@ export function QuickOpen({ sessionId, root, source, branch, initialOpen = false
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogContent showClose={false} width="max-w-[38.5rem]" className="bottom-auto top-11 gap-0 overflow-hidden p-0" onOpenAutoFocus={(e) => e.preventDefault()}>
         <DialogTitle className="sr-only">Open file</DialogTitle>
-        <div className="flex h-12 items-center gap-2.5 border-b border-hairline px-4">
+        <div className="flex h-12 items-center gap-2.5 border-b border-hairline px-4 focus-within:ring-2 focus-within:ring-inset focus-within:ring-ring/40">
           <Search className="size-4 shrink-0 text-muted-foreground" />
           <input
             ref={input}
             value={q}
+            role="combobox"
+            aria-expanded={!noMatch && files.length > 0}
+            aria-controls={listId}
+            aria-autocomplete="list"
+            aria-activedescendant={!noMatch && clampedSel >= 0 ? optionId(clampedSel) : undefined}
             aria-label="Search files"
             onChange={(e) => setQ(e.target.value)}
             onKeyDown={(e) => {
@@ -258,7 +273,7 @@ export function QuickOpen({ sessionId, root, source, branch, initialOpen = false
             onToggleIgnored={() => setIncludeIgnored((v) => !v)}
           />
         ) : (
-          <ul className="max-h-[min(26rem,calc(100dvh-10rem))] overflow-auto p-1.5 scrollbar-thin" role="listbox" aria-label="Files">
+          <ul ref={listRef} id={listId} className="max-h-[min(26rem,calc(100dvh-10rem))] overflow-auto p-1.5 scrollbar-thin" role="listbox" aria-label="Files">
             {rows.map((row) =>
               row.kind === "heading" ? (
                 <li key={`h:${row.label}`} role="presentation" className="px-2.5 pb-1 pt-2 text-[11px] font-medium uppercase tracking-[.08em] text-faint">
@@ -267,9 +282,10 @@ export function QuickOpen({ sessionId, root, source, branch, initialOpen = false
               ) : (
                 <FileRow
                   key={row.hit.path}
+                  id={optionId(row.index)}
                   hit={row.hit}
                   change={changes?.byPath.get(row.hit.path)}
-                  selected={row.index === sel}
+                  selected={row.index === clampedSel}
                   onHover={() => setSel(row.index)}
                   onOpen={() => choose(row.hit)}
                 />
@@ -311,17 +327,17 @@ export function QuickOpen({ sessionId, root, source, branch, initialOpen = false
   );
 }
 
-function FileRow({ hit, change, selected, onHover, onOpen }: { hit: FileHit; change?: ChangedFile; selected: boolean; onHover: () => void; onOpen: () => void }) {
+function FileRow({ id, hit, change, selected, onHover, onOpen }: { id: string; hit: FileHit; change?: ChangedFile; selected: boolean; onHover: () => void; onOpen: () => void }) {
   const mark = change ? MARK[change.status] : null;
   const dir = dirName(hit.path) || ".";
   return (
-    <li role="option" aria-selected={selected}>
+    <li id={id} role="option" aria-selected={selected}>
       <button
         type="button"
         tabIndex={-1}
         onMouseEnter={onHover}
         onClick={onOpen}
-        className={cn("flex h-8 w-full items-center gap-2.5 rounded-md px-2.5 text-left", selected ? "bg-veil-strong" : "hover:bg-veil")}
+        className={cn("flex h-8 w-full items-center gap-2.5 rounded-md px-2.5 text-left", selected ? "bg-veil-strong" : "hover:bg-veil-raised")}
       >
         <FileTypeIcon name={hit.name} isDir={false} size={14} className="shrink-0" />
         <span className="truncate text-[12.5px] text-foreground">{hit.name}</span>

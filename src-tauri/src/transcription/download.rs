@@ -52,6 +52,7 @@ pub fn is_installed(spec: &ModelSpec) -> bool {
 /// Verify regular-file status (refusing symlinks/FIFOs via `O_NOFOLLOW`),
 /// pinned byte size, and streaming SHA-256 before passing a `.gguf` model to
 /// native C++ `transcribe-cpp` (S-34).
+#[allow(dead_code)]
 pub fn verify_model_file(spec: &ModelSpec, path: &std::path::Path) -> Result<()> {
     let symlink_meta = std::fs::symlink_metadata(path)
         .with_context(|| format!("inspect model file {}", path.display()))?;

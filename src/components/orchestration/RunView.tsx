@@ -11,6 +11,7 @@ import {
 } from "@/icons";
 import { agent as agentApi, errorMessage, fs, orchestration } from "@/lib/api";
 import { cn } from "@/lib/cn";
+import { confirmInApp } from "@/lib/confirm";
 import { EFFORT_LABEL, effortChoices, modeLabel, modelForTab, modelLabel, modelOptionText, PERMISSION_MODES, useModels } from "@/lib/models";
 import {
   AUTO_STEP_LABEL, blockedSubtitle, budgetText, goesToLead, waitsForReset, capAt, checksFrom, dollarsText, donePieces, mergeButton, pointsText, checkText, conflictReasons, conflictsWith, costText, currentMerge, durationText, estimateText, fellShort, GATE_LABEL, GATE_ORDER, gaveUp, holdText, mainWindow, MERGE_STATE_LABEL, mergeNote, mergeRows, mergeSubtitle, noteRun, numberList, openDependencies, pieceCheck, pieceMode, pieceNumbers, shownPieceState, skippedWith,
@@ -188,7 +189,21 @@ function RunBoard({ run, lead, onShowChat, column }: { run: Run; lead: SessionEn
           </div>
           <div className="flex shrink-0 flex-wrap items-center gap-2">
             {waiting && <>
-              <Button variant="outline" disabled={!!busy} onClick={() => void act("stop", async () => (await orchestration.stop(run.id)).run)}>Discard</Button>
+              <Button
+                variant="outline"
+                disabled={!!busy}
+                onClick={async () => {
+                  const yes = await confirmInApp({
+                    title: "Discard run?",
+                    body: "This stops the planned run and discards its plan.",
+                    action: "Discard",
+                    destructive: true,
+                  });
+                  if (yes) void act("stop", async () => (await orchestration.stop(run.id)).run);
+                }}
+              >
+                Discard
+              </Button>
               <Button variant="outline" disabled={!!busy} aria-pressed={editingPlan} onClick={() => setEditingPlan((on) => !on)}><Pencil />Edit plan</Button>
               <Button variant="accent" disabled={!!busy} onClick={() => void act("approve", async () => (await orchestration.approve(run.id)).run)}>
                 {busy === "approve" ? <LoaderCircle className="animate-spin" /> : <Play />}Approve and start
@@ -196,19 +211,44 @@ function RunBoard({ run, lead, onShowChat, column }: { run: Run; lead: SessionEn
             </>}
             {run.state === "planned" && <Button variant="outline" disabled={!!busy} aria-pressed={editingPlan} onClick={() => setEditingPlan((on) => !on)}><Pencil />Edit plan</Button>}
             {(run.state === "running" || run.state === "planned" || run.state === "needsYou" || run.state === "verifying" || run.state === "merging") && (
-              <Button variant="outline" disabled={!!busy} onClick={() => void act("stop", async () => (await orchestration.stop(run.id)).run)}><Square />Stop run</Button>
+              <Button
+                variant="outline"
+                disabled={!!busy}
+                onClick={async () => {
+                  const yes = await confirmInApp({
+                    title: "Stop run?",
+                    body: "All active workers for this run will be stopped.",
+                    action: "Stop run",
+                    destructive: true,
+                  });
+                  if (yes) void act("stop", async () => (await orchestration.stop(run.id)).run);
+                }}
+              >
+                <Square />Stop run
+              </Button>
             )}
             {/* A project that asks for no approval (PRO-365): the person starts the plan as last saved, never while a change is being saved. A window warning does not hold it. */}
-            {run.state === "planned" && (
-              <Button variant="accent" disabled={!!busy} title={busy === "save" || busy === "limits" ? "Saving your change first" : undefined} onClick={() => void act("start", async () => (await orchestration.start(run.id)).run)}>
-                {busy === "start" ? <LoaderCircle className="animate-spin" /> : <Play />}Start run
-              </Button>
-            )}
-            {mergeAction && (
-              <Button variant="outline" disabled={!!busy || mergeAction.disabled} data-testid="run-merge" title={mergeAction.why ?? "Merge every accepted piece into the lead's branch, in dependency order. Nothing is pushed."} onClick={() => void merge()}>
-                {busy === "merge" || run.mergeUnderWay ? <LoaderCircle className="animate-spin" /> : <GitMerge />}{mergeAction.label}
-              </Button>
-            )}
+            {run.state === "planned" && (() => {
+              const startTitle = busy === "save" || busy === "limits" ? "Saving your change first" : undefined;
+              return (
+                <span className="inline-flex" title={startTitle}>
+                  <Button variant="accent" disabled={!!busy} title={startTitle} onClick={() => void act("start", async () => (await orchestration.start(run.id)).run)}>
+                    {busy === "start" ? <LoaderCircle className="animate-spin" /> : <Play />}Start run
+                  </Button>
+                </span>
+              );
+            })()}
+            {mergeAction && (() => {
+              const mergeTitle = mergeAction.why ?? "Merge every accepted piece into the lead's branch, in dependency order. Nothing is pushed.";
+              const mergeDisabled = !!busy || mergeAction.disabled;
+              return (
+                <span className="inline-flex" title={mergeTitle}>
+                  <Button variant="outline" disabled={mergeDisabled} data-testid="run-merge" title={mergeTitle} onClick={() => void merge()}>
+                    {busy === "merge" || run.mergeUnderWay ? <LoaderCircle className="animate-spin" /> : <GitMerge />}{mergeAction.label}
+                  </Button>
+                </span>
+              );
+            })()}
           </div>
         </header>
         {error && (
@@ -1364,7 +1404,22 @@ function LeadActions({ run, piece, number, busy, act, onShowChat }: { run: Run; 
           </Button>
         )}
         <Button size="sm" variant="outline" onClick={onShowChat}><Sparkles />Open lead chat</Button>
-        <Button size="sm" variant="outline" disabled={busy} onClick={() => void act("skip", () => orchestration.skip(run.id, piece.id))}><SkipForward />Skip piece</Button>
+        <Button
+          size="sm"
+          variant="outline"
+          disabled={busy}
+          onClick={async () => {
+            const yes = await confirmInApp({
+              title: `Skip piece ${number}?`,
+              body: "This skips the piece and any pieces that depend on it.",
+              action: "Skip piece",
+              destructive: true,
+            });
+            if (yes) void act("skip", () => orchestration.skip(run.id, piece.id));
+          }}
+        >
+          <SkipForward />Skip piece
+        </Button>
       </div>
     </div>
   );

@@ -3229,9 +3229,14 @@ impl ControlService {
             }
             // SAFETY: getpid has no preconditions.
             let runtime = unsafe { libc::getpid() };
-            if pid == runtime
-                || consent::descends_from(pid, runtime)
-                || consent::judge(pid, runtime, &consent::runtime_terminals(runtime)).is_some()
+            let authorized_update_helper = matches!(
+                command,
+                "runtime.handover.plan" | "runtime.handover" | "runtime.stopAll" | "runtime.stopAllIfIdle"
+            ) && crate::remote::machine_update::is_active_helper(pid);
+            if !authorized_update_helper
+                && (pid == runtime
+                    || consent::descends_from(pid, runtime)
+                    || consent::judge(pid, runtime, &consent::runtime_terminals(runtime)).is_some())
             {
                 return Err(ControlError::new(
                     "forbidden",
@@ -3278,13 +3283,6 @@ impl ControlService {
             let known_window = self.window_process(lifetime);
             if is_the_window(known_window, pid) || own_terminal(pid) {
                 return Ok(());
-            }
-            if matches!(window, consent::Window::Headless) {
-                return Err(ControlError::new(
-                    "person_required",
-                    format!("On a headless runtime, {command} requires a person's own terminal or verified consent."),
-                    Some("Run this command from your own terminal.".into()),
-                ));
             }
             // Desktop runtime without a terminal: if another live window is already
             // recognised, refuse an unrecognised detached caller.

@@ -216,4 +216,16 @@ describe("a bot's view (PRO-468)", () => {
     view();
     expect(screen.getByText("This bot is no longer here.")).toBeTruthy();
   });
+
+  it("clears error state when switching bots and uses responsive container layout for chat (U-51, U-46)", async () => {
+    const iris: Bot = { ...atlas, id: "b2", slug: "iris", name: "Iris", roleTitle: "QA" };
+    mocks.bots = { ...mocks.bots, bots: [atlas, iris] };
+    mocks.pauseBot.mockRejectedValueOnce(new Error("pause failed on atlas"));
+    const rendered = render(<BotView botId="b1" chatId={null} sidebarOpen onToggleSidebar={() => {}} titlebarInset={0} />);
+    expect(screen.getByRole("tabpanel", { name: "Chat" }).className).toContain("@container/bot-chat");
+    fireEvent.click(screen.getByRole("button", { name: "Pause" }));
+    expect(await screen.findByText(/pause failed on atlas/)).toBeTruthy();
+    rendered.rerender(<BotView botId="b2" chatId={null} sidebarOpen onToggleSidebar={() => {}} titlebarInset={0} />);
+    await waitFor(() => expect(screen.queryByText(/pause failed on atlas/)).toBeNull());
+  });
 });

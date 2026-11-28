@@ -1,4 +1,5 @@
 // @vitest-environment node
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { contrast, oklch, palettes, rgb, type RGB } from "./tokenContrast";
 
@@ -43,5 +44,24 @@ describe("text ink contrast", () => {
       expect(strong).toBeGreaterThan(muted);
       expect(muted).toBeGreaterThan(faint);
     });
+
+    it(`meets ${AA}:1 for filled danger buttons and accents in ${selector}`, () => {
+      expect(contrast(rgb(tokens["destructive-foreground"]), rgb(tokens.destructive)), "destructive button").toBeGreaterThanOrEqual(AA);
+      expect(contrast(rgb(tokens["accent-fg"]), rgb(tokens.accent)), "accent button").toBeGreaterThanOrEqual(AA);
+      expect(contrast(rgb(tokens.warning), rgb(tokens["surface-page"])), "warning on page").toBeGreaterThanOrEqual(AA);
+      expect(contrast(rgb(tokens.warning), rgb(tokens["surface-card"])), "warning on card").toBeGreaterThanOrEqual(AA);
+    });
   }
+
+  it("meets AA for merge buttons and defines semantic Tailwind v4 theme aliases", () => {
+    const tokensCss = readFileSync(new URL("./tokens.css", import.meta.url), "utf8");
+    const mergeBg = tokensCss.match(/--accent-merge:\s*([^;]+);/)![1];
+    const mergeFg = tokensCss.match(/--accent-merge-fg:\s*([^;]+);/)![1];
+    expect(contrast(rgb(mergeFg), rgb(mergeBg)), "merge button").toBeGreaterThanOrEqual(AA);
+
+    const appCss = readFileSync(new URL("./app.css", import.meta.url), "utf8");
+    for (const token of ["--color-success:", "--color-del:", "--color-veil:", "--color-destructive-foreground:"]) {
+      expect(appCss).toContain(token);
+    }
+  });
 });

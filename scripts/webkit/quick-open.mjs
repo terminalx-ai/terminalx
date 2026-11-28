@@ -66,7 +66,7 @@ try {
     await openConversation(page, "First conversation");
     // ⌘, not ControlOrMeta: the page is the Mac app whatever the host (harness.mjs), and on Linux ControlOrMeta is Ctrl.
     await page.keyboard.press("Meta+p");
-    const field = page.getByRole("textbox", { name: "Search files" });
+    const field = page.getByRole("combobox", { name: "Search files" });
     await field.waitFor();
     const list = page.getByRole("listbox", { name: "Files" });
     await list.getByRole("option", { name: /ScriptRunner\.tsx/ }).waitFor();

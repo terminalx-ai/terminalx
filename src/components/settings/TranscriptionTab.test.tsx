@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import type { TranscriptionModel } from "@/lib/api";
 
@@ -13,6 +13,7 @@ vi.mock("@/lib/api", () => ({
   transcription: {
     models: vi.fn(async () => [model("parakeet-unified-en-0.6b", "Parakeet Unified EN 0.6B", true), model("whisper-small", "Whisper Small", false)]),
     preferences: vi.fn(async () => ({ model: "parakeet-unified-en-0.6b", inputDevice: null, muteWhileRecording: false })),
+    remove: vi.fn(async () => {}),
   },
 }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) }));
@@ -58,4 +59,20 @@ it("says where dictation runs, and leaves nothing to download or record, on a co
   } finally {
     dictation.available = true;
   }
+});
+
+it("wraps model radios in a radiogroup, exposes meter scores, and confirms model deletion (U-37, U-44)", async () => {
+  const { transcription } = await import("@/lib/api");
+  render(
+    <TooltipProvider>
+      <TranscriptionTab />
+    </TooltipProvider>,
+  );
+  await screen.findByText("Whisper Small");
+  expect(screen.getByRole("radiogroup", { name: "Transcription model" })).toBeTruthy();
+  expect(screen.getAllByRole("meter").length).toBeGreaterThanOrEqual(4);
+  fireEvent.click(screen.getByRole("button", { name: "Delete Whisper Small model" }));
+  expect(transcription.remove).not.toHaveBeenCalled();
+  fireEvent.click(await screen.findByRole("button", { name: "Delete model" }));
+  expect(transcription.remove).toHaveBeenCalledWith("whisper-small");
 });

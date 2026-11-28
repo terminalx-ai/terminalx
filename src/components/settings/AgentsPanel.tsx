@@ -6,6 +6,8 @@ import { Check, ChevronRight, CircleAlert, CircleCheck, ExternalLink, Eye, EyeOf
 import { AgentMark } from "@/components/AgentMark";
 import { AgentSetup } from "@/components/session/AgentSetup";
 import { Button } from "@/components/ui/button";
+import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
+import { useSettingsLeaveGuard } from "./settingsLeaveGuard";
 import { useAgentReadiness, type AgentReadiness } from "@/lib/agentReadiness";
 import { compareAgentVersions } from "@/lib/agentVersion";
 import { setupActive, useAgentSetupFlow, type AgentSetupFlow } from "@/lib/agentSetupFlow";
@@ -107,7 +109,7 @@ export function AgentsPanel({ harnesses, checkRun, busy, onRecheck }: {
         </Button>
       </div>
     </div>
-    <div role="tabpanel" aria-label={current.name} key={`${current.id}:${checkRun}`}>
+    <div role="tabpanel" aria-label={current.name} key={current.id}>
       <AgentTab harness={current} readiness={readiness[current.id]} onLogin={loginHeard} />
     </div>
   </div>;
@@ -398,20 +400,36 @@ function KeyField({ harness, status, busy, onSave, onRemove }: {
 }) {
   const [draft, setDraft] = useState("");
   const [shown, setShown] = useState(false);
+  const [confirmRemove, setConfirmRemove] = useState(false);
   const saved = status?.saved;
+  useSettingsLeaveGuard(!saved && Boolean(draft.trim()));
   if (saved) {
     return <div className="flex gap-2">
       <div aria-label={`Saved ${KEY_LABEL[harness.id]}`} className="flex h-8 min-w-0 flex-1 items-center rounded-md border border-hairline bg-card px-2.5">
         <span className="truncate font-mono text-[12px]">{saved.masked}</span>
       </div>
       <span className="inline-flex h-8 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md bg-muted px-3 text-[12.5px] text-add"><Check className="size-3.5" />Saved</span>
-      <Button size="sm" variant="ghost" className="shrink-0 whitespace-nowrap text-muted-foreground" disabled={!!busy} onClick={onRemove}>
+      <Button size="sm" variant="ghost" className="shrink-0 whitespace-nowrap text-muted-foreground" disabled={!!busy} onClick={() => setConfirmRemove(true)}>
         {busy === "remove" ? <Loader2 className="animate-spin" /> : <Trash2 />} Remove
       </Button>
+      <ConfirmDialog
+        open={confirmRemove}
+        title={`Remove ${KEY_LABEL[harness.id]}?`}
+        action="Remove"
+        destructive
+        busy={busy === "remove"}
+        onAction={() => {
+          setConfirmRemove(false);
+          onRemove();
+        }}
+        onCancel={() => setConfirmRemove(false)}
+      >
+        New {harness.name} tabs will stop using this saved API key.
+      </ConfirmDialog>
     </div>;
   }
   const save = async () => {
-    if (!draft.trim()) return;
+    if (busy || !draft.trim()) return;
     if (await onSave(draft)) { setDraft(""); setShown(false); }
   };
   return <div className="flex gap-2">

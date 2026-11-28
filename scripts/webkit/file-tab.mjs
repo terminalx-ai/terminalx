@@ -53,7 +53,7 @@ const stripTab = (page, name) => strip(page).getByRole("tab", { name, exact: tru
 async function quickOpen(page, query) {
   // ⌘ is "Meta" on every host: the page is a Mac's, and "ControlOrMeta" is Ctrl on a Linux host (harness.mjs).
   await page.keyboard.press("Meta+p");
-  const field = page.getByRole("textbox", { name: "Search files" });
+  const field = page.getByRole("combobox", { name: "Search files" });
   await field.waitFor();
   await field.fill(query);
   await page.getByRole("listbox", { name: "Files" }).getByRole("option").first().waitFor();

@@ -268,7 +268,7 @@ it("discards a live comparison from the centre diff header and refreshes it, but
   await screen.findByRole("button", { name: "Copy file contents" });
   fireEvent.click(within(openViewOptions()).getByRole("menuitem", { name: "Discard changes to live.ts" }));
   expect(git.discard).not.toHaveBeenCalled();
-  fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Discard" }));
+  fireEvent.click(within(screen.getByRole("alertdialog")).getByRole("button", { name: "Discard" }));
   await waitFor(() => expect(git.discard).toHaveBeenCalledWith("/workspace", "live.ts", "merge-base", undefined));
   await waitFor(() => expect(getEditors().editors.find((e) => e.id === id)).toMatchObject({ diff: { range: { base: "merge-base", head: "fresh" } } }));
   view.unmount();
@@ -374,4 +374,18 @@ it("shows the actual byte size and opens the workspace file from a local Changes
   expect(within(screen.getByTestId("changes-empty-state")).queryByRole("alert")).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "Open file" }));
   expect(getEditors().editors.some((entry) => entry.kind === "text" && entry.rel === "large.ts" && entry.root === "/workspace")).toBe(true);
+});
+
+it("exposes keyboard-accessible resize separator and un-nested close buttons on editor tabs (U-32, U-34)", () => {
+  act(() => { openFile(CHECKOUT, "/workspace", "alpha.ts"); });
+  const { container } = render(<TooltipProvider><EditorSplit sessionId={CHECKOUT} active /></TooltipProvider>);
+  const sep = screen.getByRole("separator", { name: "Resize editor pane" });
+  expect(sep.tabIndex).toBe(0);
+  expect(sep.getAttribute("aria-valuemin")).toBe("320");
+  const before = Number(sep.getAttribute("aria-valuenow"));
+  fireEvent.keyDown(sep, { key: "ArrowLeft" });
+  expect(Number(sep.getAttribute("aria-valuenow"))).toBeGreaterThanOrEqual(before);
+  // Close button is a sibling of role="tab", never nested inside it.
+  expect(container.querySelector('[role="tab"] button')).toBeNull();
+  expect(screen.getByRole("button", { name: "Close alpha.ts" })).toBeTruthy();
 });

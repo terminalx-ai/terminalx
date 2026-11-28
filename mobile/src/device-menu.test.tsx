@@ -28,7 +28,7 @@ vi.mock("react-native", () => {
   return {
     useWindowDimensions: () => ({ width: 375, height: 667, scale: 2, fontScale: 1 }),
     AppState: { currentState: "active" },
-    View: Box, Text: Box, KeyboardAvoidingView: Box, RefreshControl: () => null, Platform: { OS: "ios" }, ActivityIndicator: () => null,
+    View: Box, Text: Box, ScrollView: Box, KeyboardAvoidingView: Box, RefreshControl: () => null, Platform: { OS: "ios" }, ActivityIndicator: () => null,
     Modal: ({ visible, children }: any) => visible ? <div data-modal>{children}</div> : null,
     StyleSheet: { create: (styles: unknown) => styles, hairlineWidth: 1 },
     // A long press is a right-click here: a different gesture from the press.

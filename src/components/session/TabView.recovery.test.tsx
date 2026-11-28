@@ -633,6 +633,7 @@ describe("TabView recovery lifecycle", () => {
     if (kind === "usage_limit") expect(screen.queryByText(/Retry/i)).toBeNull();
     await screen.findByRole("option", { name: "Available model" });
     fireEvent.change(screen.getByRole("combobox"), { target: { value: "available" } });
+    fireEvent.click(screen.getByRole("button", { name: "Switch & retry" }));
     await waitFor(() => expect(mocks.invoke.mock.calls.some(([c]) => c === "send_message")).toBe(true));
     const actions = mocks.invoke.mock.calls.filter(([c]) => ["stop_tab", "set_tab_model", "send_message"].includes(c));
     expect(actions.map(([c]) => c)).toEqual(["stop_tab", "set_tab_model", "send_message"]);

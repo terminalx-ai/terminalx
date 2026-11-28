@@ -776,16 +776,28 @@ fn outside_workspace_read(bot_id: Option<&str>, input: &Value, cwd: Option<&str>
     };
     let resolved_target = resolved(&expanded, cwd);
 
-    let mut allowed: Vec<PathBuf> = Vec::new();
     // 1. The bot's own home folder (`$TERMINALX_HOME/bots/<bot_id>/`).
+    let mut bot_home_roots: Vec<PathBuf> = Vec::new();
     if let Some(id) = bot_id {
         if let Ok(home) = bot_store::home_dir(id) {
-            allowed.push(resolved(&home, None));
+            bot_home_roots.push(resolved(&home, None));
         }
     } else if let Some(ref r) = canonical_root {
         // Without a specific bot_id (direct `gate()` calls), allow files inside `$TERMINALX_HOME/bots/`.
-        allowed.push(r.join("bots"));
+        bot_home_roots.push(r.join("bots"));
     }
+    if bot_home_roots.iter().any(|root| path_is_or_under(&resolved_target, root)) {
+        return None;
+    }
+    // Never let a broad project/cwd (e.g. `/tmp` when `TERMINALX_HOME` is under
+    // `/tmp` on Linux) authorize reads of `$TERMINALX_HOME` files outside the
+    // bot's own home folder (such as `$TERMINALX_HOME/bots.json`).
+    if canonical_root.as_ref().is_some_and(|r| path_is_or_under(&resolved_target, r)) {
+        return Some(format!(
+            "TerminalX refused reading `{raw_target}`: bots may only read files inside their assigned workspace roots or their own bot home folder."
+        ));
+    }
+    let mut allowed: Vec<PathBuf> = Vec::new();
     // 2. Registered TerminalX projects.
     if let Ok((projects, _)) = crate::store::projects::list() {
         for project in projects {

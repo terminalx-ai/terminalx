@@ -133,10 +133,17 @@ function ScopedSchedulesDialog({ orgId, workspaceId, name, onClose }: SchedulesT
       return paused === 0 ? "No scheduled task of the organization was active." : `Paused ${paused} scheduled ${paused === 1 ? "task" : "tasks"} in the organization. Resume each one by hand.`;
     });
 
+  const [confirmClose, setConfirmClose] = useState(false);
+  const [formDirty, setFormDirty] = useState(false);
   const active = schedules?.filter((schedule) => schedule.state === "active").length ?? 0;
 
+  const requestClose = () => {
+    if (creating && formDirty) setConfirmClose(true);
+    else onClose();
+  };
+
   return (
-    <Dialog open onOpenChange={(open) => !open && onClose()}>
+    <Dialog open onOpenChange={(open) => { if (!open) requestClose(); }}>
       <DialogContent width="max-w-[40rem]" className="max-h-[85vh] overflow-y-auto" data-testid="cloud-schedules-dialog">
         <DialogHeader>
           <DialogTitle>Scheduled tasks for {name}</DialogTitle>
@@ -181,15 +188,31 @@ function ScopedSchedulesDialog({ orgId, workspaceId, name, onClose }: SchedulesT
             </p>
           )}
           {notice && <p className="text-muted-foreground">{notice}</p>}
+          {confirmClose && (
+            <div className="flex flex-wrap items-center gap-2 rounded-md border border-hairline bg-well/60 px-3 py-2 text-xs" role="alert" data-testid="cloud-schedules-discard-confirm">
+              <span className="min-w-0 flex-1">You have an unsaved scheduled task. Discard it and close?</span>
+              <Button size="xs" variant="destructive" onClick={() => { setConfirmClose(false); onClose(); }}>
+                Discard &amp; close
+              </Button>
+              <Button size="xs" variant="ghost" onClick={() => setConfirmClose(false)}>
+                Keep editing
+              </Button>
+            </div>
+          )}
           {/* The form opens where its button was, not under the list. */}
           {creating && (
             <NewScheduleForm
               orgId={orgId}
               workspaceId={workspaceId}
               contractsAvailable={contractsAvailable}
-              onCancel={() => setCreating(false)}
+              onDirtyChange={setFormDirty}
+              onCancel={() => {
+                setCreating(false);
+                setFormDirty(false);
+              }}
               onCreated={() => {
                 setCreating(false);
+                setFormDirty(false);
                 void reload();
               }}
             />
@@ -265,7 +288,7 @@ function ScheduleRow({
         <span className="min-w-0 truncate font-medium" title={schedule.name}>
           {schedule.name}
         </span>
-        <span className={`shrink-0 rounded-full px-1.5 py-px text-[10px] ${paused ? "bg-well text-muted-foreground" : "bg-emerald-500/15 text-emerald-600"}`}>{paused ? "Paused" : "Active"}</span>
+        <span className={`shrink-0 rounded-full px-1.5 py-px text-[10px] ${paused ? "bg-well text-muted-foreground" : "bg-add/15 text-add"}`}>{paused ? "Paused" : "Active"}</span>
         <span className="ml-auto flex shrink-0 items-center gap-1">
           {paused ? (
             <Button size="xs" variant="ghost" disabled={busy || blocked !== null} title={blocked ?? undefined} onClick={onAskResume}>
@@ -356,12 +379,18 @@ function CloudAutomationRuns({ schedule, orgId }: { schedule: CloudAutomationDto
   })}</ul>;
 }
 
-function NewScheduleForm({ orgId, workspaceId, contractsAvailable, onCancel, onCreated }: { orgId: string; workspaceId: string; contractsAvailable: boolean; onCancel: () => void; onCreated: () => void }) {
+function NewScheduleForm({ orgId, workspaceId, contractsAvailable, onDirtyChange, onCancel, onCreated }: { orgId: string; workspaceId: string; contractsAvailable: boolean; onDirtyChange?: (dirty: boolean) => void; onCancel: () => void; onCreated: () => void }) {
   const capture = useAutomationFence();
   const [form, setForm] = useState<AutomationForm>(blankAutomationForm);
   const [repositories, setRepositories] = useState<CloudSelectedRepository[]>([]);
   const [repositoryError, setRepositoryError] = useState<string | null>(null);
   const [revision, setRevision] = useState(0);
+  const [estimateAttempt, setEstimateAttempt] = useState(0);
+  useEffect(() => {
+    const dirty = Boolean(form.name.trim() || form.prompt.trim());
+    onDirtyChange?.(dirty);
+  }, [form.name, form.prompt, onDirtyChange]);
+  useEffect(() => () => onDirtyChange?.(false), [onDirtyChange]);
   useEffect(() => {
     if (form.triggerKind !== "github") return;
     const current = capture();
@@ -429,7 +458,7 @@ function NewScheduleForm({ orgId, workspaceId, contractsAvailable, onCancel, onC
       );
     }, ESTIMATE_DELAY_MS);
     return () => { stale = true; clearTimeout(timer); };
-  }, [orgId, workspaceId, estimateKey, quoteKey, capture]);
+  }, [orgId, workspaceId, estimateKey, quoteKey, estimateAttempt, capture]);
   const quote = answered && answered.key === quoteKey ? answered.quote : null;
   const failed = quoteError && quoteError.key === quoteKey ? quoteError.message : null;
 
@@ -637,7 +666,12 @@ function NewScheduleForm({ orgId, workspaceId, contractsAvailable, onCancel, onC
             {form.triggerKind === "timer" && quote.nextRunAt && <li>First run {whenText(quote.nextRunAt)} (your time).</li>}
           </ul>
         ) : failed ? (
-          <p className="text-destructive">The cost could not be read, so the task cannot be saved yet. {failed}</p>
+          <div className="flex flex-wrap items-center gap-2">
+            <p className="text-destructive" role="alert">The cost could not be read, so the task cannot be saved yet. {failed}</p>
+            <Button type="button" size="xs" variant="outline" onClick={() => { setQuoteError(null); setEstimateAttempt((n) => n + 1); }}>
+              Try again
+            </Button>
+          </div>
         ) : estimateInput ? (
           <p className="text-muted-foreground">Reading the cost…</p>
         ) : (

@@ -242,16 +242,16 @@ describe("a bot's chats have the app's session actions (PRO-521)", () => {
     let menu = await openMenu(row("Chats with Atlas", "Check the runner"));
     fireEvent.click(menu.getByRole("menuitem", { name: "Delete session…" }));
     const question = { name: 'Delete "Check the runner"?' };
-    let confirm = within(await screen.findByRole("dialog", question));
+    let confirm = within(await screen.findByRole("alertdialog", question));
     // Cancel keeps it.
     fireEvent.click(confirm.getByRole("button", { name: "Cancel" }));
-    await waitFor(() => expect(screen.queryByRole("dialog", question)).toBeNull());
+    await waitFor(() => expect(screen.queryByRole("alertdialog", question)).toBeNull());
     expect(calls("delete_session")).toEqual([]);
     expect(titles("Chats with Atlas")).toEqual(["Home chat", "Check the runner"]);
 
     menu = await openMenu(row("Chats with Atlas", "Check the runner"));
     fireEvent.click(menu.getByRole("menuitem", { name: "Delete session…" }));
-    confirm = within(await screen.findByRole("dialog", question));
+    confirm = within(await screen.findByRole("alertdialog", question));
     fireEvent.click(confirm.getByRole("button", { name: "Delete" }));
     await waitFor(() => expect(calls("delete_session")).toEqual([{ sessionId: "check" }]));
     await waitFor(() => expect(titles("Chats with Atlas")).toEqual(["Home chat"]));

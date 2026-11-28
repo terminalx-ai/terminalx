@@ -204,6 +204,31 @@ describe("a project's issue pipeline settings", () => {
     expect(await screen.findByText("projects.json is read-only")).toBeTruthy();
     expect(screen.getByRole("switch", { name: "A person does the merge" }).getAttribute("aria-checked")).toBe("false");
   });
+
+  it("keeps the dialog open and shows the error when saving lists fails on close (U-53)", async () => {
+    updateProject.mockRejectedValueOnce("disk full");
+    const onOpenChange = vi.fn();
+    render(<IssuePipelineSettingsDialog project={project()} open onOpenChange={onOpenChange} />);
+    const paths = screen.getByRole("textbox", { name: "Protected paths" });
+    fireEvent.change(paths, { target: { value: "db/" } });
+    fireEvent.keyDown(paths, { key: "Escape" });
+    expect(await screen.findByText("disk full")).toBeTruthy();
+    expect(onOpenChange).not.toHaveBeenCalledWith(false);
+  });
+
+  it("disables conflict limit and local checks when pipeline is off, and enables local checks live while typing (U-53)", () => {
+    const { rerender } = render(<IssuePipelineSettingsDialog project={project({ ...defaults, enabled: false })} open onOpenChange={() => {}} />);
+    const limitGroup = screen.getByRole("radiogroup", { name: "Conflict resolution limit" });
+    expect(within(limitGroup).getAllByRole("radio").every((radio) => (radio as HTMLButtonElement).disabled)).toBe(true);
+    expect((screen.getByRole("textbox", { name: "Local check command" }) as HTMLInputElement).disabled).toBe(true);
+    expect((screen.getByRole("switch", { name: "Use local checks instead of optional hosted checks" }) as HTMLButtonElement).disabled).toBe(true);
+
+    rerender(<IssuePipelineSettingsDialog project={project({ ...defaults, enabled: true, localCheckCommand: null })} open onOpenChange={() => {}} />);
+    const localToggle = screen.getByRole("switch", { name: "Use local checks instead of optional hosted checks" }) as HTMLButtonElement;
+    expect(localToggle.disabled).toBe(true);
+    fireEvent.change(screen.getByRole("textbox", { name: "Local check command" }), { target: { value: "pnpm test" } });
+    expect(localToggle.disabled).toBe(false);
+  });
 });
 
 describe("a cloud project's issue pipeline settings", () => {

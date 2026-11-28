@@ -467,7 +467,7 @@ export function openAutomation(id: string) {
 
 /** The filesystem-backed skills reader, optionally scoped to one agent tab. */
 export function openSkills(filter: State["skillsFilter"] = null) {
-  set({ selectedSessionId: null, view: "skills", skillsFilter: filter, selectedAutomationId: null });
+  set({ selectedSessionId: null, view: "skills", skillsFilter: filter, selectedAutomationId: null, navigationVersion: state.navigationVersion + 1 });
 }
 
 /**

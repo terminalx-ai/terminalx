@@ -319,7 +319,10 @@ unsafe fn read_access(owner: PSID, dacl: *mut ACL, descriptor: PSECURITY_DESCRIP
         if unsafe { GetAce(dacl, index, &mut ace) } == 0 {
             return Err(io::Error::last_os_error());
         }
-        // SAFETY: every ACE starts with an ACE_HEADER.
+        if ace.is_null() {
+            return Err(io::Error::other("null ACE pointer"));
+        }
+        // SAFETY: `ace` is non-null and every ACE starts with an ACE_HEADER.
         let header = unsafe { &*(ace as *const ACE_HEADER) };
         // Audit INHERIT_ONLY_ACE trustees too: an inherit-only allow ACE for
         // another account on a private directory would grant that account

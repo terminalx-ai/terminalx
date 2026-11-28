@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Modal, Pressable, RefreshControl, StyleSheet, Text, TextInput, View } from "react-native";
+import { KeyboardAvoidingView, Modal, Platform, Pressable, RefreshControl, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { keyboardAvoidingBehavior } from "@mobile/ui/keyboard";
 import { useCameraPermissions } from "expo-camera";
 import { useFocusEffect, useRouter } from "expo-router";
 import { Keyboard, Plus, QrCode, X } from "lucide-react-native";
@@ -114,7 +116,7 @@ function MachineRow({ machine, connection, divided, onPress, onMenu }: { machine
           : <Text numberOfLines={1} style={[styles.rowDetail, { color: toneColor(machine.tone, palette) }]}>{machine.state}</Text>}
       </View>
     </Pressable>
-    {pairable ? <Pressable accessibilityRole="button" accessibilityLabel={`Pair ${machine.name}`} onPress={onPress} style={({ pressed }) => [styles.pairButton, { backgroundColor: palette.raised, opacity: pressed ? 0.7 : 1 }]}><Text style={[styles.pairLabel, { color: palette.accent }]}>Pair</Text></Pressable> : null}
+    {pairable ? <Pressable accessibilityRole="button" accessibilityLabel={`Pair ${machine.name}`} hitSlop={5} onPress={onPress} style={({ pressed }) => [styles.pairButton, { backgroundColor: palette.raised, opacity: pressed ? 0.7 : 1 }]}><Text style={[styles.pairLabel, { color: palette.accent }]}>Pair</Text></Pressable> : null}
     <DeviceOptionsButton name={machine.name} onPress={onMenu} />
   </View>;
 }
@@ -130,6 +132,7 @@ function StateCard({ title, detail, action, onPress }: { title: string; detail: 
 
 function PairingSheet({ visible, server, progress, error, onClearError, onClose, onPair }: { visible: boolean; server: boolean; progress: PairingProgress | null; error: string | null; onClearError(): void; onClose(): void; onPair(code: string): Promise<void> }) {
   const { palette } = useTheme();
+  const insets = useSafeAreaInsets();
   const [mode, setMode] = useState<"scan" | "type">("scan");
   const [permission, requestPermission] = useCameraPermissions();
   const [code, setCode] = useState("");
@@ -177,30 +180,34 @@ function PairingSheet({ visible, server, progress, error, onClearError, onClose,
     void submit(data);
   };
   return <Modal visible={visible} animationType="slide" presentationStyle="pageSheet" onRequestClose={close}>
-    <View style={[styles.modal, { backgroundColor: palette.page }]}>
-      <View style={styles.modalHeader}>
-        <Text style={[styles.modalTitle, { color: palette.ink }]}>Add a machine</Text>
-        <Pressable accessibilityRole="button" accessibilityLabel="Close" disabled={busy} onPress={close} hitSlop={12}><X color={palette.ink} /></Pressable>
+    <KeyboardAvoidingView style={[styles.flex, { backgroundColor: palette.page }]} behavior={keyboardAvoidingBehavior()}>
+      <View style={[styles.modal, { backgroundColor: palette.page, paddingTop: (Platform.OS === "android" ? insets.top : 0) + 18 }]}>
+        <View style={styles.modalHeader}>
+          <Text style={[styles.modalTitle, { color: palette.ink }]}>Add a machine</Text>
+          <Pressable accessibilityRole="button" accessibilityLabel="Close" disabled={busy} onPress={close} hitSlop={12}><X color={palette.ink} /></Pressable>
+        </View>
+        <ScrollView style={styles.flex} keyboardShouldPersistTaps="handled" contentContainerStyle={[styles.modalBody, { paddingBottom: insets.bottom + 16 }]}>
+          {server && !progress ? <Text style={[styles.detail, { color: palette.muted }]}>{TERMINAL_PAIRING}. Scan the QR over Relay or on a network that can reach the server.</Text> : null}
+          <View style={[styles.segment, { backgroundColor: palette.raised }]}>
+            <Pressable accessibilityRole="button" disabled={busy} onPress={() => selectMode("scan")} style={[styles.segmentItem, mode === "scan" && { backgroundColor: palette.card }]}><QrCode size={16} color={mode === "scan" ? palette.ink : palette.muted} /><Text style={{ color: mode === "scan" ? palette.ink : palette.muted }}>Scan</Text></Pressable>
+            <Pressable accessibilityRole="button" disabled={busy} onPress={() => selectMode("type")} style={[styles.segmentItem, mode === "type" && { backgroundColor: palette.card }]}><Keyboard size={16} color={mode === "type" ? palette.ink : palette.muted} /><Text style={{ color: mode === "type" ? palette.ink : palette.muted }}>Type code</Text></Pressable>
+          </View>
+          {busy && progress ? <PairingApproval progress={progress} /> : visible && mode === "scan" ? permission?.granted ? <>
+            <PairingScanner key={cameraGeneration} enabled={!scanned && !busy} onScan={scan} />
+            {busy ? <Text style={[styles.detail, { color: palette.muted }]}>QR decoded. Pairing securely…</Text> : null}
+            <Button label={scanned ? "Scan again" : "Restart camera"} kind="secondary" disabled={busy} onPress={() => selectMode("scan")} />
+          </> : <View style={styles.cameraPermission}><Text style={[styles.heroDetail, { color: palette.muted }]}>Allow camera access to scan the pairing QR code on your computer or server.</Text><Button label="Allow camera" onPress={() => void requestPermission()} /></View> : mode === "type" ? <View style={styles.codeForm}>
+            <Text style={[styles.detail, { color: palette.muted }]}>Paste the full pairing link or its code. Pairing grants expire and can be used only once.</Text>
+            <TextInput value={code} editable={!busy} onChangeText={(value) => { onClearError(); setCode(value); }} autoCapitalize="none" autoCorrect={false} multiline placeholder="terminalx://pair?code=…" placeholderTextColor={palette.faint} style={[styles.codeInput, { color: palette.ink, backgroundColor: palette.card, borderColor: palette.border }]} />
+            <Button label={busy ? "Pairing securely…" : "Pair securely"} disabled={busy || !code.trim()} onPress={() => void submit(code)} />
+          </View> : null}
+          {error ? <Card style={[styles.errorPanel, { borderColor: `${palette.danger}66` }]}>
+            <Text style={[styles.errorTitle, { color: palette.ink }]}>Pairing didn’t finish</Text><Text style={[styles.detail, { color: palette.muted }]}>{error}</Text>
+            <View style={styles.actions}><Button label="Retry" kind="secondary" style={styles.flex} disabled={busy || !code.trim()} onPress={() => void submit(code)} /><Button label="Use QR code" kind="secondary" style={styles.flex} disabled={busy} onPress={() => selectMode("scan")} /></View>
+          </Card> : null}
+        </ScrollView>
       </View>
-      {server && !progress ? <Text style={[styles.detail, { color: palette.muted }]}>{TERMINAL_PAIRING}. Scan the QR over Relay or on a network that can reach the server.</Text> : null}
-      <View style={[styles.segment, { backgroundColor: palette.raised }]}>
-        <Pressable accessibilityRole="button" disabled={busy} onPress={() => selectMode("scan")} style={[styles.segmentItem, mode === "scan" && { backgroundColor: palette.card }]}><QrCode size={16} color={mode === "scan" ? palette.ink : palette.muted} /><Text style={{ color: mode === "scan" ? palette.ink : palette.muted }}>Scan</Text></Pressable>
-        <Pressable accessibilityRole="button" disabled={busy} onPress={() => selectMode("type")} style={[styles.segmentItem, mode === "type" && { backgroundColor: palette.card }]}><Keyboard size={16} color={mode === "type" ? palette.ink : palette.muted} /><Text style={{ color: mode === "type" ? palette.ink : palette.muted }}>Type code</Text></Pressable>
-      </View>
-      {busy && progress ? <PairingApproval progress={progress} /> : visible && mode === "scan" ? permission?.granted ? <>
-        <PairingScanner key={cameraGeneration} enabled={!scanned && !busy} onScan={scan} />
-        {busy ? <Text style={[styles.detail, { color: palette.muted }]}>QR decoded. Pairing securely…</Text> : null}
-        <Button label={scanned ? "Scan again" : "Restart camera"} kind="secondary" disabled={busy} onPress={() => selectMode("scan")} />
-      </> : <View style={styles.cameraPermission}><Text style={[styles.heroDetail, { color: palette.muted }]}>Allow camera access to scan the pairing QR code on your computer or server.</Text><Button label="Allow camera" onPress={() => void requestPermission()} /></View> : mode === "type" ? <View style={styles.codeForm}>
-        <Text style={[styles.detail, { color: palette.muted }]}>Paste the full pairing link or its code. Pairing grants expire and can be used only once.</Text>
-        <TextInput value={code} editable={!busy} onChangeText={(value) => { onClearError(); setCode(value); }} autoCapitalize="none" autoCorrect={false} multiline placeholder="terminalx://pair?code=…" placeholderTextColor={palette.faint} style={[styles.codeInput, { color: palette.ink, backgroundColor: palette.card, borderColor: palette.border }]} />
-        <Button label={busy ? "Pairing securely…" : "Pair securely"} disabled={busy || !code.trim()} onPress={() => void submit(code)} />
-      </View> : null}
-      {error ? <Card style={[styles.errorPanel, { borderColor: `${palette.danger}66` }]}>
-        <Text style={[styles.errorTitle, { color: palette.ink }]}>Pairing didn’t finish</Text><Text style={[styles.detail, { color: palette.muted }]}>{error}</Text>
-        <View style={styles.actions}><Button label="Retry" kind="secondary" style={styles.flex} disabled={busy || !code.trim()} onPress={() => void submit(code)} /><Button label="Use QR code" kind="secondary" style={styles.flex} disabled={busy} onPress={() => selectMode("scan")} /></View>
-      </Card> : null}
-    </View>
+    </KeyboardAvoidingView>
   </Modal>;
 }
 
@@ -244,18 +251,19 @@ const styles = StyleSheet.create({
   pairButton: { minHeight: 34, borderRadius: 10, paddingHorizontal: 12, justifyContent: "center", marginRight: 2 },
   pairLabel: { fontSize: 14, fontWeight: "600" },
   note: { fontSize: 13, lineHeight: 19, paddingHorizontal: 4 },
-  link: { alignSelf: "flex-start", paddingHorizontal: 4, paddingVertical: 4 },
+  link: { alignSelf: "flex-start", minHeight: 44, justifyContent: "center", paddingHorizontal: 4, paddingVertical: 4 },
   linkText: { fontSize: 14, fontWeight: "600" },
   errorPanel: { padding: 16, gap: 8 },
   errorTitle: { fontSize: 17, fontWeight: "700" },
   actions: { flexDirection: "row", gap: 8, marginTop: 4 },
   flex: { flex: 1 },
   stateCard: { padding: 16, gap: 10 },
-  modal: { flex: 1, paddingTop: 18, paddingHorizontal: 16, gap: 16 },
+  modal: { flex: 1, paddingHorizontal: 16, gap: 16 },
+  modalBody: { flexGrow: 1, gap: 16 },
   modalHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
   modalTitle: { fontSize: 24, fontWeight: "700" },
   segment: { flexDirection: "row", padding: 3, borderRadius: 10 },
-  segmentItem: { flex: 1, minHeight: 38, borderRadius: 8, flexDirection: "row", gap: 7, alignItems: "center", justifyContent: "center" },
+  segmentItem: { flex: 1, minHeight: 44, borderRadius: 8, flexDirection: "row", gap: 7, alignItems: "center", justifyContent: "center" },
   cameraPermission: { flex: 1, justifyContent: "center", gap: 16, paddingHorizontal: 28 },
   codeForm: { gap: 14 },
   approval: { padding: 20, gap: 12, alignItems: "center" },

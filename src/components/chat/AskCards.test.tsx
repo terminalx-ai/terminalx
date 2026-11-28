@@ -231,9 +231,11 @@ it("folds a long file behind \"Show all N lines\" and focuses Allow, last in the
   const more = screen.getByRole("button", { name: "Show all 40 lines" });
   expect(more.getAttribute("aria-expanded")).toBe("false");
 
-  // The card's first answer has focus, not the control in the diff above it.
+  // Focus lands on the card container rather than the affirmative Allow button (U-04),
+  // so an unintended Return/Space never approves an uninspected change.
   const allow = screen.getByRole("button", { name: /^Allow/ });
-  expect(document.activeElement).toBe(allow);
+  expect(document.activeElement).not.toBe(allow);
+  expect((document.activeElement as HTMLElement | null)?.hasAttribute("data-ask-card")).toBe(true);
   // The diff scrolls on its own, and can be reached by keyboard on the way back from the buttons.
   const region = screen.getByRole("region", { name: "Proposed changes" });
   expect(region.className).toMatch(/max-h-/);
@@ -309,7 +311,7 @@ const barLabels = () => [...document.querySelectorAll<HTMLButtonElement>("[data-
 it("ends the bar on the primary Allow, after Deny and the session allowance, and says the agent waits (PRO-382)", () => {
   render(<PermissionCard ask={threeWay} onAnswer={vi.fn()} takesKeys />);
   expect(barLabels()).toEqual(["DenyEsc", "Allow for this session", "Allow⏎"]);
-  expect(document.activeElement?.textContent).toBe("Allow⏎");
+  expect((document.activeElement as HTMLElement | null)?.hasAttribute("data-ask-card")).toBe(true);
   expect(screen.getByText("The agent waits until you decide.")).toBeTruthy();
 });
 
@@ -365,7 +367,47 @@ it("leaves focus in a terminal when a question arrives", () => {
   terminal.remove();
 });
 
-it("still takes the focus for Return when nothing else is being typed in (PRO-382)", () => {
-  render(<PermissionCard ask={threeWay} onAnswer={vi.fn()} takesKeys />);
-  expect((document.activeElement as HTMLElement | null)?.textContent).toBe("Allow⏎");
+it("focuses the card container (never Allow) when nothing else is being interacted with (PRO-382, U-04)", () => {
+  const { container } = render(<PermissionCard ask={threeWay} onAnswer={vi.fn()} takesKeys />);
+  expect((document.activeElement as HTMLElement | null)?.hasAttribute("data-ask-card")).toBe(true);
+  expect(document.activeElement).not.toBe(container.querySelector("button[data-primary]"));
+});
+
+it("leaves focus in browser, file tree, diff, conflict view, dialog, or menu when a permission card arrives (U-04)", () => {
+  for (const setup of [
+    () => { const el = document.createElement("div"); el.dataset.testid = "browser-surface"; el.tabIndex = 0; return el; },
+    () => { const el = document.createElement("div"); el.setAttribute("role", "tree"); el.tabIndex = 0; return el; },
+    () => { const el = document.createElement("div"); el.className = "diff-pane"; el.tabIndex = 0; return el; },
+    () => { const el = document.createElement("div"); el.dataset.testid = "conflict-view"; el.tabIndex = 0; return el; },
+    () => { const el = document.createElement("div"); el.setAttribute("role", "dialog"); el.tabIndex = 0; return el; },
+    () => { const el = document.createElement("div"); el.setAttribute("role", "menu"); el.tabIndex = 0; return el; },
+  ]) {
+    const el = setup();
+    document.body.appendChild(el);
+    el.focus();
+    const { unmount } = render(<PermissionCard ask={threeWay} onAnswer={vi.fn()} takesKeys />);
+    expect(document.activeElement).toBe(el);
+    unmount();
+    el.remove();
+  }
+});
+
+it("blocks editing and Enter-submitting QuestionCard while busy or blocked, and labels the free-text input (U-28)", () => {
+  const answer = vi.fn();
+  const ask = questionsAsk([{ question: "Which target?", multiSelect: false, freeText: true, options: [{ label: "Staging" }] }]);
+  const { container, rerender } = render(<QuestionCard ask={ask} onAnswer={answer} blockedReason="View only" />);
+  const input = screen.getByLabelText("Custom answer for: Which target?") as HTMLInputElement;
+  const choice = screen.getByRole("button", { name: "Staging" }) as HTMLButtonElement;
+  expect(input.disabled).toBe(true);
+  expect(choice.disabled).toBe(true);
+  fireEvent.click(choice);
+  expect(choice.getAttribute("aria-pressed")).toBe("false");
+  fireEvent.submit(container.querySelector("form")!);
+  expect(answer).not.toHaveBeenCalled();
+
+  rerender(<QuestionCard ask={ask} onAnswer={answer} busy />);
+  expect(input.disabled).toBe(true);
+  expect(choice.disabled).toBe(true);
+  fireEvent.submit(container.querySelector("form")!);
+  expect(answer).not.toHaveBeenCalled();
 });

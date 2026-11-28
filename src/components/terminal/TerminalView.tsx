@@ -50,7 +50,7 @@ export function themeFor(mode: "dark" | "light") {
         cursor: fg,
         cursorAccent: "#000",
         selectionBackground: "rgba(120,160,255,0.35)",
-        black: "#2b2d35",
+        black: "#666b7a",
         red: "#f07178",
         green: "#8fd694",
         yellow: "#f0c674",
@@ -58,7 +58,7 @@ export function themeFor(mode: "dark" | "light") {
         magenta: "#c792ea",
         cyan: "#89ddff",
         white: "#d6d6d6",
-        brightBlack: "#6b6f7b",
+        brightBlack: "#8b90a0",
         brightRed: "#ff8b92",
         brightGreen: "#a6e3a1",
         brightYellow: "#f9e2af",
@@ -76,19 +76,19 @@ export function themeFor(mode: "dark" | "light") {
         black: "#2b2d35",
         red: "#c0392b",
         green: "#2e7d32",
-        yellow: "#a06a00",
+        yellow: "#8a5a00",
         blue: "#1d5fd6",
         magenta: "#8e44ad",
         cyan: "#0e7c86",
-        white: "#c9c9c9",
-        brightBlack: "#7a7d86",
-        brightRed: "#d9534f",
-        brightGreen: "#3c9a40",
-        brightYellow: "#b8860b",
-        brightBlue: "#3b7ddd",
-        brightMagenta: "#a259c4",
-        brightCyan: "#1a98a3",
-        brightWhite: "#ffffff",
+        white: "#525760",
+        brightBlack: "#5f636d",
+        brightRed: "#c93b37",
+        brightGreen: "#2e7d32",
+        brightYellow: "#8a5a00",
+        brightBlue: "#2563c9",
+        brightMagenta: "#8440a3",
+        brightCyan: "#0d7480",
+        brightWhite: "#3a3e47",
       };
 }
 
@@ -312,7 +312,7 @@ export function TerminalView({
   const host = useRef<HTMLDivElement>(null);
   const frame = useRef<HTMLDivElement>(null);
   const drop = useTerminalDrop({ id, frame, enabled: visible, refusal: dropRefusal ?? (create ? REMOTE_DROP_REFUSAL : undefined) });
-  const { resolvedMode } = useTheme();
+  const { theme, resolvedMode } = useTheme();
   // Hidden-window overflow may retire a local parser. Showing the page must
   // reacquire its instance even when the selected tab has not changed.
   const pageShown = useSyncExternalStore(subscribeVisibility, pageVisible, () => true);
@@ -387,7 +387,7 @@ export function TerminalView({
   useEffect(() => {
     const inst = peekInstance(id);
     if (inst) inst.term.options.theme = themeFor(resolvedMode);
-  }, [id, resolvedMode]);
+  }, [id, theme, resolvedMode]);
 
   // Before paint, so a terminal that is shown is never a blank frame first.
   useLayoutEffect(() => {

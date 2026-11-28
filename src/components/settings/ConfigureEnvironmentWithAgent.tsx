@@ -319,7 +319,7 @@ export function ConfigureEnvironmentWithAgent({
           {stage.result.sources
             .filter((source) => source.agentCheckout === "differs")
             .map((source) => (
-              <p key={`${source.owner}/${source.name}`} className="text-xs text-amber-600 dark:text-amber-400" role="note">
+              <p key={`${source.owner}/${source.name}`} className="text-xs text-warning" role="note">
                 The agent's own copy of {source.owner}/{source.name} had commits or changed files that are not on GitHub. They were not checked: the results below are for {source.branch} as GitHub has it
                 {source.commit ? ` (${source.commit.slice(0, 12)})` : ""}.
               </p>

@@ -47,7 +47,7 @@ try {
       await row.hover();
       await row.getByRole("button", { name: /^Menu for / }).click();
       await page.getByRole("menu").first().getByRole("menuitem", { name: "Delete session…" }).click();
-      const dialog = page.getByRole("dialog", { name: 'Delete "Local long session"?' });
+      const dialog = page.getByRole("alertdialog", { name: 'Delete "Local long session"?' });
       await dialog.waitFor();
       await page.evaluate(() => Promise.all(document.getAnimations().map((animation) => animation.finished.catch(() => {}))));
       return dialog;
@@ -72,7 +72,7 @@ try {
         actionBackground: getComputedStyle(buttons.at(-1)).backgroundColor,
         cancelBackground: getComputedStyle(buttons[0]).backgroundColor,
         red,
-        focused: document.activeElement === buttons.at(-1),
+        focused: document.activeElement === buttons[0],
         titleAbove: !!title && title.getBoundingClientRect().bottom <= boxes[0].top,
         inWindow: box.left >= 0 && box.top >= 0 && box.right <= innerWidth && box.bottom <= innerHeight,
         centred: Math.abs(box.left + box.width / 2 - innerWidth / 2) <= 1,
@@ -86,6 +86,11 @@ try {
     const again = await ask();
     await page.keyboard.press("Enter");
     await again.waitFor({ state: "detached" });
+    const afterEnterOnCancel = await page.evaluate(() => window.__DELETED__.slice());
+
+    const confirm = await ask();
+    await confirm.getByRole("button", { name: "Delete", exact: true }).click();
+    await confirm.waitFor({ state: "detached" });
     await page.waitForFunction(() => window.__DELETED__.length > 0);
     const state = await page.evaluate(() => ({ deleted: window.__DELETED__.slice(), alerts: window.__CALLS__.filter((command) => command.startsWith("plugin:dialog|")) }));
 
@@ -93,13 +98,14 @@ try {
       "the title is the question and what happens is below it": card.titleAbove && /Its transcript and attachments are removed\./.test(card.text),
       "Cancel is on the left and the action on the right": JSON.stringify(card.buttons) === JSON.stringify(["Cancel", "Delete"]) && card.leftToRight,
       "the destructive action is red, Cancel is not": card.actionBackground === card.red && card.cancelBackground !== card.red,
-      "Return's button holds the focus": card.focused,
+      "Cancel holds initial focus on destructive confirmation": card.focused,
       "the card is centred in the window and nothing overflows": card.inWindow && card.centred && !card.overflow,
       "Escape cancels and deletes nothing": afterEscape.length === 0,
-      "Return deletes the session": state.deleted.length === 1,
+      "Return on initial focus cancels and deletes nothing": afterEnterOnCancel.length === 0,
+      "Delete button deletes the session": state.deleted.length === 1,
       "no system alert is asked for": state.alerts.length === 0,
       "no browser errors": errors.length === 0,
-    }, { card, afterEscape, state, errors });
+    }, { card, afterEscape, afterEnterOnCancel, state, errors });
     await page.close();
   }
 } finally {

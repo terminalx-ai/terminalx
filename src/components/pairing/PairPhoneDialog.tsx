@@ -241,8 +241,17 @@ function CodeColumn({ mode, signedIn, canGenerate }: { mode: PairingConnectionMo
           <EmptyCode expired={expired} busy={pairing.busy} error={generationError} mode={mode} signedIn={signedIn} />
         )}
       </div>
-      {showing && <div className="text-xs text-muted-foreground" aria-live="polite">Expires in {minutesSeconds(remaining)}</div>}
+      {showing && <div className="text-xs text-muted-foreground">Expires in {minutesSeconds(remaining)}</div>}
       {expired && !generationError && <div className="text-xs text-muted-foreground">Expired</div>}
+      <span className="sr-only" aria-live="polite">
+        {expired && !generationError
+          ? "Pairing code expired."
+          : showing && remaining <= 60_000
+            ? "Pairing code expires in less than a minute."
+            : showing
+              ? "Pairing code ready."
+              : ""}
+      </span>
       {showing && offer.connectionMode === "automatic" && !offer.directAvailable && (
         <p className="text-center text-[11px] text-faint">Nearby connections are unavailable right now. This code works through Relay.</p>
       )}

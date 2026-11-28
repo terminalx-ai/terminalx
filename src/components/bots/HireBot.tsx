@@ -76,8 +76,8 @@ export function HireBot({ initialRoleId }: { initialRoleId: string | null }) {
 
       {loadError && <p role="alert" className="mx-6 mt-3 rounded-md bg-destructive/10 px-3 py-2 text-[12.5px] text-destructive">Couldn't read the roles: {loadError}</p>}
 
-      <div className="flex min-h-0 flex-1">
-        <nav aria-label="Roles" className="w-[260px] shrink-0 overflow-y-auto scrollbar-thin border-r border-hairline px-3 py-3" data-testid="bots-hire-roles">
+      <div className="@container/hire-layout flex min-h-0 flex-1 flex-col @2xl/hire-layout:flex-row">
+        <nav aria-label="Roles" className="max-h-[35%] w-full shrink-0 overflow-y-auto scrollbar-thin border-b border-hairline px-3 py-3 @2xl/hire-layout:max-h-none @2xl/hire-layout:w-[260px] @2xl/hire-layout:border-r @2xl/hire-layout:border-b-0" data-testid="bots-hire-roles">
           {!templates && !loadError && <p role="status" className="flex items-center gap-2 px-2 text-[12.5px] text-faint"><Loader2 className="size-3.5 animate-spin" /> Reading the roles…</p>}
           {templates && shown.length === 0 && <p className="px-2 text-[12.5px] text-faint">No role matches.</p>}
           {groupRoles(shown).map((group) => (

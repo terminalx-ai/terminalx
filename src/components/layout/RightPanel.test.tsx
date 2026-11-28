@@ -49,3 +49,19 @@ it("attaches the Computer tab to the tab on screen and its own conversation (rev
   fireEvent.click(screen.getByRole("button", { name: "Computer" }));
   expect(computerPanel).toHaveBeenLastCalledWith(expect.objectContaining({ context: { sessionId: "session", tabId: "shown-tab", conversation: "shown-conversation" } }));
 });
+
+it("keeps panel tabs in a scrollable tablist with Refresh pinned outside and supports keyboard resizing", async () => {
+  const { clampPanelWidth } = await import("./RightPanel");
+  expect(clampPanelWidth(400, 760, 200)).toBe(240);
+
+  render(<RightPanel cwd="/repo" isGit branch="main" computer browser sessionId="s1" />);
+  const tablist = screen.getByRole("tablist", { name: "Panel views" });
+  expect(tablist.className).toContain("overflow-x-auto");
+  expect(tablist.className).toContain("min-w-0");
+  expect(tablist.contains(screen.getByRole("button", { name: "Refresh" }))).toBe(false);
+
+  const separator = screen.getByRole("separator", { name: "Resize right panel" });
+  expect(separator.tabIndex).toBe(0);
+  fireEvent.keyDown(separator, { key: "ArrowLeft" });
+  expect(document.documentElement.style.getPropertyValue("--panel-w")).toBe("376px");
+});

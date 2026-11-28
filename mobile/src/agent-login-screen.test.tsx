@@ -277,10 +277,26 @@ describe("Codex: sign in with ChatGPT", () => {
     expect(code()!.textContent).toBe("K7QM-4TXP");
     expect(off("Cancel sign-in")).toBe(true);
     expect(button("Open sign-in page")).toBeNull();
+    // U-09: while offline, users are not trapped — back button, swipe gesture, and Leave for now are enabled.
+    expect(header().dataset.back).toBe("true");
+    expect(header().dataset.swipe).toBe("true");
+    expect(button("Leave for now")).not.toBeNull();
+    expect(off("Leave for now")).toBe(false);
     service.restore("POST", "/codex/device-poll");
     await pass(5_000);
     expect(notice()).toBeNull();
     expect(button("Open sign-in page")).not.toBeNull();
+    expect(header().dataset.back).toBe("false");
+    expect(header().dataset.swipe).toBe("false");
+  });
+
+  it("offline while waiting: Leave for now returns to agent logins without clearing the saved attempt", async () => {
+    await withCode();
+    service.on("POST", "/codex/device-poll", offline);
+    await pass(5_000);
+    await press("Leave for now");
+    expect(mocks.dismissTo).toHaveBeenCalledExactlyOnceWith({ pathname: "/agent-logins", params: { orgId: ORG } });
+    expect(mocks.keychain.has(CODEX_LOGIN_ITEM)).toBe(true);
   });
 
   it("device sign-in unavailable: offers another try and the other way in", async () => {

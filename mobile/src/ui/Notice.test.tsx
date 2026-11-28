@@ -31,10 +31,10 @@ it("draws an info notice quietly: the raised fill, a hairline, muted words, and 
   expect(box().getAttribute("role")).toBeNull();
 });
 
-it("keeps the status colours and takes the light palette's ink and fill in light", async () => {
+it("uses WCAG AA darker status colours and takes the light palette's ink and fill in light", async () => {
   appearance.scheme = "light";
   await page.show(<Notice testID="notice" tone="danger" text="Device login failed. Start it again." />);
-  expect(page.styleOf(box())).toMatchObject({ borderColor: "#db695f57", backgroundColor: "#db695f12" });
+  expect(page.styleOf(box())).toMatchObject({ borderColor: "#991b1b57", backgroundColor: "#991b1b12" });
   expect(page.styleOf(page.byText("Device login failed. Start it again.")).color).toBe("#29282b");
   await page.show(<Notice testID="notice" tone="info" text="Owners and admins manage agent logins." />);
   expect(page.styleOf(box())).toMatchObject({ borderColor: "#706d7035", backgroundColor: "#f2f0ec" });

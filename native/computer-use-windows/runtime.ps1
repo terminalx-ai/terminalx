@@ -192,10 +192,10 @@ function Get-TerminalXWin32CacheKey([string]$Source = $script:TerminalXWin32Type
     } catch {
         [System.Environment]::Version.ToString()
     }
-    $psEdition = if ($null -ne $PSVersionTable.PSEdition) { [string]$PSVersionTable.PSEdition } else { "Desktop" }
+    $editionName = if ($null -ne $PSVersionTable.PSEdition) { [string]$PSVersionTable.PSEdition } else { "Desktop" }
     $psVersion = [string]$PSVersionTable.PSVersion
     $bitness = [string][IntPtr]::Size
-    $material = "$framework|$psEdition|$psVersion|$bitness|$Source"
+    $material = "$framework|$editionName|$psVersion|$bitness|$Source"
     $sha256 = [System.Security.Cryptography.SHA256]::Create()
     try {
         $hashBytes = $sha256.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($material))

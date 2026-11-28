@@ -84,13 +84,15 @@ it("shows the person's picture from the sign-in service in place of their initia
   expect(screen.getByTestId("account-picture").getAttribute("src")).toContain("email=b%40x.io");
 });
 
-it("logs out from the account menu", async () => {
+it("logs out from the account menu after confirmation", async () => {
   const { signOut } = await import("@/lib/account");
   publish(connected);
   render(<AccountSidebarEntry onOpenAccount={mocks.open} />);
   fireEvent.keyDown(screen.getByRole("button", { name: "Ada" }), { key: "Enter" });
   expect(await screen.findByText("ada@example.invalid")).toBeTruthy();
   fireEvent.click(screen.getByRole("menuitem", { name: "Log out" }));
+  expect(signOut).not.toHaveBeenCalled();
+  fireEvent.click(await screen.findByRole("button", { name: "Log out" }));
   expect(signOut).toHaveBeenCalledOnce();
   expect(mocks.open).not.toHaveBeenCalled();
 });

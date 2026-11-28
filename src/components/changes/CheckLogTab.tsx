@@ -9,10 +9,12 @@ import { showRerunFailed } from "@/lib/checkToasts";
 import { copyText } from "@/lib/clipboard";
 import { cn } from "@/lib/cn";
 import type { CheckLogEditorEntry } from "@/lib/editors";
+import { showError } from "@/lib/errorToasts";
 import { requestFixErrors } from "@/lib/fixCheckErrors";
 import { localGitSource } from "@/lib/gitSource";
 import { useShortcutKeycaps } from "@/lib/hotkeys";
 import { bindingText, joinKeycaps } from "@/lib/shortcuts";
+import { useTheme } from "@/lib/theme";
 import { ansiSpans, plainLog } from "./AnsiLog";
 import { webUrl } from "./PrChecks";
 
@@ -138,7 +140,7 @@ export function CheckLogTab({ entry, visible }: { entry: CheckLogEditorEntry; vi
         {source.rerunCheck && <Button size="sm" variant="outline" disabled={rerunning || running} onClick={() => void rerun()} title={failed ? "Re-run this run's failed jobs" : "Re-run this run"}>
           {rerunning ? <Loader2 className="animate-spin" /> : <RotateCcw />}Re-run job
         </Button>}
-        {runUrl && <WithTooltip label="Open on GitHub"><Button size="icon-sm" variant="ghost" aria-label="Open on GitHub" onClick={() => void openExternalWebUrl(runUrl)}><ExternalLink /></Button></WithTooltip>}
+        {runUrl && <WithTooltip label="Open on GitHub"><Button size="icon-sm" variant="ghost" aria-label="Open on GitHub" onClick={() => void openExternalWebUrl(runUrl).catch((e) => showError("Open check on GitHub", e))}><ExternalLink /></Button></WithTooltip>}
       </span>
     </div>
     <div className="flex h-9 shrink-0 items-center gap-2 border-b border-hairline px-3 text-xs text-muted-foreground">
@@ -160,14 +162,14 @@ export function CheckLogTab({ entry, visible }: { entry: CheckLogEditorEntry; vi
       </label>
     </div>
     {notice && <p role="status" className="shrink-0 border-b border-hairline px-3 py-1.5 text-xs text-muted-foreground">{notice}</p>}
-    <div ref={body} className="min-h-0 flex-1 overflow-auto bg-[#0e0f11] scrollbar-thin" data-testid="check-log-body">
-      {running ? <p className="p-3 text-xs text-[#9a9ca3]">This check is still running. Its log shows here once it finishes.</p>
-        : error ? <div role="alert" className="flex items-center gap-2 p-3 text-xs text-destructive">{error}<Button size="sm" variant="ghost" onClick={() => setTick((n) => n + 1)}>Retry</Button></div>
-        : !log ? <p role="status" className="p-3 text-xs text-[#9a9ca3]">Loading the log…</p>
-        : !log.text ? <p className="p-3 text-xs text-[#9a9ca3]">GitHub has no log output for this check. Open it on GitHub for details.</p>
+    <div ref={body} className="min-h-0 flex-1 overflow-auto bg-terminal scrollbar-thin" data-testid="check-log-body">
+      {running ? <p className="p-3 text-xs text-muted-foreground">This check is still running. Its log shows here once it finishes.</p>
+        : error ? <div role="alert" className="flex items-center gap-2 p-3 text-xs text-destructive">{error}<Button size="sm" variant="outline" onClick={() => setTick((n) => n + 1)}>Retry</Button></div>
+        : !log ? <p role="status" className="p-3 text-xs text-muted-foreground">Loading the log…</p>
+        : !log.text ? <p className="p-3 text-xs text-muted-foreground">GitHub has no log output for this check. Open it on GitHub for details.</p>
         : <>
-          {log.truncated && <p className="px-3 pt-2 text-xs text-[#9a9ca3]">Showing the last 256 KB. Open on GitHub for the whole log.</p>}
-          <pre tabIndex={0} aria-label="Check log" className="p-3 font-mono text-xs leading-[19px] whitespace-pre text-[#cfccc8] select-text">
+          {log.truncated && <p className="px-3 pt-2 text-xs text-muted-foreground">Showing the last 256 KB. Open on GitHub for the whole log.</p>}
+          <pre tabIndex={0} aria-label="Check log" className="p-3 font-mono text-xs leading-[19px] whitespace-pre text-foreground select-text">
             {lines.map((line, index) => <div key={index} data-line={index} className={cn(matches[Math.min(match, matches.length - 1)] === index && "bg-warning/15")}>
               <LogText text={line.text} needle={needle} />{"\n"}
             </div>)}
@@ -190,7 +192,8 @@ function Segment({ selected, onSelect, children }: { selected: boolean; onSelect
 
 /** A log line in its terminal colours, with what Find in log looks for marked. */
 function LogText({ text, needle }: { text: string; needle: string }) {
-  const spans = useMemo(() => ansiSpans(text), [text]);
+  const { resolvedMode } = useTheme();
+  const spans = useMemo(() => ansiSpans(text, resolvedMode), [text, resolvedMode]);
   // GitHub's own markers: a group's title faint, an error red.
   const marker: CSSProperties | undefined = /^##\[error\]/.test(text) ? { color: "var(--color-destructive, #fa686a)" } : /^##\[(group|endgroup)\]/.test(text) ? { opacity: 0.6 } : undefined;
   return <span style={marker}>{spans.map((span, i) => <span key={i} style={span.style}>{needle ? highlight(span.text, needle) : span.text}</span>)}</span>;

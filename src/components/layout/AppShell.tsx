@@ -310,7 +310,7 @@ export function AppShell() {
   // Stats & usage is a page of Settings (PRO-463): the status bar's usage menu, a session's cost, the shortcut and ⌘K open it there.
   const showStats = useCallback(() => openSettings("stats"), [openSettings]);
   useEffect(() => onStatsSettingsRequest(showStats), [showStats]);
-  const showSkills = useCallback(() => { if (canLeave()) openSkills(); }, [canLeave]);
+  const showSkills = useCallback(() => { if (!canLeave()) return; setSettingsOpen(false); openSkills(); }, [canLeave]);
   const showAutomations = useCallback(() => { if (!canLeave()) return; setSettingsOpen(false); openAutomations(); }, [canLeave]);
   const showQuickChat = useCallback(() => void showFloatingWindow().catch((e) => console.error("floating window", e)), []);
 
@@ -427,6 +427,7 @@ export function AppShell() {
           {/* It stays until notifications are allowed, so it is up here with the other notices that wait (PRO-327). */}
           <NotificationsOffCard />
           <MergedCleanupNotices />
+          <UpdateNotice />
         </>}
       >
         <CloseUndoNotices />
@@ -588,7 +589,6 @@ export function AppShell() {
           <CommandPalette open onOpenChange={setPaletteOpen} onOpenSettings={openSettings} onCreated={onCreated} />
         </Suspense>
       ) : null}
-      <UpdateNotice />
     </div>
     </SettingsLeaveBoundaryContext.Provider>
   );

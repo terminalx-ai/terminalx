@@ -324,7 +324,13 @@ function ProviderCard({ provider, allTokens, incompleteScope }: { provider: Prov
         <span className="rounded-full bg-veil-raised px-2 py-0.5 text-[10px] text-muted-foreground">
           {provider.enabled ? "Enabled" : "Off"}
         </span>
-        {!provider.enabled && <Button variant="outline" size="xs" className="ml-auto" disabled title="Provider support is not available yet">Enable</Button>}
+        {!provider.enabled && (
+          <WithTooltip label="Provider support is not available yet">
+            <span className="ml-auto inline-flex">
+              <Button variant="outline" size="xs" disabled title="Provider support is not available yet">Enable</Button>
+            </span>
+          </WithTooltip>
+        )}
       </div>
       <p className="mt-2 min-h-4 truncate text-xs text-muted-foreground" title={[provider.lastModel, provider.lastProject].filter(Boolean).join(" · ")}>
         {provider.lastModel ? `${provider.lastModel}${provider.lastProject ? ` · ${provider.lastProject}` : ""}` : "No model yet"}

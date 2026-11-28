@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import { CaseSensitive, Regex, Replace, ReplaceAll, Search, TextSearch as NoHitsIcon, ToggleLeft, WholeWord, X } from "@/icons";
 import { confirmInApp } from "@/lib/confirm";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
@@ -63,6 +63,10 @@ export function ProjectSearch({ sessionId, root, source, initialOpen }: { sessio
   const [near, setNear] = useState<{ text: string; byToggles: boolean } | null>(null);
   const input = useRef<HTMLInputElement>(null);
   const replaceInput = useRef<HTMLInputElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
+  const listId = useId();
+  const hitOptionId = (index: number) => `${listId}-hit-${index}`;
+  const [sel, setSel] = useState(0);
   const focusNext = useRef<"find" | "replace">(initialOpen?.mode ?? "find");
 
   useShortcut("files.search", () => {
@@ -140,6 +144,19 @@ export function ProjectSearch({ sessionId, root, source, initialOpen }: { sessio
     }
     return [...m.entries()];
   }, [result]);
+  const flatHits = useMemo(() => groups.flatMap(([, hits]) => hits), [groups]);
+  const hitIndex = useMemo(() => new Map(flatHits.map((h, i) => [hitKey(h), i])), [flatHits]);
+  const clampedSel = flatHits.length ? Math.min(sel, flatHits.length - 1) : -1;
+
+  useEffect(() => {
+    setSel(0);
+  }, [result]);
+
+  useEffect(() => {
+    if (!open || clampedSel < 0) return;
+    const el = listRef.current?.querySelector<HTMLElement>(`#${CSS.escape(hitOptionId(clampedSel))}`);
+    el?.scrollIntoView?.({ block: "nearest" });
+  }, [open, clampedSel, flatHits]);
 
   const occurrences = useMemo(() => (result?.hits ?? []).reduce((n, h) => n + h.matches.length, 0), [result]);
   const plan = useMemo(() => planReplace(result?.hits ?? [], excluded), [result, excluded]);
@@ -277,14 +294,33 @@ export function ProjectSearch({ sessionId, root, source, initialOpen }: { sessio
       <DialogContent showClose={false} width="max-w-[38.5rem]" className="bottom-auto top-11 gap-0 overflow-hidden p-0" onOpenAutoFocus={(e) => e.preventDefault()}>
         <DialogTitle className="sr-only">Search in project</DialogTitle>
         <div className="border-b border-hairline">
-          <div className="flex h-12 items-center gap-2.5 px-4">
+          <div className="flex h-12 items-center gap-2.5 px-4 focus-within:ring-2 focus-within:ring-inset focus-within:ring-ring/40">
             <Search className="size-4 shrink-0 text-muted-foreground" />
             <input
               ref={input}
               value={q}
+              role="combobox"
+              aria-label="Search in project"
+              aria-expanded={flatHits.length > 0}
+              aria-controls={listId}
+              aria-autocomplete="list"
+              aria-activedescendant={clampedSel >= 0 ? hitOptionId(clampedSel) : undefined}
               onChange={(e) => setQ(e.target.value)}
               onKeyDown={(e) => {
-                if (e.key === "Enter" && groups[0]?.[1][0]) choose(groups[0][1][0]);
+                if (e.key === "ArrowDown") {
+                  if (flatHits.length) {
+                    e.preventDefault();
+                    setSel((s) => Math.min(flatHits.length - 1, s + 1));
+                  }
+                } else if (e.key === "ArrowUp") {
+                  if (flatHits.length) {
+                    e.preventDefault();
+                    setSel((s) => Math.max(0, s - 1));
+                  }
+                } else if (e.key === "Enter" && !e.nativeEvent.isComposing && clampedSel >= 0) {
+                  e.preventDefault();
+                  choose(flatHits[clampedSel]);
+                }
               }}
               placeholder="Search in project"
               spellCheck={false}
@@ -294,7 +330,7 @@ export function ProjectSearch({ sessionId, root, source, initialOpen }: { sessio
             <Kbd className="shrink-0 text-xs text-muted-foreground">{keycaps("escape")[0]}</Kbd>
           </div>
           {replaceOpen && (
-            <div className="flex items-center gap-2.5 px-4 pb-2">
+            <div className="flex items-center gap-2.5 px-4 pb-2 focus-within:ring-2 focus-within:ring-inset focus-within:ring-ring/40">
               <Replace className="size-4 shrink-0 text-muted-foreground" />
               <input
                 ref={replaceInput}
@@ -350,7 +386,7 @@ export function ProjectSearch({ sessionId, root, source, initialOpen }: { sessio
             )}
           </div>
         </div>
-        <div className="max-h-[min(26rem,calc(100dvh-14rem))] overflow-auto p-1.5 scrollbar-thin">
+        <div ref={listRef} id={listId} role="listbox" aria-label="Search matches" className="max-h-[min(26rem,calc(100dvh-14rem))] overflow-auto p-1.5 scrollbar-thin">
           {error && <div className="px-3 py-2 text-xs text-destructive">{error}</div>}
           {report && <div className="px-3 py-2 text-xs text-add">{report}</div>}
           {groups.map(([path, hits]) => (
@@ -375,16 +411,23 @@ export function ProjectSearch({ sessionId, root, source, initialOpen }: { sessio
               </div>
               {hits.map((h) => {
                 const on = !excluded.has(hitKey(h));
+                const idx = hitIndex.get(hitKey(h)) ?? -1;
+                const isSelected = idx === clampedSel;
                 return (
                   <div
                     key={`${h.line}:${h.col}`}
+                    id={idx >= 0 ? hitOptionId(idx) : undefined}
+                    role="option"
+                    aria-selected={isSelected}
+                    onMouseEnter={() => idx >= 0 && setSel(idx)}
                     className={cn(
                       "group/hit flex w-full items-center gap-2 rounded-md px-2 text-left font-mono text-[12px] text-muted-foreground hover:bg-veil-strong hover:text-foreground",
+                      isSelected && "bg-veil-strong text-foreground",
                       replaceOpen && !on && "opacity-50",
                     )}
                   >
                     {replaceOpen && <SearchCheck label={`Include line ${h.line}`} checked={on} onChange={(v) => toggleHit(h, v)} />}
-                    <button type="button" onClick={() => choose(h)} className="flex min-w-0 flex-1 items-baseline gap-2 py-0.5 text-left outline-none">
+                    <button type="button" onClick={() => choose(h)} className="flex min-w-0 flex-1 items-baseline gap-2 rounded-sm py-0.5 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/40">
                       <span className="w-10 shrink-0 text-right text-faint">{h.line}</span>
                       <span className="truncate">
                         <HitLine hit={h} preview={replaceOpen && on} />

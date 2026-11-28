@@ -27,8 +27,11 @@
   --color-accent: var(--accent);
   --color-accent-foreground: var(--accent-fg);
   --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
   --color-warning: var(--warning);
   --color-info: var(--info);
+  --color-success: var(--accent-add);
+  --color-del: var(--destructive);
   --color-border: var(--border);
   --color-hairline: var(--hairline);
   --color-hairline-strong: var(--hairline-strong);
@@ -45,6 +48,7 @@
   --color-command: var(--accent-command);
   --color-mention: var(--accent-mention);
   --color-thinking: var(--accent-thinking);
+  --color-veil: var(--veil-raised);
   --color-veil-card: var(--veil-card);
   --color-veil-raised: var(--veil-raised);
   --color-veil-strong: var(--veil-strong);

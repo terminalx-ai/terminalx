@@ -1,7 +1,9 @@
+import { useState } from "react";
 import { PRIVACY_MESSAGE, useDataPrivacy } from "@/lib/dataPrivacy";
 import { Loader2, LogOut, Settings, UserRound } from "@/icons";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/menu";
 import { Button } from "@/components/ui/button";
+import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { openPasteLink, signIn, signOut, useAccount } from "@/lib/account";
 import { AccountAvatar } from "./AccountAvatar";
 import { RelayStatus } from "./RelayStatus";
@@ -11,6 +13,7 @@ import { cn } from "@/lib/cn";
 export function AccountSidebarEntry({ onOpenAccount }: { onOpenAccount: () => void }) {
   const privacy = useDataPrivacy();
   const account = useAccount();
+  const [confirmSignOut, setConfirmSignOut] = useState(false);
   // Dropped, or reconnecting after a drop (a retry is counted): the moments the line has something to say.
   const { relay } = usePairing().status;
   const relayDropped = relay.phase === "offline" || (relay.phase === "connecting" && relay.attempt > 0);
@@ -40,9 +43,23 @@ export function AccountSidebarEntry({ onOpenAccount }: { onOpenAccount: () => vo
             <DropdownMenuSeparator />
             <DropdownMenuItem onSelect={onOpenAccount}><Settings /> Settings</DropdownMenuItem>
             <DropdownMenuSeparator />
-            <DropdownMenuItem onSelect={() => void signOut()} disabled={account.busy}><LogOut /> Log out</DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => setConfirmSignOut(true)} disabled={account.busy}><LogOut /> Log out</DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
+        <ConfirmDialog
+          open={confirmSignOut}
+          title="Log out of TerminalX?"
+          action="Log out"
+          destructive
+          busy={account.busy}
+          onAction={() => {
+            setConfirmSignOut(false);
+            void signOut();
+          }}
+          onCancel={() => setConfirmSignOut(false)}
+        >
+          You will be signed out of {identity.email}. Cloud workspaces and synced settings will pause until you sign back in.
+        </ConfirmDialog>
         {privacy.enabled ? <span className="absolute right-2 bottom-1.5 left-10 truncate text-[10px] text-faint">{PRIVACY_MESSAGE}</span> : relayDropped && <RelayStatus />}
       </div>
     );

@@ -329,3 +329,21 @@ it("isolates this Mac's multi-person By preference by account and organization",
   localStorage.setItem(a, "[]"); expect(readOwners(a)).toEqual([]);
   localStorage.removeItem(a);
 });
+
+it("renders a single owner filter without duplicate By Anyone controls and yields hotkeys to open dialogs", () => {
+  state.sessions = [session("Alpha"), session("Beta")];
+  render(<AgentDashboard />);
+  expect(screen.queryByRole("button", { name: "By Anyone" })).toBeNull();
+  expect(screen.getByRole("button", { name: /^People:/ })).toBeTruthy();
+
+  const dialog = document.createElement("div");
+  dialog.setAttribute("role", "dialog");
+  document.body.appendChild(dialog);
+  try {
+    fireEvent.keyDown(window, { key: "ArrowDown" });
+    fireEvent.keyDown(window, { key: "Enter" });
+    expect(state.select).not.toHaveBeenCalled();
+  } finally {
+    dialog.remove();
+  }
+});

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Alert, FlatList, Keyboard, StyleSheet, View } from "react-native";
+import { Alert, BackHandler, FlatList, Keyboard, StyleSheet, View } from "react-native";
 import * as WebBrowser from "expo-web-browser";
 import { ExternalLink, FolderGit2, SearchX } from "lucide-react-native";
 import { CloudApiError, MAX_GITHUB_QUERY, MAX_GITHUB_REPOSITORIES, type CloudApi, type CloudGithubApp, type GithubLiveRepositories } from "@mobile/cloud/api";
@@ -25,13 +25,14 @@ const keyOfLiveRepository = (repository: LiveRepository) => String(repository.gi
  * lists it now, searched on the server. The set is saved whole, up to 100,
  * and replaces what was saved; a repository hidden by the search stays ticked.
  */
-export function ChooseRepositories({ api, orgId, app, installationId: opened, page, onBack, onSaved, onReload }: {
+export function ChooseRepositories({ api, orgId, app, installationId: opened, page, onRegisterBack, onBack, onSaved, onReload }: {
   api: Pick<CloudApi, "githubRepositories" | "saveGithubRepositories">;
   orgId: string;
   app: CloudGithubApp;
   /** The installation to open on. */
   installationId: string;
   page: RepositoriesPage;
+  onRegisterBack?(handler: (() => void) | null): void;
   onBack(): void;
   /** The set was saved; the server's answer is the organization's new status. */
   onSaved(app: CloudGithubApp): void;
@@ -127,12 +128,26 @@ export function ChooseRepositories({ api, orgId, app, installationId: opened, pa
   };
 
   const leave = () => {
+    if (picking) { setPicking(false); return; }
     if (!edited || saving) return onBack();
     Alert.alert("Leave without saving?", "The repositories you chose are not saved for the organization yet.", [
       { text: "Keep choosing", style: "cancel" },
       { text: "Leave", style: "destructive", onPress: onBack },
     ]);
   };
+  const leaveRef = useRef(leave);
+  leaveRef.current = leave;
+  useEffect(() => {
+    onRegisterBack?.(() => leaveRef.current());
+    const subscription = BackHandler.addEventListener("hardwareBackPress", () => {
+      leaveRef.current();
+      return true;
+    });
+    return () => {
+      subscription.remove();
+      onRegisterBack?.(null);
+    };
+  }, [onRegisterBack]);
 
   const toggleGrant = useCallback(
     (githubRepositoryId: number) => setDraft((held) => toggled(held, installationId, githubRepositoryId)),

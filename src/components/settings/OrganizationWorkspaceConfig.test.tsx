@@ -178,6 +178,8 @@ it("binds and unbinds secrets", async () => {
   fireEvent.click(screen.getByRole("button", { name: "Bind" }));
   await waitFor(() => expect(api.bindSecret).toHaveBeenCalledWith("NPM_TOKEN", "workspace", "ws_1", "NPM_TOKEN", "rev-1"));
   fireEvent.click(screen.getByRole("button", { name: "Unbind NPM_TOKEN from github.com/acme/app" }));
+  expect(api.unbindSecret).not.toHaveBeenCalled();
+  fireEvent.click(await screen.findByRole("button", { name: "Unbind" }));
   await waitFor(() => expect(api.unbindSecret).toHaveBeenCalledWith("binding_1", "rev-1"));
   expect(await screen.findByText("Not bound to any workspace.")).toBeTruthy();
 });

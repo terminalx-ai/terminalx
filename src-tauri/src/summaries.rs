@@ -188,7 +188,8 @@ pub fn read_log_tail(path: &Path, waiting: bool) -> LogTail {
         Ok(t) => t,
         Err(e) => {
             if e.kind() != io::ErrorKind::NotFound {
-                log::warn!("summary tail {}: {e}", path.display());
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("log");
+                log::warn!("summary tail {name}: {e}");
             }
             return out;
         }
@@ -203,7 +204,8 @@ pub fn read_log_tail(path: &Path, waiting: bool) -> LogTail {
             Ok(Some(l)) => l,
             Ok(None) => break,
             Err(e) => {
-                log::warn!("summary tail {}: {e}", path.display());
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("log");
+                log::warn!("summary tail {name}: {e}");
                 break;
             }
         };

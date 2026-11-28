@@ -10,7 +10,8 @@ import { localMergePrompt } from "@/lib/localMerge";
 import { applyEvent } from "@/lib/agentEvents";
 import { openSettle } from "@/lib/dialogs";
 import { turnLive } from "@/lib/workspaceRemoval";
-import { setDraft } from "@/lib/drafts";
+import { confirmInApp } from "@/lib/confirm";
+import { getDraft, setDraft } from "@/lib/drafts";
 import { showPanelTab } from "@/lib/panelTab";
 import { patchTab, useSessionSelector } from "@/lib/sessions";
 import { relativeTime } from "@/lib/time";
@@ -175,14 +176,24 @@ export function BranchPanel({
       .catch((e) => setActionError(errorMessage(e)))
       .finally(() => setWorking(null));
   };
-  const ask = (key: string, message: string) => {
-    if (!session?.activeTab) return;
-    setDraft(session.activeTab, message);
+  const ask = async (key: string, message: string) => {
+    const tabId = session?.activeTab;
+    if (!tabId) return;
+    const existing = getDraft(tabId).trim();
+    if (existing && existing !== message.trim()) {
+      const ok = await confirmInApp({
+        title: "Replace your unsent message?",
+        body: "You already have a draft in the composer. Replacing it will discard what you typed.",
+        action: "Replace draft",
+      });
+      if (!ok) return;
+    }
+    setDraft(tabId, message);
     setAsked(key);
   };
   const askButton = (key: string, message: string, label = "Ask agent") =>
     session?.activeTab && (
-      <button type="button" onClick={() => ask(key, message)} title="Write a message asking the agent in this chat" aria-label={`${label}: ${key}`} className={AGENT_BUTTON}>
+      <button type="button" onClick={() => void ask(key, message)} title="Write a message asking the agent in this chat" aria-label={`${label}: ${key}`} className={AGENT_BUTTON}>
         <Sparkles className="size-3" aria-hidden />
         {asked === key ? "In your message" : label}
       </button>

@@ -73,7 +73,7 @@ describe("TerminalX account surfaces", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Sign out" }));
     expect(screen.getByText(/QR and code pairings keep working/)).toBeTruthy();
-    const signOutDialog = screen.getByRole("dialog", { name: "Sign out of TerminalX?" });
+    const signOutDialog = screen.getByRole("alertdialog", { name: "Sign out of TerminalX?" });
     fireEvent.click(within(signOutDialog).getByRole("button", { name: "Sign out" }));
     await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("account_sign_out"));
   });

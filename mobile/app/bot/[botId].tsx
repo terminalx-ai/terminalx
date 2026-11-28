@@ -74,13 +74,15 @@ export default function BotScreen() {
       </View>
       {bot ? <GlassIconButton testID="bot-pause" label={bot.paused ? `Resume ${bot.name}` : `Pause ${bot.name}`} disabled={switching || !connected} icon={bot.paused ? <Play size={18} color={palette.ink} strokeWidth={1.8} /> : <Pause size={18} color={palette.ink} strokeWidth={1.8} />} onPress={togglePause} /> : null}
     </View>
-    <View accessibilityRole="tablist" style={[styles.parts, { borderBottomColor: palette.border }]}>
-      {PARTS.map((each) => {
-        const on = each === part;
-        return <Pressable key={each} accessibilityRole="tab" accessibilityState={{ selected: on }} onPress={() => setPart(each)} style={[styles.part, on && { borderBottomColor: palette.ink }]}>
-          <Text style={[styles.partText, { color: on ? palette.ink : palette.muted, fontWeight: on ? "600" : "400" }]}>{each}</Text>
-        </Pressable>;
-      })}
+    <View accessibilityRole="tablist" style={[styles.partsBar, { borderBottomColor: palette.border }]}>
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.parts}>
+        {PARTS.map((each) => {
+          const on = each === part;
+          return <Pressable key={each} accessibilityRole="tab" accessibilityState={{ selected: on }} onPress={() => setPart(each)} style={[styles.part, on && { borderBottomColor: palette.ink }]}>
+            <Text style={[styles.partText, { color: on ? palette.ink : palette.muted, fontWeight: on ? "600" : "400" }]}>{each}</Text>
+          </Pressable>;
+        })}
+      </ScrollView>
     </View>
     <ScrollView style={styles.page} contentContainerStyle={[styles.content, { paddingBottom: insets.bottom + 32 }]} refreshControl={<RefreshControl refreshing={pull.refreshing} onRefresh={pull.onRefresh} tintColor={palette.accent} />}>
       {home.offered === false ? <EmptyState title="Bots are off" detail={botsOffDetail(app.activeHost?.platform)} />
@@ -106,7 +108,7 @@ function HomePart({ home, connected, answering, errors, onAnswer, onOpen, onResu
   return <>
     {home.bot.paused ? <Card style={styles.paused}>
       <Text style={[styles.pausedText, { color: palette.ink }]}>{`Paused ${ago(home.bot.paused.at, now) === "now" ? "just now" : `${ago(home.bot.paused.at, now)} ago`}${home.bot.paused.by === "owner" ? " by you" : ""}. It starts no new work and its duties do not wake; it still answers you in its chat.`}</Text>
-      <Pressable accessibilityRole="button" onPress={onResume} disabled={!connected}><Text style={[styles.link, { color: palette.accent }]}>{`Resume ${home.bot.name}`}</Text></Pressable>
+      <Pressable accessibilityRole="button" onPress={onResume} disabled={!connected} style={styles.resumeLink}><Text style={[styles.link, { color: palette.accent }]}>{`Resume ${home.bot.name}`}</Text></Pressable>
     </Card> : null}
     {asking.length ? <>
       <NeedsYouHeading count={asking.length} />
@@ -187,12 +189,14 @@ const styles = StyleSheet.create({
   titles: { flex: 1, gap: 1 },
   name: { fontSize: 18, fontWeight: "700" },
   role: { fontSize: 13 },
-  parts: { flexDirection: "row", gap: 20, paddingHorizontal: 18, borderBottomWidth: StyleSheet.hairlineWidth },
-  part: { paddingVertical: 10, borderBottomWidth: 2, borderBottomColor: "transparent" },
+  partsBar: { borderBottomWidth: StyleSheet.hairlineWidth },
+  parts: { flexDirection: "row", gap: 20, paddingHorizontal: 18 },
+  part: { minHeight: 44, justifyContent: "center", paddingVertical: 10, borderBottomWidth: 2, borderBottomColor: "transparent" },
   partText: { fontSize: 15 },
   content: { paddingHorizontal: 16, paddingTop: 12, gap: 12 },
   paused: { padding: 14, gap: 8 },
   pausedText: { fontSize: 14, lineHeight: 20 },
+  resumeLink: { alignSelf: "flex-start", minHeight: 44, justifyContent: "center" },
   link: { fontSize: 15, fontWeight: "600" },
   item: { flexDirection: "row", alignItems: "center", gap: 12, paddingHorizontal: 14, paddingVertical: 12 },
   itemText: { flex: 1, gap: 2 },

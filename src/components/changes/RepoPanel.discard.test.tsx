@@ -37,7 +37,7 @@ async function askDiscard(path: string, list: "Staged" | "Unstaged") {
   const section = await screen.findByRole("region", { name: list });
   fireEvent.click(await within(section).findByRole("button", { name: new RegExp(path.split("/").pop()!.replace(".", "\\.")) }));
   fireEvent.click(await screen.findByRole("button", { name: `Discard from the diff header of ${path}` }));
-  return screen.findByRole("dialog", { name: `Discard changes to ${path}?` });
+  return screen.findByRole("alertdialog", { name: `Discard changes to ${path}?` });
 }
 
 // PRO-400 review: a discard puts the index and the file back to the last commit, so the card must not describe one side of the index.

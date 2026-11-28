@@ -51,6 +51,7 @@ export function LocalVmTaskCard({ task, destinationRoot, readOnly, manualControl
   const [artifact, setArtifact] = useState<LocalVmArtifactContent | null>(null);
   const [patch, setPatch] = useState<LocalVmArtifact | null>(null);
   const [patchRoot, setPatchRoot] = useState(destinationRoot);
+  const [patchError, setPatchError] = useState<string | null>(null);
   const [patchResult, setPatchResult] = useState<LocalVmPatchResult | null>(null);
   const [takeoverOpen, setTakeoverOpen] = useState(false);
   const [abandonOpen, setAbandonOpen] = useState(false);
@@ -78,11 +79,15 @@ export function LocalVmTaskCard({ task, destinationRoot, readOnly, manualControl
   const progress = latestTaskProgress(task);
   const href = useMemo(() => artifact ? artifactHref(artifact) : null, [artifact]);
 
-  async function run(label: string, action: () => Promise<void>) {
+  async function run(label: string, action: () => Promise<void>, onError?: (message: string) => void) {
     if (lock.current) return;
-    lock.current = true; setBusy(label); setError(null); setResult(undefined);
+    lock.current = true; setBusy(label); if (!onError) setError(null); setResult(undefined);
     try { await action(); }
-    catch (error) { setError(errorMessage(error)); }
+    catch (error) {
+      const msg = errorMessage(error);
+      if (onError) onError(msg);
+      else setError(msg);
+    }
     finally { await reconcileLocalVmState(); lock.current = false; setBusy(null); }
   }
 
@@ -134,7 +139,7 @@ export function LocalVmTaskCard({ task, destinationRoot, readOnly, manualControl
         });
       }}><label className="block space-y-1"><span>Follow-up for this task</span><textarea className={localVmFieldClass} rows={2} value={followup} disabled={!!busy || !canReply || !!followupRetry.current} onChange={(event) => setFollowup(event.target.value)} /></label><Button type="submit" size="xs" variant="outline" disabled={!!busy || !canReply || !followup.trim()}>{followupRetry.current ? "Retry same follow-up" : "Send task follow-up"}</Button>{followupRetry.current ? <p className="text-warning">The previous follow-up may have arrived. Retry keeps the same text and key.</p> : null}</form> : null}
       {task.artifacts.length ? <section aria-label="Task artifacts" className="space-y-2"><h5 className="font-medium">Artifacts</h5>{task.artifacts.map((item) => <div key={item.id} className="space-y-1">
-        <div className="flex flex-wrap items-center gap-2"><span className="break-all">{item.name} · {item.bytes} bytes</span><Button size="xs" variant="ghost" disabled={!!busy} onClick={() => void run("Fetching artifact", async () => { setArtifact(await localVmRequest("task.artifact", { target: task.target, artifactId: item.id })); })}>View artifact</Button>{/\.(?:diff|patch)$/i.test(item.name) || /(?:patch|diff)/i.test(item.mediaType) ? <Button size="xs" variant="outline" disabled={!!busy || readOnly} onClick={() => { setPatch(item); setPatchRoot(destinationRoot); setPatchResult(null); }}>Import patch…</Button> : null}</div>
+        <div className="flex flex-wrap items-center gap-2"><span className="break-all">{item.name} · {item.bytes} bytes</span><Button size="xs" variant="ghost" disabled={!!busy} onClick={() => void run("Fetching artifact", async () => { setArtifact(await localVmRequest("task.artifact", { target: task.target, artifactId: item.id })); })}>View artifact</Button>{/\.(?:diff|patch)$/i.test(item.name) || /(?:patch|diff)/i.test(item.mediaType) ? <Button size="xs" variant="outline" disabled={!!busy || readOnly} onClick={() => { setPatch(item); setPatchRoot(destinationRoot); setPatchError(null); setPatchResult(null); }}>Import patch…</Button> : null}</div>
         <p className="break-all text-muted-foreground">SHA-256 {item.sha256}{item.expiresAt ? ` · expires ${item.expiresAt}` : ""}</p>
       </div>)}</section> : null}
       {artifact ? <section aria-label="Artifact preview" className="space-y-1"><h5 className="font-medium">{artifact.name}</h5>{typeof artifact.content === "string" ? <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-words bg-well p-2">{artifact.content}</pre> : artifact.contentBase64 !== undefined ? <p>Binary artifact · {artifact.mediaType}</p> : null}{href ? <a className="underline" href={href} download={artifact.name} rel="noreferrer">{artifact.contentBase64 !== undefined ? "Download artifact" : "Open or save artifact"}</a> : <p>No safe downloadable content was returned by the guest.</p>}</section> : null}
@@ -166,19 +171,21 @@ export function LocalVmTaskCard({ task, destinationRoot, readOnly, manualControl
           void run("Abandoning task", async () => { setResult(await localVmRequest("task.abandon", { target: task.target, confirm: true })); });
         }}>Abandon task</Button></DialogFooter>
       </DialogContent></Dialog>
-      <Dialog open={!!patch} onOpenChange={(open) => { if (!open) setPatch(null); }}><DialogContent>
+      <Dialog open={!!patch} onOpenChange={(open) => { if (!open) { setPatch(null); setPatchError(null); } }}><DialogContent>
         <DialogHeader><DialogTitle>Import patch into this Mac?</DialogTitle><DialogDescription>This explicitly changes files and the Git index in the destination below. The backend checks the patch against the destination and reports conflicts. Inspect the artifact first; a conflict requires manual resolution. Guest files are never opened as host paths.</DialogDescription></DialogHeader>
         <p className="break-all text-xs">{patch?.name} · {task.target.environmentId} / {task.target.generation} / {task.target.workspaceId} / {task.target.taskId}</p>
-        <label className="block space-y-1 text-xs"><span>Destination project directory on this Mac</span><input className={localVmFieldClass} value={patchRoot} disabled={!!busy} onChange={(event) => setPatchRoot(event.target.value)} /></label>
-        <DialogFooter><Button variant="ghost" onClick={() => setPatch(null)}>Cancel import</Button><Button disabled={!!busy || readOnly || !patchRoot.trim()} onClick={() => {
+        <label className="block space-y-1 text-xs"><span>Destination project directory on this Mac</span><input className={localVmFieldClass} value={patchRoot} disabled={!!busy} onChange={(event) => { setPatchRoot(event.target.value); setPatchError(null); }} /></label>
+        {patchError ? <p role="alert" className="text-xs text-destructive">{patchError}</p> : null}
+        <DialogFooter><Button variant="ghost" onClick={() => { setPatch(null); setPatchError(null); }}>Cancel import</Button><Button disabled={!!busy || readOnly || !patchRoot.trim()} onClick={() => {
           const selected = patch;
           if (!selected) return;
+          setPatchError(null);
           void run("Checking and importing patch", async () => {
             assertLocal(patchRoot, "patch destination");
             if (!patchRoot.startsWith("/")) throw new Error("Select an absolute host destination directory.");
             const response = await localVmRequest("task.applyPatch", { target: task.target, artifactId: selected.id, destinationRoot: patchRoot, confirm: true });
-            setPatchResult(response); setPatch(null);
-          });
+            setPatchResult(response); setPatchError(null); setPatch(null);
+          }, setPatchError);
         }}>Check conflicts and import</Button></DialogFooter>
       </DialogContent></Dialog>
     </article>

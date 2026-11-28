@@ -1,5 +1,6 @@
 import { useCallback } from "react";
-import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { KeyboardAvoidingView, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { keyboardAvoidingBehavior } from "@mobile/ui/keyboard";
 import { Stack, useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
 import { ChevronRight } from "lucide-react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -38,7 +39,7 @@ export default function OrganizationScreen() {
   const open = (step: SetupStepKey) => (manages && listed && pages(step) ? () => router.push(stepHref(step, listed)) : undefined);
   return <>
     <Stack.Screen options={{ title: organization?.name || "Organization" }} />
-    {catalog && organization ? <ScrollView contentInsetAdjustmentBehavior="automatic" style={{ backgroundColor: palette.page }} contentContainerStyle={[styles.page, { paddingBottom: insets.bottom + 24 }]}>
+    {catalog && organization ? <KeyboardAvoidingView style={[styles.flex, { backgroundColor: palette.page }]} behavior={keyboardAvoidingBehavior()} keyboardVerticalOffset={insets.top + 44}><ScrollView contentInsetAdjustmentBehavior="automatic" keyboardShouldPersistTaps="handled" style={{ backgroundColor: palette.page }} contentContainerStyle={[styles.page, { paddingBottom: insets.bottom + 24 }]}>
       <Card style={styles.block}>
         <Text style={[styles.label, { color: palette.muted }]}>Organization</Text>
         <Text selectable style={[styles.name, { color: palette.ink }]}>{organization.name}</Text>
@@ -56,7 +57,7 @@ export default function OrganizationScreen() {
         onDeleted={() => router.back()} />
         // A server that takes deletion from desktop tokens only (terminalx-saas#279): say where it can be done.
         : organizationDeletionOffered(organization) ? <Text style={[styles.note, { color: palette.muted }]}>To delete this organization, use the TerminalX desktop app or the web console. Your account service does not take deletion from the phone yet.</Text> : null}
-    </ScrollView> : <EmptyState title="Organization unavailable" detail={catalog ? "It is no longer on this account. Go back to see your organizations." : "Sign in to see your organizations."} />}
+    </ScrollView></KeyboardAvoidingView> : <EmptyState title="Organization unavailable" detail={catalog ? "It is no longer on this account. Go back to see your organizations." : "Sign in to see your organizations."} />}
   </>;
 }
 

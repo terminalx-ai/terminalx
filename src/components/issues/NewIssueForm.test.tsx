@@ -2,6 +2,7 @@ import "@testing-library/dom";
 import type { ReactNode } from "react";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { answerConfirm, pendingConfirm } from "@/lib/confirm";
 import { setPrefs } from "@/lib/prefs";
 import type { Issue } from "@/lib/api";
 import type { IssueCreate, IssueProvider } from "@/lib/issueOps";
@@ -175,7 +176,7 @@ describe("NewIssueForm", () => {
     const detail = screen.getByTestId("issue-detail");
     expect(within(detail).getByRole("button", { name: "Copy #101" })).toBeTruthy();
     expect(within(detail).getByRole("button", { name: "Start session" })).toBeTruthy();
-    expect(within(detail).getByRole("button", { name: "Edit title" }).textContent).toBe("The timeout is too short");
+    expect(within(detail).getByRole("button", { name: "Edit title: The timeout is too short" }).textContent).toBe("The timeout is too short");
     const listed = screen.getAllByRole("button").find((button) => button.closest("ul") && button.textContent?.includes("#101"));
     expect(listed).toBeTruthy();
     // The draft goes once the issue exists.
@@ -483,7 +484,7 @@ describe("NewIssueForm", () => {
     await waitFor(() => expect(screen.queryByTestId("new-issue")).toBeNull());
 
     // A read too soon to hold it: still listed, as the detail pane last had it.
-    fireEvent.click(within(screen.getByTestId("issue-detail")).getByRole("button", { name: "Edit title" }));
+    fireEvent.click(within(screen.getByTestId("issue-detail")).getByRole("button", { name: /^Edit title:/ }));
     const edit = within(screen.getByTestId("issue-detail")).getByRole("textbox", { name: "Title" });
     fireEvent.change(edit, { target: { value: "Renamed since" } });
     fireEvent.keyDown(edit, { key: "Enter" });
@@ -531,6 +532,22 @@ describe("NewIssueForm", () => {
     listsNew = true;
     await refresh();
     await waitFor(() => expect(listed("#101")).toBeUndefined());
+  });
+
+  it("confirms before discarding a draft and keeps it when canceled (U-48)", async () => {
+    const form = await openForm("github");
+    const title = within(form).getByRole("textbox", { name: "Title" }) as HTMLInputElement;
+    fireEvent.change(title, { target: { value: "Keep this draft" } });
+    fireEvent.click(within(form).getByRole("button", { name: "Discard draft" }));
+    await waitFor(() => expect(pendingConfirm()?.request.title).toBe("Discard issue draft?"));
+    act(() => answerConfirm(pendingConfirm()!.id, "cancel"));
+    await act(async () => {});
+    expect(title.value).toBe("Keep this draft");
+
+    fireEvent.click(within(form).getByRole("button", { name: "Discard draft" }));
+    await waitFor(() => expect(pendingConfirm()?.request.title).toBe("Discard issue draft?"));
+    act(() => answerConfirm(pendingConfirm()!.id, "action"));
+    await waitFor(() => expect(title.value).toBe(""));
   });
 });
 

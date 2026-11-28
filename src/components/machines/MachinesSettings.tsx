@@ -297,7 +297,10 @@ function PairingCode() {
         <div className="grid gap-1.5" data-testid="machine-pairing-code">
           <code className="block break-all rounded-lg border border-hairline-strong bg-well px-3 py-2 font-mono text-[12.5px] leading-[19px]">{live.code}</code>
           <div className="flex items-center gap-2 text-[12.5px] text-muted-foreground">
-            <span aria-live="polite">Expires in {minutesSeconds(left)} · works once</span>
+            <span>Expires in {minutesSeconds(left)} · works once</span>
+            <span className="sr-only" aria-live="polite">
+              {left <= 60_000 ? "Pairing code expires in less than a minute." : "Pairing code ready."}
+            </span>
             <Button variant="ghost" size="sm" className="ml-auto" onClick={() => void copy()}>
               {copied ? <Check /> : <Copy />} {copied ? "Copied" : "Copy code"}
             </Button>

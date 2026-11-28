@@ -765,4 +765,32 @@ describe("an automation's first check", () => {
     expect(screen.getByText("checked 4 PRs")).toBeTruthy();
     expect(screen.getByText(/First check · exit 0/)).toBeTruthy();
   });
+
+  it("handles clearing Starts datetime-local without RangeError and formats local wall-clock time (U-07)", async () => {
+    await openNew();
+    const starts = screen.getByLabelText("Starts") as HTMLInputElement;
+    expect(starts.value).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/);
+    expect(() => fireEvent.change(starts, { target: { value: "" } })).not.toThrow();
+    expect(starts.value).toBe("");
+    fireEvent.change(starts, { target: { value: "2026-06-15T14:30" } });
+    expect(starts.value).toBe("2026-06-15T14:30");
+  });
+
+  it("preserves commas and spaces while typing multi-label GitHub report fields (U-08)", async () => {
+    await openNew();
+    fireEvent.click(screen.getByRole("radio", { name: "GitHub issues" }));
+    const addLabels = screen.getByLabelText("Add labels") as HTMLInputElement;
+    const removeLabels = screen.getByLabelText("Remove labels") as HTMLInputElement;
+    const failureLabels = screen.getByLabelText("Failure labels") as HTMLInputElement;
+
+    fireEvent.change(addLabels, { target: { value: "bug, " } });
+    expect(addLabels.value).toBe("bug, ");
+    fireEvent.change(addLabels, { target: { value: "bug, urgent" } });
+    expect(addLabels.value).toBe("bug, urgent");
+
+    fireEvent.change(removeLabels, { target: { value: "triage, " } });
+    expect(removeLabels.value).toBe("triage, ");
+    fireEvent.change(failureLabels, { target: { value: "failed, needs-review" } });
+    expect(failureLabels.value).toBe("failed, needs-review");
+  });
 });

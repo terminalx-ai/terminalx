@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { GitPullRequest, Link, LoaderCircle, Search, TriangleAlert } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
@@ -41,6 +41,8 @@ export function LinkPrDialog({ session, onClose }: { session: SessionEntry; onCl
   const [picked, setPicked] = useState<number | null>(null);
   const [linking, setLinking] = useState(false);
   const list = useRef<HTMLDivElement>(null);
+  const listId = useId();
+  const optionId = (number: number) => `${listId}-pr-${number}`;
 
   useEffect(() => {
     let live = true;
@@ -113,10 +115,15 @@ export function LinkPrDialog({ session, onClose }: { session: SessionEntry; onCl
             void link();
           }}
         >
-          <label className="mt-3 flex h-9 items-center gap-2 rounded-md border border-border bg-raised px-3 text-[13px] focus-within:border-accent/60">
+          <label className="mt-3 flex h-9 items-center gap-2 rounded-md border border-border bg-raised px-3 text-[13px] focus-within:border-accent/60 focus-within:ring-2 focus-within:ring-ring/40">
             <Search className="size-3.5 shrink-0 text-faint" />
             <input
               autoFocus
+              role="combobox"
+              aria-expanded={rows.length > 0}
+              aria-controls={listId}
+              aria-autocomplete="list"
+              aria-activedescendant={selected ? optionId(selected.number) : undefined}
               aria-label="Search open PRs"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
@@ -144,13 +151,14 @@ export function LinkPrDialog({ session, onClose }: { session: SessionEntry; onCl
           ) : found && rows.length === 0 ? (
             <p className="mt-2 px-1 py-3 text-[12.5px] text-muted-foreground">No open PRs match “{query.trim()}”.</p>
           ) : (
-            <div ref={list} role="listbox" aria-label="Open pull requests" className="-mx-1 mt-2 grid max-h-80 gap-0.5 overflow-y-auto scrollbar-thin">
+            <div ref={list} id={listId} role="listbox" aria-label="Open pull requests" className="-mx-1 mt-2 grid max-h-80 gap-0.5 overflow-y-auto scrollbar-thin">
               {rows.map((pr) => {
                 const badge = checkBadge(pr);
                 const isSelected = pr === selected;
                 return (
                   <div
                     key={pr.url}
+                    id={optionId(pr.number)}
                     data-pr={pr.number}
                     role="option"
                     aria-selected={isSelected}

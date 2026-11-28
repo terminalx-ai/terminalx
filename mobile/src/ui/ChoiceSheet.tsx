@@ -21,22 +21,26 @@ export interface Choice {
  * Size, Region, Provider, Stop when idle). The chosen row is filled and
  * ticked; a tap chooses and closes. A tap outside closes and changes nothing.
  */
-export function ChoiceSheet({ title, subtitle, choices, chosen, help, onChoose, onClose }: {
+export function ChoiceSheet({ title, subtitle, choices, chosen, help, inline = false, onChoose, onClose }: {
   title: string;
   subtitle?: string;
   choices: readonly Choice[];
   chosen: string | null;
   /** Under the choices: what the choice means later. */
   help?: string;
+  /** Render inside an existing Modal instead of mounting a nested Modal (unsupported on iOS). */
+  inline?: boolean;
   onChoose(id: string): void;
   onClose(): void;
 }) {
   const { palette } = useTheme();
   const insets = useSafeAreaInsets();
-  return <Modal visible transparent animationType="slide" onRequestClose={onClose}>
+  const content = <>
     <Pressable testID="choice-sheet-backdrop" accessibilityRole="button" accessibilityLabel={`Close ${title}`} onPress={onClose} style={[styles.fill, styles.backdrop]} />
-    <View testID="choice-sheet" accessibilityViewIsModal style={[styles.sheet, { backgroundColor: palette.page, borderColor: palette.border, paddingBottom: insets.bottom + 16 }]}>
-      <View style={[styles.handle, { backgroundColor: palette.faint }]} />
+    <View testID="choice-sheet" accessibilityViewIsModal onAccessibilityEscape={onClose} style={[styles.sheet, { backgroundColor: palette.page, borderColor: palette.border, paddingBottom: insets.bottom + 16 }]}>
+      <Pressable testID="close-choice-sheet" accessibilityRole="button" accessibilityLabel={`Close ${title}`} onPress={onClose} style={styles.handleTarget}>
+        <View style={[styles.handle, { backgroundColor: palette.faint }]} />
+      </Pressable>
       <Text accessibilityRole="header" style={[styles.title, { color: palette.ink }]}>{title}</Text>
       {subtitle ? <Text style={[styles.subtitle, { color: palette.muted }]}>{subtitle}</Text> : null}
       <ScrollView style={styles.list} contentContainerStyle={styles.listContent}>
@@ -61,14 +65,17 @@ export function ChoiceSheet({ title, subtitle, choices, chosen, help, onChoose, 
         {help ? <Text style={[styles.help, { color: palette.muted }]}>{help}</Text> : null}
       </ScrollView>
     </View>
-  </Modal>;
+  </>;
+  if (inline) return <View style={StyleSheet.absoluteFill}>{content}</View>;
+  return <Modal visible transparent animationType="slide" onRequestClose={onClose}>{content}</Modal>;
 }
 
 const styles = StyleSheet.create({
   fill: { flex: 1 },
   backdrop: { backgroundColor: "#00000080" },
   sheet: { maxHeight: "80%", borderTopLeftRadius: 24, borderTopRightRadius: 24, borderWidth: StyleSheet.hairlineWidth, paddingHorizontal: 16, paddingTop: 10 },
-  handle: { alignSelf: "center", width: 40, height: 4, borderRadius: 2, marginBottom: 12, opacity: 0.6 },
+  handleTarget: { alignSelf: "center", minWidth: 88, minHeight: 44, marginTop: -10, marginBottom: -8, alignItems: "center", justifyContent: "center" },
+  handle: { width: 40, height: 4, borderRadius: 2, opacity: 0.6 },
   title: { fontSize: 17, fontWeight: "600", lineHeight: 22, paddingHorizontal: 4 },
   subtitle: { fontSize: 13, lineHeight: 18, paddingHorizontal: 4, paddingTop: 2 },
   list: { flexGrow: 0, marginTop: 12 },

@@ -49,7 +49,7 @@ export function LocalRuntimeNotice() {
   if (state?.state === "updating" && state.keeping) return null;
   if (state?.state === "updating") {
     return (
-      <aside aria-label="Local runtime version" role="status" aria-live="polite" className="fixed bottom-3 left-1/2 z-50 flex w-[min(36rem,calc(100%-2rem))] -translate-x-1/2 items-center gap-3 rounded-lg border border-hairline bg-background p-3 shadow-lg">
+      <aside aria-label="Local runtime version" role="status" aria-live="polite" className="fixed bottom-9 left-1/2 z-(--z-notice) flex w-[min(36rem,calc(100%-2rem))] -translate-x-1/2 items-center gap-3 rounded-lg border border-hairline bg-background p-3 shadow-lg">
         <div className="min-w-0 flex-1 text-xs">
           <div className="font-medium">Updating the TerminalX runtime</div>
           <p className="mt-1 text-muted-foreground">{`Stopping the ${state.from ?? "older"} runtime and starting ${state.to}, the one this app came with. Each agent picks up its conversation again when its tab starts.`}</p>
@@ -84,7 +84,7 @@ export function LocalRuntimeNotice() {
     ? `${state.terminal ? "Reconnecting terminal output" : "Reconnecting"}… (attempt ${state.attempt})`
     : null;
   return (
-    <aside aria-label="Local runtime connection" role="status" aria-live="polite" className="fixed bottom-3 left-1/2 z-50 flex w-[min(36rem,calc(100%-2rem))] -translate-x-1/2 items-center gap-3 rounded-lg border border-hairline bg-background p-3 shadow-lg">
+    <aside aria-label="Local runtime connection" role="status" aria-live="polite" className="fixed bottom-9 left-1/2 z-(--z-notice) flex w-[min(36rem,calc(100%-2rem))] -translate-x-1/2 items-center gap-3 rounded-lg border border-hairline bg-background p-3 shadow-lg">
       <div className="min-w-0 flex-1 text-xs">
         <div className="font-medium">{reconnecting ?? "Live connection unavailable"}</div>
         <p className="mt-1 text-muted-foreground">{reconnecting ? "Agents and terminal commands keep running." : state.message}</p>
@@ -117,7 +117,7 @@ export function UnprovenNotice({ unproven, onHide }: { unproven: LocalRuntimeUnp
   };
   if (!unproven.pinned) {
     return (
-      <aside aria-label="Local runtime window" role="status" aria-live="polite" className="fixed bottom-3 left-1/2 z-50 flex w-[min(36rem,calc(100%-2rem))] -translate-x-1/2 items-center gap-3 rounded-lg border border-hairline bg-background p-3 shadow-lg" data-testid="local-runtime-unpinned">
+      <aside aria-label="Local runtime window" role="status" aria-live="polite" className="fixed bottom-9 left-1/2 z-(--z-notice) flex w-[min(36rem,calc(100%-2rem))] -translate-x-1/2 items-center gap-3 rounded-lg border border-hairline bg-background p-3 shadow-lg" data-testid="local-runtime-unpinned">
         <div className="min-w-0 flex-1 text-xs">
           <div className="font-medium">Bots are held less strictly on this runtime</div>
           <p className="mt-1 text-muted-foreground">{unproven.why}</p>
@@ -128,7 +128,7 @@ export function UnprovenNotice({ unproven, onHide }: { unproven: LocalRuntimeUnp
     );
   }
   return (
-    <aside aria-label="Local runtime window" role="status" aria-live="polite" className="fixed bottom-3 left-1/2 z-50 flex w-[min(36rem,calc(100%-2rem))] -translate-x-1/2 items-center gap-3 rounded-lg border border-hairline bg-background p-3 shadow-lg" data-testid="local-runtime-unproven">
+    <aside aria-label="Local runtime window" role="status" aria-live="polite" className="fixed bottom-9 left-1/2 z-(--z-notice) flex w-[min(36rem,calc(100%-2rem))] -translate-x-1/2 items-center gap-3 rounded-lg border border-hairline bg-background p-3 shadow-lg" data-testid="local-runtime-unproven">
       <div className="min-w-0 flex-1 text-xs">
         <div className="font-medium">This window can't change sessions or terminals</div>
         <p className="mt-1 text-muted-foreground">
@@ -180,7 +180,7 @@ function UnresponsiveNotice({ epoch, message, keeps }: { epoch: string | null; m
     ? "Restarting it hands its agents and terminals to a fresh runtime, and they keep running."
     : "Restarting it stops the agents and terminals it runs; each agent picks up its conversation again when its tab starts.";
   return (
-    <aside aria-label="Local runtime connection" role="status" aria-live="polite" className="fixed bottom-3 left-1/2 z-50 flex w-[min(36rem,calc(100%-2rem))] -translate-x-1/2 items-center gap-3 rounded-lg border border-hairline bg-background p-3 shadow-lg">
+    <aside aria-label="Local runtime connection" role="status" aria-live="polite" className="fixed bottom-9 left-1/2 z-(--z-notice) flex w-[min(36rem,calc(100%-2rem))] -translate-x-1/2 items-center gap-3 rounded-lg border border-hairline bg-background p-3 shadow-lg">
       <div className="min-w-0 flex-1 text-xs">
         <div className="font-medium">TerminalX runtime is not responding</div>
         <p className="mt-1 text-muted-foreground">{message} {offer}</p>
@@ -218,7 +218,7 @@ function SwitchFailedNotice({ epoch, outdated, onHide }: { epoch: string; outdat
     finally { setRestarting(false); }
   };
   return (
-    <aside aria-label="Local runtime version" role="status" aria-live="polite" className="fixed bottom-3 left-1/2 z-50 flex w-[min(36rem,calc(100%-2rem))] -translate-x-1/2 items-center gap-3 rounded-lg border border-hairline bg-background p-3 shadow-lg">
+    <aside aria-label="Local runtime version" role="status" aria-live="polite" className="fixed bottom-9 left-1/2 z-(--z-notice) flex w-[min(36rem,calc(100%-2rem))] -translate-x-1/2 items-center gap-3 rounded-lg border border-hairline bg-background p-3 shadow-lg">
       <div className="min-w-0 flex-1 text-xs">
         <div className="font-medium">TerminalX runtime was not updated</div>
         <p className="mt-1 text-muted-foreground">The runtime running your agents is {running ? `version ${running}` : "an earlier version"}; this app is {app}. {keeps ? "Handing it over" : "Moving"} to {app} failed, and it does not try again by itself.</p>

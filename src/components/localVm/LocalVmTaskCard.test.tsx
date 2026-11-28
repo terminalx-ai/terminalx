@@ -234,4 +234,21 @@ describe("durable local VM task actions", () => {
     expect(download.getAttribute("download")).toBe("result.png");
     expect(artifactHref({ name: "bad", mediaType: "image/png", contentBase64: "bad<script>" })).toBeNull();
   });
+
+  it("shows Import patch validation and RPC errors inside the open dialog instead of behind it (U-35)", async () => {
+    const record = task({ status: "completed", artifacts: [{ id: "patch", name: "changes.patch", mediaType: "text/x-patch", sha256: "abc", bytes: 42, expiresAt: null }] });
+    mocks.invoke.mockRejectedValueOnce(new Error("git apply rejected"));
+    render(<LocalVmTaskCard task={record} destinationRoot="/project/worktree" readOnly={false} />);
+    fireEvent.click(screen.getByRole("button", { name: "Import patch…" }));
+    const dialog = screen.getByRole("dialog");
+    const input = within(dialog).getByLabelText("Destination project directory on this Mac") as HTMLInputElement;
+    // Relative path triggers validation error inside the open dialog.
+    fireEvent.change(input, { target: { value: "relative/path" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Check conflicts and import" }));
+    expect((await within(dialog).findByRole("alert")).textContent).toContain("Select an absolute host destination directory.");
+    // RPC failure also renders inside the open dialog.
+    fireEvent.change(input, { target: { value: "/project/worktree" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Check conflicts and import" }));
+    expect((await within(dialog).findByRole("alert")).textContent).toContain("git apply rejected");
+  });
 });

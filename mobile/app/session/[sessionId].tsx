@@ -372,6 +372,7 @@ function ChatPane({ hostId, sessionId, tabId, available, connected, state, machi
     sessionId={sessionId}
     tabId={tabId}
     stateKey={stateKey}
+    available={available}
     connected={connected}
     state={state}
     harness={harness}
@@ -391,11 +392,12 @@ function ChatPane({ hostId, sessionId, tabId, available, connected, state, machi
  * re-render `ChatPane` or `TranscriptList`. Draft writes to `AsyncStorage`
  * are debounced and flushed on unmount.
  */
-const ChatComposer = memo(function ChatComposer({ hostId, sessionId, tabId, stateKey, connected, state, harness, status, events, asks, composerHeight, onHeightChange, onNotePosted, onOpenTab, onSendingChange }: {
+const ChatComposer = memo(function ChatComposer({ hostId, sessionId, tabId, stateKey, available, connected, state, harness, status, events, asks, composerHeight, onHeightChange, onNotePosted, onOpenTab, onSendingChange }: {
   hostId: string;
   sessionId: string;
   tabId: string;
   stateKey: string;
+  available: boolean;
   connected: boolean;
   state: ConnectionState;
   harness: string | undefined;
@@ -513,6 +515,7 @@ const ChatComposer = memo(function ChatComposer({ hostId, sessionId, tabId, stat
 
   /** `released`: the held message, now that the phone is connected (from this screen or from the app, if it was left). */
   const send = async (released = false) => {
+    if (!available) return;
     const text = draft.trim();
     if (!text && !attachments.length) return;
     // What was heard is in the draft already: a result still on its way would come after the send.
@@ -679,7 +682,7 @@ const ChatComposer = memo(function ChatComposer({ hostId, sessionId, tabId, stat
   useEffect(() => addPasteImageListener((image) => { if (composerFocused.current) onPastedImage.current(image); }), []);
 
   // Once the wait is a real one, the box says a message waits for the connection.
-  const placeholder = state === "waiting" || state === "offline" ? "Message sends when connected" : harness ? `Message ${providerName(harness)}` : "Message this session";
+  const placeholder = !available ? "This conversation is no longer available" : state === "waiting" || state === "offline" ? "Message sends when connected" : harness ? `Message ${providerName(harness)}` : "Message this session";
 
   /** The + button: photos or files, from the system's own chooser. */
   const chooseAttachment = () => {
@@ -692,7 +695,8 @@ const ChatComposer = memo(function ChatComposer({ hostId, sessionId, tabId, stat
   };
 
   // Not connected, a message can still be sent: it is held, and goes once the phone connects.
-  const sendDisabled = (!draft.trim() && !attachments.length) || sending || held;
+  // An unavailable/deleted conversation cannot accept or queue new messages.
+  const sendDisabled = !available || (!draft.trim() && !attachments.length) || sending || held;
   // The model, effort and mode stay in place while not connected, dimmed (#983).
   const dimmed = connected ? undefined : styles.dimmed;
 
@@ -706,18 +710,18 @@ const ChatComposer = memo(function ChatComposer({ hostId, sessionId, tabId, stat
     return <View onLayout={({ nativeEvent }) => onHeightChange(nativeEvent.layout.height)} style={[styles.composer, styles.dock, { paddingBottom: (keyboardShown ? 0 : insets.bottom) + 8 }]}>
       <EdgeFade edge="bottom" height={composerHeight + 32} />
       {controls?.panel}
-      {attachments.length ? <View style={styles.attachments}>{attachments.map((attachment) => <View key={attachment.id} style={styles.attachment}>{attachment.mediaType.startsWith("image/") ? <Image source={{ uri: attachment.uri }} accessibilityLabel={attachment.name} style={styles.attachmentImage} /> : <View accessibilityLabel={attachment.name} style={[styles.attachmentImage, styles.fileAttachment, { backgroundColor: palette.raised }]}><FileText size={22} color={palette.muted} /><Text numberOfLines={1} style={[styles.fileAttachmentName, { color: palette.muted }]}>{attachment.name}</Text></View>}<Pressable accessibilityRole="button" accessibilityLabel={`Remove ${attachment.name}`} onPress={() => setAttachments((current) => current.filter((item) => item.id !== attachment.id))} style={styles.removeAttachment}><X size={13} color="#fff" /></Pressable></View>)}</View> : null}
+      {attachments.length ? <View style={styles.attachments}>{attachments.map((attachment) => <View key={attachment.id} style={styles.attachment}>{attachment.mediaType.startsWith("image/") ? <Image source={{ uri: attachment.uri }} accessibilityLabel={attachment.name} style={styles.attachmentImage} /> : <View accessibilityLabel={attachment.name} style={[styles.attachmentImage, styles.fileAttachment, { backgroundColor: palette.raised }]}><FileText size={22} color={palette.muted} /><Text numberOfLines={1} style={[styles.fileAttachmentName, { color: palette.muted }]}>{attachment.name}</Text></View>}<Pressable accessibilityRole="button" accessibilityLabel={`Remove ${attachment.name}`} hitSlop={11} onPress={() => setAttachments((current) => current.filter((item) => item.id !== attachment.id))} style={styles.removeAttachment}><X size={13} color="#fff" /></Pressable></View>)}</View> : null}
       {attachmentError ? <Text style={[styles.attachmentError, { color: palette.danger }]}>{attachmentError}</Text> : null}
       {dictation.error ? <Text accessibilityLiveRegion="polite" style={[styles.attachmentError, { color: palette.danger }]}>{dictation.error}</Text> : null}
       {/* What the agent is doing now, right under the latest card and over the composer (22.03). Not connected, the line would only repeat what was true when the phone last heard: it goes, and the connection says why (22.01). */}
       {connected ? <StatusLine state={status} onStop={controls ? controls.interrupt : undefined} onStopSession={stopSession} stopping={!!controls?.working} /> : null}
       {/* A held message is still to go, so the line says so until it does (#983); nothing else about a send is kept. */}
-      {held && !sendFailure ? <View style={styles.feedbackLine}><Text accessibilityLiveRegion="polite" style={[styles.sendFeedback, { color: palette.muted }]}>Sends when connected.</Text></View> : null}
+      {available && held && !sendFailure ? <View style={styles.feedbackLine}><Text accessibilityLiveRegion="polite" style={[styles.sendFeedback, { color: palette.muted }]}>Sends when connected.</Text></View> : null}
       {sendFailure ? <View style={styles.feedbackLine}><Text accessibilityLiveRegion="polite" style={[styles.sendFeedback, { color: palette.danger }]}>{sendFailure.message}</Text>{sendFailure.resend ? <Button label="Resend" kind="secondary" disabled={sendDisabled} onPress={() => void send()} style={styles.resend} /> : null}</View> : null}
       {/* As 22.01 and 22.03 draw it: the message on top, and beneath it what to send it with. */}
       <Glass style={styles.inputGlass}>
-        {!sendToAgent ? <View style={styles.noteBanner}><StickyNote size={14} color={palette.warning} /><Text style={[styles.noteBannerText, { color: palette.muted }]}>Worktree note · not sent to the agent</Text><Pressable accessibilityRole="button" accessibilityLabel="Send to agent" hitSlop={10} onPress={() => { setSendToAgent(true); setSendFailure(null); }}><X size={15} color={palette.muted} /></Pressable></View> : null}
-        <TextInput value={draft} autoFocus={false} onFocus={() => { composerFocused.current = true; }} onBlur={() => { composerFocused.current = false; }} onChangeText={(value) => { draftEdited.current = true; setDraft(value); setHeld(false); setSendFailure(null); scheduleDraftSave(value); }} multiline placeholder={dictation.listening ? "Listening…" : placeholder} placeholderTextColor={palette.faint} style={[styles.composeInput, { color: palette.ink }]} />
+        {!sendToAgent ? <View style={styles.noteBanner}><StickyNote size={14} color={palette.warning} /><Text style={[styles.noteBannerText, { color: palette.muted }]}>Worktree note · not sent to the agent</Text><Pressable accessibilityRole="button" accessibilityLabel="Send to agent" hitSlop={14} onPress={() => { setSendToAgent(true); setSendFailure(null); }}><X size={15} color={palette.muted} /></Pressable></View> : null}
+        <TextInput value={draft} editable={available && !sending} autoFocus={false} onFocus={() => { composerFocused.current = true; }} onBlur={() => { composerFocused.current = false; }} onChangeText={(value) => { draftEdited.current = true; setDraft(value); setHeld(false); setSendFailure(null); scheduleDraftSave(value); }} multiline placeholder={dictation.listening ? "Listening…" : placeholder} placeholderTextColor={palette.faint} style={[styles.composeInput, { color: palette.ink }]} />
         {dictation.listening ? <View style={styles.toolbar}>
           {/* Listening, as the best chat apps show it: cancel, the voice as it is heard, stop and keep, or send. */}
           <IconButton label="Cancel dictation" icon={<X size={20} color={palette.ink} strokeWidth={2.2} />} onPress={cancelDictation} />
@@ -725,7 +729,7 @@ const ChatComposer = memo(function ChatComposer({ hostId, sessionId, tabId, stat
           <IconButton label="Stop dictation" icon={<Square size={14} color={palette.ink} fill={palette.ink} />} onPress={dictation.stop} />
           {action}
         </View> : <View style={styles.toolbar}>
-          {sendToAgent ? <IconButton label="Add attachment" icon={<Plus size={20} color={palette.ink} strokeWidth={2} />} disabled={sending} onPress={chooseAttachment} /> : null}
+          {sendToAgent ? <IconButton label="Add attachment" icon={<Plus size={20} color={palette.ink} strokeWidth={2} />} disabled={!available || sending} onPress={chooseAttachment} /> : null}
           <ScrollView horizontal showsHorizontalScrollIndicator={false} keyboardShouldPersistTaps="handled" style={[styles.flex, styles.chipStrip]} contentContainerStyle={styles.chips}>
             {controls ? <>
               {/* The model and its effort in one line, the model bold; each opens its own picker. */}
@@ -739,7 +743,7 @@ const ChatComposer = memo(function ChatComposer({ hostId, sessionId, tabId, stat
               </Pressable>
             </> : null}
           </ScrollView>
-          <IconButton label="Dictate" icon={<Mic size={20} color={palette.muted} />} onPress={() => void beginDictation()} />
+          <IconButton label="Dictate" icon={<Mic size={20} color={palette.muted} />} disabled={!available || sending} onPress={() => void beginDictation()} />
           {action}
         </View>}
       </Glass>
@@ -875,9 +879,14 @@ function TerminalPane({ hostId, sessionId, tabId, connected, state }: { hostId: 
   const live = connected && !opening && !problem;
   const write = async (text: string) => {
     if (!live || !text) return false;
-    const result = await app.api.queueInput(sessionId, tabId, text);
-    setRefusal(result.accepted ? null : result.message);
-    return result.accepted;
+    try {
+      const result = await app.api.queueInput(sessionId, tabId, text);
+      setRefusal(result.accepted ? null : result.message);
+      return result.accepted;
+    } catch (cause) {
+      setRefusal(screenMessage(cause, "Could not send input to the terminal."));
+      return false;
+    }
   };
   /** What was typed in direct mode: a character, or with Ctrl held its control code. */
   const typed = (text: string) => {
@@ -985,14 +994,14 @@ const styles = StyleSheet.create({
   chips: { alignItems: "center", gap: 12, minHeight: 44, paddingLeft: 8, paddingRight: 24 },
   sendFeedback: { flex: 1, fontSize: 13, lineHeight: 18, paddingHorizontal: 6 },
   feedbackLine: { flexDirection: "row", alignItems: "center", gap: 9 },
-  resend: { minHeight: 36, paddingHorizontal: 12 },
+  resend: { minHeight: 44, paddingHorizontal: 12 },
   notice: { padding: 15, gap: 8 },
   noticeTitle: { fontSize: 15, fontWeight: "700" },
   noticeDetail: { fontSize: 13, lineHeight: 19 },
   // As the design's banner: one row, an icon, the words, and the one action.
   noticeLine: { flexDirection: "row", alignItems: "center", gap: 10, borderRadius: 14, paddingVertical: 10, paddingHorizontal: 12, marginHorizontal: 12, marginTop: 8 },
   noticeText: { flex: 1, fontSize: 14, lineHeight: 19 },
-  noticeAction: { minHeight: 32, paddingHorizontal: 12 },
+  noticeAction: { minHeight: 44, paddingHorizontal: 12 },
   dimmed: { opacity: 0.45 },
   attachments: { flexDirection: "row", flexWrap: "wrap", gap: 8, paddingHorizontal: 6 },
   attachment: { width: 58, height: 58 },
@@ -1007,13 +1016,13 @@ const styles = StyleSheet.create({
   detail: { fontSize: 12, marginTop: 2 },
   terminalOutput: { paddingHorizontal: 11, paddingVertical: 13 },
   terminalText: { fontFamily: Platform.select({ ios: "Menlo", default: "monospace" }), fontSize: 11, lineHeight: 16 },
-  terminalStatus: { position: "absolute", top: 10, right: 12, flexDirection: "row", alignItems: "center", gap: 6, height: 26, borderRadius: 13, paddingHorizontal: 10, borderWidth: StyleSheet.hairlineWidth },
+  terminalStatus: { position: "absolute", top: 10, right: 12, flexDirection: "row", alignItems: "center", gap: 6, minHeight: 26, borderRadius: 13, paddingHorizontal: 10, paddingVertical: 4, borderWidth: StyleSheet.hairlineWidth },
   terminalStatusText: { fontSize: 12, fontWeight: "500" },
   terminalProblem: { position: "absolute", left: 16, right: 16, top: 48 },
   terminalRefusal: { fontSize: 12, lineHeight: 17, paddingHorizontal: 16, paddingTop: 6 },
   terminalKeysBar: { flexGrow: 0 },
   terminalKeys: { gap: 6, paddingHorizontal: 10, paddingTop: 8 },
-  terminalKey: { minWidth: 40, height: 36, borderRadius: 10, alignItems: "center", justifyContent: "center", paddingHorizontal: 10 },
+  terminalKey: { minWidth: 44, minHeight: 44, borderRadius: 10, alignItems: "center", justifyContent: "center", paddingHorizontal: 10, paddingVertical: 8 },
   terminalKeyText: { fontFamily: Platform.select({ ios: "Menlo", default: "monospace" }), fontSize: 14 },
   terminalInputBar: { flexDirection: "row", alignItems: "flex-end", gap: 8, paddingHorizontal: 10, paddingTop: 8 },
   terminalInputGlass: { flex: 1, flexDirection: "row", alignItems: "flex-end", gap: 4, minHeight: 52, borderRadius: 26, paddingLeft: 6, paddingRight: 5, paddingVertical: 5 },

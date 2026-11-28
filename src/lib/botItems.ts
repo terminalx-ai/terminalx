@@ -45,6 +45,12 @@ interface State {
   lists: Record<string, BotItemList>;
   /** Each item a page has open, by `botId#number`, with its activity. */
   items: Record<string, BotItem>;
+  /** Per-item read error, keyed by `botId#number`. */
+  itemErrors: Record<string, string>;
+  /** Whether a read has settled for `botId#number`. */
+  itemLoaded: Record<string, boolean>;
+  /** Whether a read is currently in flight for `botId#number`. */
+  itemLoading: Record<string, boolean>;
   /** Why the last read failed, if it did. */
   error: string | null;
   /** An item the next bot view should open: `openBotItem` sets it, the bot's view takes it. */
@@ -53,7 +59,7 @@ interface State {
   needsError: string | null;
 }
 
-const EMPTY: State = { needs: null, lists: {}, items: {}, error: null, opening: null, needsError: null };
+const EMPTY: State = { needs: null, lists: {}, items: {}, itemErrors: {}, itemLoaded: {}, itemLoading: {}, error: null, opening: null, needsError: null };
 let state: State = EMPTY;
 const listeners = new Set<() => void>();
 const __subscribe_listeners = (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; };
@@ -94,11 +100,36 @@ async function readList(botId: string, mine = generation) {
 }
 
 async function readItem(botId: string, number: number, mine = generation) {
+  const key = itemKey(botId, number);
+  const { [key]: _ignored, ...restErrors } = state.itemErrors;
+  set({ itemLoading: { ...state.itemLoading, [key]: true }, itemErrors: restErrors });
   try {
     const item = await botItemsApi.item(botId, number);
-    if (mine === generation && item) set({ items: { ...state.items, [itemKey(botId, number)]: item } });
+    if (mine !== generation) return;
+    if (item) {
+      set({
+        items: { ...state.items, [key]: item },
+        itemLoaded: { ...state.itemLoaded, [key]: true },
+        itemLoading: { ...state.itemLoading, [key]: false },
+      });
+    } else {
+      const { [key]: _removed, ...restItems } = state.items;
+      set({
+        items: restItems,
+        itemLoaded: { ...state.itemLoaded, [key]: true },
+        itemLoading: { ...state.itemLoading, [key]: false },
+      });
+    }
   } catch (error) {
-    if (mine === generation) set({ error: reason(error) });
+    if (mine === generation) {
+      const message = reason(error);
+      set({
+        error: message,
+        itemErrors: { ...state.itemErrors, [key]: message },
+        itemLoaded: { ...state.itemLoaded, [key]: true },
+        itemLoading: { ...state.itemLoading, [key]: false },
+      });
+    }
   }
 }
 
@@ -267,12 +298,20 @@ export function useBotItems(botId: string): { list: BotItemList | null; error: s
 }
 
 /** One item with its activity, read when its page opens. */
-export function useBotItem(botId: string, number: number): BotItem | null {
+export function useBotItem(botId: string, number: number): { item: BotItem | null; loading: boolean; error: string | null; reload: () => void } {
   const store = useStore();
+  const key = itemKey(botId, number);
   useEffect(() => {
     if (booted) void readItem(botId, number);
   }, [botId, number]);
-  return store.items[itemKey(botId, number)] ?? store.lists[botId]?.items.find((item) => item.number === number) ?? null;
+  const reload = useCallback(() => {
+    if (booted) void readItem(botId, number);
+  }, [botId, number]);
+  const item = store.items[key] ?? store.lists[botId]?.items.find((entry) => entry.number === number) ?? null;
+  const error = store.itemErrors[key] ?? null;
+  const loaded = !!store.itemLoaded[key];
+  const loading = !!store.itemLoading[key] || (!item && !error && !loaded);
+  return { item, loading, error, reload };
 }
 
 /** Take an act's answer at once; its `bot_items_changed` follows. */

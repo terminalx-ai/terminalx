@@ -3,7 +3,7 @@ import { useMemo } from "react";
 import { Menu } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuSub, DropdownMenuSubContent, DropdownMenuSubTrigger, DropdownMenuTrigger, MenuShortcut } from "@/components/ui/menu";
+import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuSub, DropdownMenuSubContent, DropdownMenuSubTrigger, DropdownMenuTrigger, MenuShortcut } from "@/components/ui/menu";
 import { inAppWindow, isCompactWindow } from "@/lib/appWindow";
 import { keycaps } from "@/lib/hotkeys";
 import { buildNativeMenu, type NativeMenuItem } from "@/lib/nativeMenu";
@@ -11,6 +11,7 @@ import { dispatchNativeMenu } from "@/lib/nativeMenuBridge";
 import { isMac } from "@/lib/platform";
 import { useSessionStore } from "@/lib/sessions";
 import { useKeymap, type Keymap, type NativeMenuSection } from "@/lib/shortcuts";
+import { setStatusSettings, useStatusSelector } from "@/lib/status";
 
 const TITLES: Record<NativeMenuSection, string> = { app: "TerminalX", file: "File", view: "View", go: "Go", help: "Help" };
 
@@ -22,6 +23,7 @@ const TITLES: Record<NativeMenuSection, string> = { app: "TerminalX", file: "Fil
 export function AppMenu({ mac = isMac }: { mac?: boolean }) {
   const keymap = useKeymap();
   const { projects } = useSessionStore();
+  const statusBarVisible = useStatusSelector((s) => s.settings.visible);
   const groups = useMemo(() => buildNativeMenu(keymap, projects, false, false), [keymap, projects]);
   if (mac || !inAppWindow() || isCompactWindow()) return null;
   return (
@@ -39,6 +41,17 @@ export function AppMenu({ mac = isMac }: { mac?: boolean }) {
             <DropdownMenuSubTrigger>{TITLES[group.id]}</DropdownMenuSubTrigger>
             <DropdownMenuSubContent className="min-w-56">
               <Items items={group.items} keymap={keymap} />
+              {group.id === "view" && (
+                <>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuCheckboxItem
+                    checked={statusBarVisible}
+                    onCheckedChange={(checked) => { void setStatusSettings({ visible: checked === true }); }}
+                  >
+                    Status Bar
+                  </DropdownMenuCheckboxItem>
+                </>
+              )}
               {group.id === "app" && (
                 <>
                   <DropdownMenuSeparator />

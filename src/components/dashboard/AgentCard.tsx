@@ -37,6 +37,8 @@ export function AgentCard({
   project,
   agentName,
   focused,
+  tabbable = focused,
+  focusSignal = 0,
   onFocus,
 }: {
   session: SessionEntry;
@@ -45,17 +47,21 @@ export function AgentCard({
   project?: Project;
   agentName: string;
   focused: boolean;
+  tabbable?: boolean;
+  focusSignal?: number;
   onFocus: () => void;
 }) {
-  const ref = useRef<HTMLDivElement>(null);
+  const ref = useRef<HTMLButtonElement>(null);
   const quick = isQuickChat(session);
   const harnesses = [...new Set(session.tabs.map((t) => t.harness))];
   const stoppable = session.tabs.filter((t) => t.status === "in_progress" || t.status === "waiting");
 
-  // The keyboard cursor lives in the dashboard; the card follows it into view.
+  // The keyboard cursor lives in the dashboard; the card follows it into view and takes DOM focus on keyboard nav.
   useEffect(() => {
-    if (focused) ref.current?.scrollIntoView({ block: "nearest" });
-  }, [focused]);
+    if (!focused) return;
+    ref.current?.scrollIntoView({ block: "nearest" });
+    if (focusSignal > 0) ref.current?.focus({ preventScroll: true });
+  }, [focused, focusSignal]);
 
   const open = () => selectSession(session.id);
   const stop = () => {
@@ -66,19 +72,14 @@ export function AgentCard({
 
   return (
     <DropdownMenu>
-      <div
-        ref={ref}
-        role="button"
-        tabIndex={-1}
-        aria-label={`${session.title}, ${harnesses.map(agentDisplayName).join(", ")}`}
-        onClick={() => {
+      <article
+        onClick={(e) => {
+          if (e.target instanceof Element && e.target.closest("button, a")) return;
           onFocus();
           open();
         }}
-        onFocus={onFocus}
-        onKeyDown={(e) => e.key === "Enter" && open()}
         className={cn(
-          "group relative flex shrink-0 cursor-default flex-col gap-1.5 overflow-hidden rounded-lg bg-card p-2.5 pl-3 text-left shadow-card outline-none transition-colors hover:bg-selected/50",
+          "group relative flex shrink-0 cursor-default flex-col gap-1.5 overflow-hidden rounded-lg bg-card p-2.5 pl-3 text-left shadow-card transition-colors hover:bg-selected/50 focus-within:ring-2 focus-within:ring-inset focus-within:ring-ring/50",
           focused ? "ring-2 ring-inset ring-ring/50" : "hairline",
         )}
       >
@@ -99,7 +100,20 @@ export function AgentCard({
               <AgentMark key={h} id={h} className="size-4 rounded-full bg-background" decorative />
             ))}
           </div>
-          <span className="min-w-0 flex-1 truncate text-[13px] font-medium">{session.title}</span>
+          <button
+            ref={ref}
+            type="button"
+            tabIndex={tabbable ? 0 : -1}
+            aria-label={`${session.title}, ${harnesses.map(agentDisplayName).join(", ")}`}
+            onClick={() => {
+              onFocus();
+              open();
+            }}
+            onFocus={onFocus}
+            className="min-w-0 flex-1 truncate text-left text-[13px] font-medium outline-none after:absolute after:inset-0"
+          >
+            {session.title}
+          </button>
           <span className="shrink-0 text-[11px] tabular-nums text-faint group-hover:opacity-0 group-has-[[data-state=open]]:opacity-0">
             {relativeTime(session.modified)}
           </span>
@@ -108,7 +122,7 @@ export function AgentCard({
               variant="ghost"
               size="icon-xs"
               aria-label="Session menu"
-              className="absolute right-1.5 top-1.5 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 data-[state=open]:opacity-100"
+              className="absolute right-1.5 top-1.5 z-10 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 data-[state=open]:opacity-100"
               onClick={(e) => e.stopPropagation()}
             >
               <span className="text-[13px] leading-none">…</span>
@@ -137,7 +151,7 @@ export function AgentCard({
                 void openExternalWebUrl(session.issue!.url);
               }}
               title={session.issue.title}
-              className="flex shrink-0 items-center gap-1 rounded-sm bg-veil-raised px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-foreground"
+              className="relative z-10 flex shrink-0 items-center gap-1 rounded-sm bg-veil-raised px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
             >
               <CircleDot className="size-2.5" />
               <span className="font-mono">{session.issue.identifier}</span>
@@ -159,7 +173,7 @@ export function AgentCard({
           <span className="min-w-0 truncate">{sessionProjectName(session, project)}</span>
           {session.tabs.length > 1 && <span className="shrink-0">· {session.tabs.length} tabs</span>}
         </div>
-      </div>
+      </article>
 
       <DropdownMenuContent align="end">
         <DropdownMenuItem onSelect={open}>
@@ -190,6 +204,8 @@ export function CloudAgentCard({
   column,
   agentName,
   focused,
+  tabbable = focused,
+  focusSignal = 0,
   onFocus,
   onOpen,
 }: {
@@ -197,36 +213,35 @@ export function CloudAgentCard({
   column: DashboardState;
   agentName: string;
   focused: boolean;
+  tabbable?: boolean;
+  focusSignal?: number;
   onFocus: () => void;
   onOpen: () => void;
 }) {
-  const ref = useRef<HTMLDivElement>(null);
+  const ref = useRef<HTMLButtonElement>(null);
   const harnesses = [...new Set(session.tabs.map((t) => t.harness))];
   const waiting = session.tabs.find((t) => t.status === "waiting");
   useEffect(() => {
-    if (focused) ref.current?.scrollIntoView({ block: "nearest" });
-  }, [focused]);
+    if (!focused) return;
+    ref.current?.scrollIntoView({ block: "nearest" });
+    if (focusSignal > 0) ref.current?.focus({ preventScroll: true });
+  }, [focused, focusSignal]);
   const state = column === "archived" ? "Archived" : column === "needs"
     ? waiting?.failure ? "Workspace needs recovery" : waiting?.waitingOn ? `Wants to use ${waiting.waitingOn}` : "Waiting for your decision"
     : column === "working" ? "Working" : column === "not-started" ? "Not started" : session.stopped ? "Workspace stopped" : "Finished";
 
   return (
     <DropdownMenu>
-      <div
-        ref={ref}
-        role="button"
-        tabIndex={-1}
-        aria-label={`${session.title}, ${harnesses.map(agentDisplayName).join(", ")}, in ${session.orgName} cloud`}
+      <article
         data-testid="cloud-agent-card"
         data-session={session.key}
-        onClick={() => {
+        onClick={(e) => {
+          if (e.target instanceof Element && e.target.closest("button, a")) return;
           onFocus();
           onOpen();
         }}
-        onFocus={onFocus}
-        onKeyDown={(e) => e.key === "Enter" && onOpen()}
         className={cn(
-          "group relative flex shrink-0 cursor-default flex-col gap-1.5 overflow-hidden rounded-lg bg-card p-2.5 pl-3 text-left shadow-card outline-none transition-colors hover:bg-selected/50",
+          "group relative flex shrink-0 cursor-default flex-col gap-1.5 overflow-hidden rounded-lg bg-card p-2.5 pl-3 text-left shadow-card transition-colors hover:bg-selected/50 focus-within:ring-2 focus-within:ring-inset focus-within:ring-ring/50",
           focused ? "ring-2 ring-inset ring-ring/50" : "hairline",
         )}
       >
@@ -247,7 +262,20 @@ export function CloudAgentCard({
               <AgentMark key={h} id={h} className="size-4 rounded-full bg-background" decorative />
             ))}
           </div>
-          <span className="min-w-0 flex-1 truncate text-[13px] font-medium">{session.title}</span>
+          <button
+            ref={ref}
+            type="button"
+            tabIndex={tabbable ? 0 : -1}
+            aria-label={`${session.title}, ${harnesses.map(agentDisplayName).join(", ")}, in ${session.orgName} cloud`}
+            onClick={() => {
+              onFocus();
+              onOpen();
+            }}
+            onFocus={onFocus}
+            className="min-w-0 flex-1 truncate text-left text-[13px] font-medium outline-none after:absolute after:inset-0"
+          >
+            {session.title}
+          </button>
           <span className="shrink-0 text-[11px] tabular-nums text-faint group-hover:opacity-0 group-has-[[data-state=open]]:opacity-0">
             {relativeTime(session.modified)}
           </span>
@@ -256,7 +284,7 @@ export function CloudAgentCard({
               variant="ghost"
               size="icon-xs"
               aria-label="Session menu"
-              className="absolute right-1.5 top-1.5 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 data-[state=open]:opacity-100"
+              className="absolute right-1.5 top-1.5 z-10 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 data-[state=open]:opacity-100"
               onClick={(e) => e.stopPropagation()}
             >
               <span className="text-[13px] leading-none">…</span>
@@ -287,7 +315,7 @@ export function CloudAgentCard({
           <span className="shrink-0">· {session.orgName}</span>
           {session.tabs.length > 1 && <span className="shrink-0">· {session.tabs.length} tabs</span>}
         </div>
-      </div>
+      </article>
 
       <DropdownMenuContent align="end">
         <DropdownMenuItem onSelect={onOpen}>
@@ -308,6 +336,8 @@ export function MachineAgentCard({
   column,
   agentName,
   focused,
+  tabbable = focused,
+  focusSignal = 0,
   onFocus,
   onOpen,
 }: {
@@ -316,33 +346,32 @@ export function MachineAgentCard({
   column: DashboardState;
   agentName: string;
   focused: boolean;
+  tabbable?: boolean;
+  focusSignal?: number;
   onFocus: () => void;
   onOpen: () => void;
 }) {
-  const ref = useRef<HTMLDivElement>(null);
+  const ref = useRef<HTMLButtonElement>(null);
   const harnesses = [...new Set(session.tabs.map((t) => t.harness))];
   useEffect(() => {
-    if (focused) ref.current?.scrollIntoView({ block: "nearest" });
-  }, [focused]);
+    if (!focused) return;
+    ref.current?.scrollIntoView({ block: "nearest" });
+    if (focusSignal > 0) ref.current?.focus({ preventScroll: true });
+  }, [focused, focusSignal]);
   const state = column === "needs" ? "Waiting for your decision" : null;
 
   return (
     <DropdownMenu>
-      <div
-        ref={ref}
-        role="button"
-        tabIndex={-1}
-        aria-label={`${session.title}, ${harnesses.map(agentDisplayName).join(", ")}, on ${session.machineName}`}
+      <article
         data-testid="machine-agent-card"
         data-session={session.key}
-        onClick={() => {
+        onClick={(e) => {
+          if (e.target instanceof Element && e.target.closest("button, a")) return;
           onFocus();
           onOpen();
         }}
-        onFocus={onFocus}
-        onKeyDown={(e) => e.key === "Enter" && onOpen()}
         className={cn(
-          "group relative flex shrink-0 cursor-default flex-col gap-1.5 overflow-hidden rounded-lg bg-card p-2.5 pl-3 text-left shadow-card outline-none transition-colors hover:bg-selected/50",
+          "group relative flex shrink-0 cursor-default flex-col gap-1.5 overflow-hidden rounded-lg bg-card p-2.5 pl-3 text-left shadow-card transition-colors hover:bg-selected/50 focus-within:ring-2 focus-within:ring-inset focus-within:ring-ring/50",
           focused ? "ring-2 ring-inset ring-ring/50" : "hairline",
         )}
       >
@@ -363,7 +392,20 @@ export function MachineAgentCard({
               <AgentMark key={h} id={h} className="size-4 rounded-full bg-background" decorative />
             ))}
           </div>
-          <span className="min-w-0 flex-1 truncate text-[13px] font-medium">{session.title}</span>
+          <button
+            ref={ref}
+            type="button"
+            tabIndex={tabbable ? 0 : -1}
+            aria-label={`${session.title}, ${harnesses.map(agentDisplayName).join(", ")}, on ${session.machineName}`}
+            onClick={() => {
+              onFocus();
+              onOpen();
+            }}
+            onFocus={onFocus}
+            className="min-w-0 flex-1 truncate text-left text-[13px] font-medium outline-none after:absolute after:inset-0"
+          >
+            {session.title}
+          </button>
           <span className="shrink-0 text-[11px] tabular-nums text-faint group-hover:opacity-0 group-has-[[data-state=open]]:opacity-0">
             {relativeTime(session.modified)}
           </span>
@@ -372,7 +414,7 @@ export function MachineAgentCard({
               variant="ghost"
               size="icon-xs"
               aria-label="Session menu"
-              className="absolute right-1.5 top-1.5 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 data-[state=open]:opacity-100"
+              className="absolute right-1.5 top-1.5 z-10 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 data-[state=open]:opacity-100"
               onClick={(e) => e.stopPropagation()}
             >
               <span className="text-[13px] leading-none">…</span>
@@ -402,7 +444,7 @@ export function MachineAgentCard({
           <span className="min-w-0 truncate">{session.projectName}</span>
           {session.tabs.length > 1 && <span className="shrink-0">· {session.tabs.length} tabs</span>}
         </div>
-      </div>
+      </article>
 
       <DropdownMenuContent align="end">
         <DropdownMenuItem onSelect={onOpen}>

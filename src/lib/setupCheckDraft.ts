@@ -100,6 +100,12 @@ function boot() {
   for (const entry of entries) if (!entry.tabId) follow(entry, false);
 }
 
+/** Permanently dismiss the setup-check coach mark for `tabId` (mouse or keyboard send). */
+export function dismissSetupCheckCoach(tabId: string): void {
+  if (!entries.some((item) => item.tabId === tabId && !item.coachDismissed)) return;
+  store(entries.map((item) => (item.tabId === tabId ? { ...item, coachDismissed: true } : item)));
+}
+
 /** Whether `tabId`'s composer shows the "Send this to check your new computer" coach mark. */
 export function useSetupCheckCoach(tabId: string): { show: boolean; dismiss: () => void } {
   boot();
@@ -109,6 +115,6 @@ export function useSetupCheckCoach(tabId: string): { show: boolean; dismiss: () 
   );
   return {
     show: Boolean(entry && !entry.coachDismissed),
-    dismiss: () => store(entries.map((item) => (item.tabId === tabId ? { ...item, coachDismissed: true } : item))),
+    dismiss: () => dismissSetupCheckCoach(tabId),
   };
 }

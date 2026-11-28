@@ -58,8 +58,10 @@ export function BranchSheet({ repository, onDone, onRemove, onClose }: { reposit
   return <Modal visible transparent animationType="slide" onRequestClose={onClose}>
     <KeyboardAvoidingView style={styles.fill} behavior={keyboardAvoidingBehavior()}>
       <Pressable testID="branch-sheet-backdrop" accessibilityRole="button" accessibilityLabel="Close Branch or tag" onPress={onClose} style={[styles.fill, styles.backdrop]} />
-      <View testID="branch-sheet" accessibilityViewIsModal style={[styles.sheet, { backgroundColor: palette.page, borderColor: palette.border, paddingBottom: insets.bottom + 16 }]}>
-        <View style={[styles.handle, { backgroundColor: palette.faint }]} />
+      <View testID="branch-sheet" accessibilityViewIsModal onAccessibilityEscape={onClose} style={[styles.sheet, { backgroundColor: palette.page, borderColor: palette.border, paddingBottom: insets.bottom + 16 }]}>
+        <Pressable testID="branch-sheet-close" accessibilityRole="button" accessibilityLabel="Close Branch or tag" onPress={onClose} style={styles.handleTarget}>
+          <View style={[styles.handle, { backgroundColor: palette.faint }]} />
+        </Pressable>
         <Text accessibilityRole="header" style={[styles.title, { color: palette.ink }]}>Branch or tag</Text>
         <Text numberOfLines={1} style={[styles.subtitle, { color: palette.muted }]}>{repository.fullName}</Text>
         <View style={styles.body}>
@@ -84,7 +86,8 @@ const styles = StyleSheet.create({
   fill: { flex: 1 },
   backdrop: { backgroundColor: "#00000080" },
   sheet: { borderTopLeftRadius: 24, borderTopRightRadius: 24, borderWidth: StyleSheet.hairlineWidth, paddingHorizontal: 16, paddingTop: 10 },
-  handle: { alignSelf: "center", width: 40, height: 4, borderRadius: 2, marginBottom: 12, opacity: 0.6 },
+  handleTarget: { alignSelf: "center", minWidth: 88, minHeight: 44, marginTop: -10, marginBottom: -8, alignItems: "center", justifyContent: "center" },
+  handle: { width: 40, height: 4, borderRadius: 2, opacity: 0.6 },
   title: { fontSize: 17, fontWeight: "600", lineHeight: 22, paddingHorizontal: 4 },
   subtitle: { fontSize: 13, lineHeight: 18, paddingHorizontal: 4, paddingTop: 2 },
   body: { gap: 12, marginTop: 10 },

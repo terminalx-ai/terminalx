@@ -113,8 +113,8 @@ export function SkillsView({ projectPath, initialAgent }: { projectPath: string 
         </WithTooltip>
       </header>
 
-      <div className="flex min-h-0 flex-1">
-        <section className="flex w-[22rem] shrink-0 flex-col border-r border-hairline">
+      <div className="@container/skills flex min-h-0 flex-1 flex-col @2xl/skills:flex-row">
+        <section className="flex max-h-[40%] w-full shrink-0 flex-col border-b border-hairline @2xl/skills:max-h-none @2xl/skills:w-[22rem] @2xl/skills:border-r @2xl/skills:border-b-0">
           <div className="flex flex-col gap-2 border-b border-hairline p-3">
             <label className="flex h-8 items-center gap-2 rounded-md bg-well px-2 focus-within:ring-2 focus-within:ring-ring/40">
               <Search className="size-3.5 shrink-0 text-faint" />
@@ -253,11 +253,11 @@ function SkillReader({ skill, onRefresh }: { skill: DiscoveredSkill | null; onRe
           <Loader2 className="size-3.5 animate-spin" /> Reading SKILL.md…
         </div>
       ) : (
-        <div className="flex min-h-0 flex-1">
+        <div className="@container/skill-reader flex min-h-0 flex-1 flex-col @xl/skill-reader:flex-row">
           <div className="min-w-0 flex-1 overflow-y-auto scrollbar-thin px-6 py-5">
             <Markdown text={detail.markdown} webLinksOnly remoteImages={false} />
           </div>
-          <aside className="w-56 shrink-0 overflow-y-auto border-l border-hairline p-3 scrollbar-thin">
+          <aside className="max-h-44 w-full shrink-0 overflow-y-auto border-t border-hairline p-3 scrollbar-thin @xl/skill-reader:max-h-none @xl/skill-reader:w-56 @xl/skill-reader:border-t-0 @xl/skill-reader:border-l">
             {detail.executableFiles.length > 0 && (
               <section className="mb-4 rounded-lg bg-warning/8 p-2.5 hairline">
                 <h3 className="text-[11px] font-semibold uppercase tracking-wide text-warning">Executable files</h3>

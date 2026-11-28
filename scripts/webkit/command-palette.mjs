@@ -201,7 +201,7 @@ try {
       return [row.querySelector("span.truncate")?.textContent, glyph ? (glyph.outerHTML.length + ":" + (glyph.getAttribute("src") ?? glyph.innerHTML).slice(0, 4000)) : null];
     })));
     await shot("open-file");
-    await dialog.getByRole("textbox", { name: "Search files" }).fill("zqx");
+    await dialog.getByRole("combobox", { name: "Search files" }).fill("zqx");
     await dialog.getByRole("status").filter({ hasText: "No files match" }).waitFor();
     await settled(page);
     const quickOpenEmpty = await box(dialog);

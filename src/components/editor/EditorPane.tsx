@@ -164,6 +164,9 @@ export function EditorPane({ entry, visible, embedded = false }: { entry: FileEd
   const [revision, setRevision] = useState(0);
   const wrapSlot = useRef(new Compartment()).current;
   const whitespaceSlot = useRef(new Compartment()).current;
+  const tabSlot = useRef(new Compartment()).current;
+  const tabMovesFocusRef = useRef(false);
+  const escapeTabRef = useRef(false);
   const { editorWrap, editorShowWhitespace } = usePrefs();
   const paneRef = useRef<HTMLDivElement>(null);
   const source = useFileSource(entry.source, entry.root);
@@ -313,12 +316,22 @@ export function EditorPane({ entry, visible, embedded = false }: { entry: FileEd
     }
   }, [source, entry.rel, write, describeError]);
 
-  const reloadFromDisk = useCallback(async () => {
+  const reloadFromDisk = useCallback(async (force = false) => {
     const view = viewRef.current;
     if (!view || !source) return;
+    if (!force && (dirtyRef.current || !docEqualsString(view.state.doc, savedDoc.current))) {
+      setChangedOnDisk(true);
+      return;
+    }
     try {
       const f = await source.readText(entry.rel);
-      view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: f.content } });
+      const currentView = viewRef.current;
+      if (!currentView) return;
+      if (!force && (dirtyRef.current || !docEqualsString(currentView.state.doc, savedDoc.current))) {
+        setChangedOnDisk(true);
+        return;
+      }
+      currentView.dispatch({ changes: { from: 0, to: currentView.state.doc.length, insert: f.content } });
       if (previewRef.current) setDocText(f.content);
       markSaved(f.content, { version: f.version, etag: f.etag });
       updateMarks();
@@ -386,13 +399,60 @@ export function EditorPane({ entry, visible, embedded = false }: { entry: FileEd
           whitespaceSlot.of(whitespaceExtension(getPrefs().editorShowWhitespace)),
           EditorState.readOnly.of(source.readOnly || !!attachment),
           EditorView.editable.of(!source.readOnly && !attachment),
+          EditorView.contentAttributes.of({
+            "aria-description": "Press Escape then Tab, or Control+M, to move focus out of the editor.",
+          }),
+          EditorView.domEventHandlers({
+            keydown(event) {
+              if (event.key === "Escape" && !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey) {
+                escapeTabRef.current = true;
+              } else if (event.key !== "Tab") {
+                escapeTabRef.current = false;
+              }
+              return false;
+            },
+            blur() {
+              escapeTabRef.current = false;
+              return false;
+            },
+          }),
+          tabSlot.of(
+            keymap.of([
+              {
+                key: "Ctrl-m",
+                run: () => {
+                  const next = !tabMovesFocusRef.current;
+                  tabMovesFocusRef.current = next;
+                  escapeTabRef.current = false;
+                  flash(next ? "Tab moves focus (Ctrl+M to indent)" : "Tab indents (Ctrl+M to move focus)");
+                  return true;
+                },
+              },
+              {
+                key: "Tab",
+                run: (target) => {
+                  if (tabMovesFocusRef.current || escapeTabRef.current) {
+                    escapeTabRef.current = false;
+                    return false;
+                  }
+                  return indentWithTab.run ? indentWithTab.run(target) : false;
+                },
+                shift: (target) => {
+                  if (tabMovesFocusRef.current || escapeTabRef.current) {
+                    escapeTabRef.current = false;
+                    return false;
+                  }
+                  return indentWithTab.shift ? indentWithTab.shift(target) : false;
+                },
+              },
+            ]),
+          ),
           keymap.of([
             ...closeBracketsKeymap,
             ...defaultKeymap,
             // Find is the app's shortcut (below), so the reader can move it.
             ...searchKeymap.filter((binding) => binding.key !== "Mod-f"),
             ...historyKeymap,
-            indentWithTab,
           ]),
           EditorView.updateListener.of((u) => {
             if (!u.docChanged) return;
@@ -461,7 +521,7 @@ export function EditorPane({ entry, visible, embedded = false }: { entry: FileEd
       viewRef.current = null;
       setFind(null);
     };
-  }, [abs, entry.id, entry.rel, entry.root, source, save, updateMarks, describeError, embedded, attachment, wrapSlot, whitespaceSlot]);
+  }, [abs, entry.id, entry.rel, entry.root, source, save, updateMarks, describeError, embedded, attachment, wrapSlot, whitespaceSlot, tabSlot, flash]);
 
   // Jump to a line when asked (from search results or the tree).
   useEffect(() => {
@@ -577,10 +637,10 @@ export function EditorPane({ entry, visible, embedded = false }: { entry: FileEd
             <Button variant="outline" size="xs" onClick={() => void overwrite()}>
               Overwrite with mine
             </Button>
-            <Button variant="outline" size="xs" onClick={() => void reloadFromDisk()}>
+            <Button variant="outline" size="xs" onClick={() => void reloadFromDisk(true)}>
               Discard mine and reload
             </Button>
-            <Button variant="ghost" size="xs" onClick={() => void navigator.clipboard?.writeText(viewRef.current?.state.doc.toString() ?? "").catch(() => {})}>
+            <Button variant="ghost" size="xs" onClick={() => void copyContents()}>
               Copy mine
             </Button>
           </span>
@@ -590,7 +650,7 @@ export function EditorPane({ entry, visible, embedded = false }: { entry: FileEd
         <div className="flex shrink-0 items-center gap-2 bg-warning/10 px-3 py-1.5 text-xs text-foreground">
           <AlertTriangle className="size-3.5 text-warning" />
           This file changed on disk while you were editing.
-          <Button variant="outline" size="xs" className="ml-auto" onClick={() => void reloadFromDisk()}>
+          <Button variant="outline" size="xs" className="ml-auto" onClick={() => void reloadFromDisk(true)}>
             Reload from disk
           </Button>
           <Button variant="ghost" size="xs" onClick={() => setChangedOnDisk(false)}>

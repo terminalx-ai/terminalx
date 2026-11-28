@@ -31,7 +31,7 @@ vi.mock("react-native", async () => {
 });
 vi.mock("@mobile/ui/theme", async (actual) => (await import("@mobile/ui/testing/kit")).boardTheme(await actual()));
 vi.mock("lucide-react-native", async () => (await import("@mobile/ui/testing/kit")).namedIcons());
-vi.mock("expo-router", () => ({ Stack: { Screen: () => null }, useLocalSearchParams: () => mocks.params, useRouter: () => mocks.router, useFocusEffect: (run: () => void) => { mocks.focus.push(run); } }));
+vi.mock("expo-router", () => ({ Stack: { Screen: () => null }, useLocalSearchParams: () => mocks.params, useRouter: () => mocks.router, useFocusEffect: (run: () => void) => { mocks.focus.push(run); }, usePreventRemove: () => undefined }));
 vi.mock("@mobile/state/AppProvider", () => ({ useApp: () => ({}) }));
 vi.mock("expo-crypto", () => ({ randomUUID: () => globalThis.crypto.randomUUID() }));
 vi.mock("expo-clipboard", () => ({ getStringAsync: async () => "", hasStringAsync: async () => false }));

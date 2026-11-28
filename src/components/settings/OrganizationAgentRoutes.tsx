@@ -179,7 +179,7 @@ export function OrganizationAgentRoutes({
                     <>
                       <div className="break-words">{routeSummary(route, template)}</div>
                       <div
-                        className={status!.tone === "warn" ? "text-warning" : status!.tone === "ok" ? "text-emerald-600 dark:text-emerald-400" : "text-muted-foreground"}
+                        className={status!.tone === "warn" ? "text-warning" : status!.tone === "ok" ? "text-add" : "text-muted-foreground"}
                         data-testid="agent-route-status"
                         data-status={route.status}
                       >

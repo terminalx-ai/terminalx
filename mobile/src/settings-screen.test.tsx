@@ -205,6 +205,15 @@ it("shows the account as one row that opens the account screen, with Sign out on
   expect(container.textContent).toContain("Signed in asAlexalex@example.com");
   const signOut = [...container.querySelectorAll("button")].find((b) => b.textContent === "Sign out")!;
   await act(async () => signOut.click());
+  // U-58: destructive sign-out asks for confirmation before wiping session/keys.
+  expect(mocks.app.signOut).not.toHaveBeenCalled();
+  expect(mocks.alert).toHaveBeenCalledWith(
+    "Sign out?",
+    expect.stringContaining("Signing out removes"),
+    expect.arrayContaining([expect.objectContaining({ text: "Cancel", style: "cancel" }), expect.objectContaining({ text: "Sign out", style: "destructive" })]),
+  );
+  const confirm = (mocks.alert.mock.calls.at(-1)![2] as { text: string; onPress?: () => void }[]).find((b) => b.text === "Sign out")!;
+  await act(async () => { confirm.onPress?.(); });
   expect(mocks.app.signOut).toHaveBeenCalledTimes(1);
   expect(mocks.back).toHaveBeenCalledTimes(1);
 });

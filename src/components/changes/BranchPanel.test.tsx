@@ -1,7 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { BranchOverview, ProjectForge } from "@/lib/api";
-import { getDraft } from "@/lib/drafts";
+import { getDraft, setDraft } from "@/lib/drafts";
 import { noteDraftPushes } from "@/lib/panelMarks";
 
 // The panel reads the branch, then its pull request: two answers in turn, slow on a busy machine.
@@ -28,6 +28,7 @@ const { localStep } = await import("./NextStep");
 const { refreshDataPrivacy } = await import("@/lib/dataPrivacy");
 let policy = { enabled: false, managed: false };
 beforeEach(async () => {
+  setDraft("tab-1", "");
   policy = { enabled: false, managed: false };
   invoke.mockResolvedValueOnce(policy);
   await refreshDataPrivacy();
