@@ -2,11 +2,14 @@ import { useEffect, useSyncExternalStore } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { Button } from "@/components/ui/button";
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogScrollArea, DialogTitle } from "@/components/ui/dialog";
 import { Check, Download, Loader2 } from "@/icons";
 import { getAccount } from "@/lib/account";
 import { api } from "@/lib/api";
 import { cloudAgentLabel } from "@/lib/cloudAgentLabel";
+import { openWorkspaceInEditor, SSH_EDITORS } from "@/lib/cloudSsh";
+import { useDataPrivacy } from "@/lib/dataPrivacy";
+import { isWindows } from "@/lib/platform";
 import { useCloudCatalog } from "@/lib/cloudCatalog";
 import { workspaceAuthority } from "@/lib/cloudCollab";
 import type { SessionEntry } from "@/types/session";
@@ -106,6 +109,13 @@ export function CloudWorkspaceTransfer({ cloud, sessionId, tabId, accountRevisio
   // Archive is offered to whoever the server lets archive (owners and admins);
   // anyone else keeps the cloud copy running.
   const mayArchive = row ? workspaceAuthority(row.workspace).lifecycle : false;
+  // 14.16's "open it in an editor": the workspace menu's rule for SSH setup
+  // (PRO-215), which these buttons run first.
+  const privateMode = useDataPrivacy().enabled;
+  const you = row?.workspace.you;
+  const editors = !isWindows && !privateMode && row?.workspace.state === "ready"
+    && (you?.role === "manager" || (you?.role === "driver" && you.canApprove))
+    && phase2Ready(getAccount().status, orgId, "workspaceSsh");
   const projectPath = state.projectPath ?? rememberedProject(repository);
   const sessions = useSessionStore();
   const localAvailable = !imported || !sessions.loaded || sessions.sessions.some((entry) => entry.id === imported.local.sessionId);
@@ -241,7 +251,7 @@ export function CloudWorkspaceTransfer({ cloud, sessionId, tabId, accountRevisio
   return <>
     <Button size="sm" variant="ghost" onClick={() => update({ opened: true, preview: imported ? preview : null })}>Move to this Mac…</Button>
     <Dialog open={opened} onOpenChange={(next) => { if (!busy) update({ opened: next }); }}>
-      <DialogContent width="max-w-[38rem]" className="gap-0 p-0">
+      <DialogContent width="max-w-[38rem]" layout="pinned" className="gap-0 p-0">
         <DialogHeader className="mb-0 flex-row items-start gap-3 border-b border-hairline px-5 py-4">
           <Download className="mt-0.5 size-4 shrink-0 text-muted-foreground" aria-hidden />
           <div className="flex min-w-0 flex-col gap-0.5">
@@ -251,6 +261,8 @@ export function CloudWorkspaceTransfer({ cloud, sessionId, tabId, accountRevisio
             </DialogDescription>
           </div>
         </DialogHeader>
+        {/* Header and footer stay put; the steps, the choice and the editors scroll in a short window. */}
+        <DialogScrollArea aria-label="The move" className="mr-0 rounded-none pr-0">
         <ol className="flex flex-col gap-4 border-b border-hairline px-5 py-4" aria-label="What moves">
           {steps.map((step, index) => (
             <li key={step.title} className="flex items-start gap-3">
@@ -287,6 +299,20 @@ export function CloudWorkspaceTransfer({ cloud, sessionId, tabId, accountRevisio
             ))}
           </fieldset>
         )}
+        {!imported && editors && (
+          <div className="flex flex-col gap-2 px-5 pb-4">
+            <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">Or keep it in the cloud and open it in an editor</p>
+            <div className="grid grid-cols-3 gap-2">
+              {SSH_EDITORS.map(({ id, label }) => (
+                <Button key={id} variant="outline" className="justify-between" disabled={busy}
+                  onClick={() => void openWorkspaceInEditor({ orgId, workspaceId }, id)
+                    .catch((error: unknown) => update({ notice: error instanceof Error ? error.message : String(error) }))}>
+                  <span>{label}</span><span className="text-[10px] text-muted-foreground">SSH</span>
+                </Button>
+              ))}
+            </div>
+          </div>
+        )}
         {state.confirming && !imported && (
           <div role="alert" className="mx-5 mt-3 rounded-lg border border-destructive/50 bg-destructive/5 px-3 py-2.5 text-sm">
             {leftBehind === null
@@ -296,6 +322,7 @@ export function CloudWorkspaceTransfer({ cloud, sessionId, tabId, accountRevisio
         )}
         {notice && <p role="status" className="px-5 pt-3 text-sm">{notice}</p>}
         {imported && !localAvailable && <p role="status" className="px-5 pt-3 text-sm">The moved local session is no longer available.</p>}
+        </DialogScrollArea>
         <DialogFooter className="mt-0 items-center border-t border-hairline px-5 py-3">
           <span className="mr-auto text-xs text-muted-foreground">
             {uncommitted === null ? "Uncommitted files stay in the cloud"
