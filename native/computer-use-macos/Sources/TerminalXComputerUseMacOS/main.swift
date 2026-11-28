@@ -318,6 +318,9 @@ final class Provider {
         if protectedReason(pid: pid, bundleId: bundleId) != nil {
             throw ProviderError.coded(OwnAppProtection.errorCode, OwnAppProtection.keyboardRefusal)
         }
+        if let bundleId, OwnAppProtection.isBlockedBundleId(bundleId) {
+            throw ProviderError.coded("app_blocked", "app '\(bundleId)' is blocked for safety")
+        }
     }
 
     func handle(method: String, params: [String: JSONValue]) throws -> Any {
@@ -690,7 +693,7 @@ final class Provider {
             }
             throw ProviderError.coded("app_not_found", "app '\(trimmed)' not found")
         }
-        if blockedBundleIds.contains(trimmed) {
+        if OwnAppProtection.isBlockedBundleId(trimmed) {
             throw ProviderError.coded("app_blocked", "app '\(trimmed)' is blocked for safety")
         }
         if let app = listApps().first(where: { matches($0, query: trimmed) }) {
@@ -719,13 +722,19 @@ final class Provider {
     }
 
     private func rejectBlockedApp(_ app: AppDescriptor) throws {
-        if let bundle = app.bundleId, blockedBundleIds.contains(bundle) {
+        if let bundle = app.bundleId, OwnAppProtection.isBlockedBundleId(bundle) {
             throw ProviderError.coded("app_blocked", "app '\(bundle)' is blocked for safety")
         }
     }
 
     private func listWindows(params: [String: JSONValue]) throws -> [String: Any] {
         let app = try resolveApp(try requiredString(params, "app"))
+        if protectedReason(pid: app.pid, bundleId: app.bundleId) != nil {
+            return [
+                "app": renderListedApp(app),
+                "windows": [],
+            ]
+        }
         let windows = WindowCapture.candidates(pid: app.pid)
             .filter { $0.layer == 0 }
             .enumerated()
@@ -1257,17 +1266,6 @@ final class Provider {
         return snapshot.elements[focusedElementId]
     }
 }
-
-private let blockedBundleIds: Set<String> = [
-    "com.1password.1password",
-    "com.1password.safari",
-    "com.bitwarden.desktop",
-    "com.dashlane.dashlanephonefinal",
-    "com.lastpass.LastPass",
-    "com.nordsec.nordpass",
-    "me.proton.pass.electron",
-    "me.proton.pass.catalyst",
-]
 
 private func requiredString(_ params: [String: JSONValue], _ key: String) throws -> String {
     guard let value = params[key]?.string, !value.isEmpty else {
@@ -3048,35 +3046,73 @@ private struct BoundedPNG {
 }
 
 private func boundedPngData(_ image: CGImage) -> BoundedPNG? {
-    let initialData: Data? = autoreleasepool {
-        let rep = NSBitmapImageRep(cgImage: image)
-        return rep.representation(using: .png, properties: [:])
+    let initialScale = ScreenshotScalePolicy.initialScale(width: image.width, height: image.height)
+    let floorScale = ScreenshotScalePolicy.floorScale(
+        initialScale: initialScale,
+        width: image.width,
+        height: image.height
+    )
+
+    // P-77: downscale to maxEdge <= 1280 BEFORE the first PNG encode so 2x Retina / 4K
+    // windows never spend CPU compressing a multi-MB full-resolution PNG only to discard it.
+    let initial: BoundedPNG? = autoreleasepool {
+        if initialScale >= 1.0 {
+            let rep = NSBitmapImageRep(cgImage: image)
+            guard let data = rep.representation(using: .png, properties: [:]) else { return nil }
+            return BoundedPNG(data: data, width: image.width, height: image.height)
+        }
+        return resizePng(image, scale: CGFloat(initialScale))
     }
-    guard let data = initialData else { return nil }
-    if data.count <= 900_000 {
-        return BoundedPNG(data: data, width: image.width, height: image.height)
+    guard var best = initial else { return nil }
+    if best.data.count <= ScreenshotScalePolicy.maxPngBytes {
+        return best
     }
-    var scale = min(1, 1280 / CGFloat(max(image.width, image.height)))
-    var best = BoundedPNG(data: data, width: image.width, height: image.height)
-    while scale >= 0.25 {
+
+    var scale = initialScale
+    var prevWidth = best.width
+    var prevHeight = best.height
+    for _ in 1..<ScreenshotScalePolicy.maxEncodeAttempts {
+        guard let nextScale = ScreenshotScalePolicy.nextScale(
+            currentScale: scale,
+            currentBytes: best.data.count,
+            maxBytes: ScreenshotScalePolicy.maxPngBytes,
+            floorScale: floorScale
+        ) else {
+            break
+        }
+        scale = nextScale
+        let dims = ScreenshotScalePolicy.scaledDimensions(
+            originalWidth: image.width,
+            originalHeight: image.height,
+            scale: scale
+        )
+        if dims.width == prevWidth && dims.height == prevHeight {
+            break
+        }
+        prevWidth = dims.width
+        prevHeight = dims.height
         let resized: BoundedPNG? = autoreleasepool {
-            resizePng(image, scale: scale)
+            resizePng(image, scale: CGFloat(scale))
         }
         guard let resized else {
             break
         }
         best = resized
-        if resized.data.count <= 900_000 {
+        if resized.data.count <= ScreenshotScalePolicy.maxPngBytes {
             return resized
         }
-        scale *= 0.85
     }
     return best
 }
 
 private func resizePng(_ image: CGImage, scale: CGFloat) -> BoundedPNG? {
-    let width = max(1, Int(CGFloat(image.width) * scale))
-    let height = max(1, Int(CGFloat(image.height) * scale))
+    let dims = ScreenshotScalePolicy.scaledDimensions(
+        originalWidth: image.width,
+        originalHeight: image.height,
+        scale: Double(scale)
+    )
+    let width = dims.width
+    let height = dims.height
     guard let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else {
         return nil
     }
@@ -3189,8 +3225,11 @@ private enum Input {
     }
 
     static func typeText(_ text: String, pid: pid_t, fence: () throws -> Void) throws {
+        var throttle = KeyboardInputSafety.TypingFenceThrottle()
         for unit in text.utf16 {
-            try fence()
+            if throttle.shouldCheckFence(now: ProcessInfo.processInfo.systemUptime) {
+                try fence()
+            }
             var char = unit
             guard let down = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true),
                   let up = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: false)
@@ -4638,9 +4677,17 @@ private final class SocketListener: @unchecked Sendable {
         let peerOwner = autoreleasepool {
             trust.authorizedOwner(ofConnection: fd)
         }
-        let authorizedPeer = peerOwner != nil
+        // S-51: close unauthorized peer sockets immediately before reading any bytes.
+        guard let peerOwner else {
+            return
+        }
+        let authorizedPeer = true
         let decoder = JSONDecoder()
-        while let line = readLine(from: fd) {
+        let reader = BufferedSocketLineReader(fileDescriptor: fd)
+        while case let .line(line) = reader.readLine(
+            idleTimeoutMs: registeredSession ? nil : BufferedSocketLineReader.defaultInitialIdleTimeoutMs,
+            partialLineTimeoutMs: BufferedSocketLineReader.defaultPartialLineTimeoutMs
+        ) {
             let loopAction: ConnectionLoopAction = autoreleasepool {
                 guard let data = line.data(using: .utf8),
                       let request = try? decoder.decode(Request.self, from: data)
@@ -4675,11 +4722,9 @@ private final class SocketListener: @unchecked Sendable {
                         return .close
                     }
                     registeredSession = true
-                    if let peerOwner {
-                        providerLock.lock()
-                        provider.setOwner(peerOwner)
-                        providerLock.unlock()
-                    }
+                    providerLock.lock()
+                    provider.setOwner(peerOwner)
+                    providerLock.unlock()
                     hangupMonitor = monitor
                     monitor.start()
                     if registration == .claimed {
@@ -4925,24 +4970,6 @@ private func handleRequest(
         return ["id": request.id, "ok": false, "error": ["code": error.code, "message": error.message]]
     } catch {
         return ["id": request.id, "ok": false, "error": ["code": "accessibility_error", "message": String(describing: error)]]
-    }
-}
-
-private func readLine(from fd: Int32) -> String? {
-    var bytes: [UInt8] = []
-    var byte: UInt8 = 0
-    while true {
-        let count = read(fd, &byte, 1)
-        if count == 0 {
-            return bytes.isEmpty ? nil : String(bytes: bytes, encoding: .utf8)
-        }
-        if count < 0 {
-            return nil
-        }
-        if byte == 10 {
-            return String(bytes: bytes, encoding: .utf8)
-        }
-        bytes.append(byte)
     }
 }
 

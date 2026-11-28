@@ -18,7 +18,7 @@ if ! [ -f "$mirrors" ]; then
 fi
 echo "$mirrors was:"
 cat "$mirrors"
-# Exactly the file a runner in an Azure region has.
-printf '%s\tpriority:1\n%s\tpriority:2\n%s\tpriority:3\n' http://azure.archive.ubuntu.com/ubuntu/ https://archive.ubuntu.com/ubuntu/ https://security.ubuntu.com/ubuntu/ > "$mirrors"
+# Use HTTPS for all mirrors so package metadata/indices are transport-protected.
+printf '%s\tpriority:1\n%s\tpriority:2\n%s\tpriority:3\n' https://azure.archive.ubuntu.com/ubuntu/ https://archive.ubuntu.com/ubuntu/ https://security.ubuntu.com/ubuntu/ > "$mirrors"
 echo "$mirrors is now:"
 cat "$mirrors"

@@ -974,33 +974,51 @@ def screenshot_payload(data, width, height, original_width):
     }
 
 
+def next_screenshot_scale(current_scale, current_bytes, max_bytes=MAX_SCREENSHOT_PNG_BYTES, min_scale=MIN_SCREENSHOT_SCALE):
+    if current_bytes <= max_bytes or current_scale <= min_scale:
+        return None
+    analytical = math.sqrt(max_bytes / max(1, current_bytes)) * 0.95
+    factor = min(0.95, max(0.1, analytical))
+    candidate = current_scale * factor
+    return min_scale if candidate < min_scale else candidate
+
+
 def bounded_png_payload(pixbuf):
     original_width = max(1, pixbuf.get_width())
     original_height = max(1, pixbuf.get_height())
-    data = png_bytes(pixbuf)
-    if data is None:
-        return None
-    if len(data) <= MAX_SCREENSHOT_PNG_BYTES:
-        return screenshot_payload(data, original_width, original_height, original_width)
+    max_edge = max(original_width, original_height)
 
-    # Why: screenshots are sent through JSON/stdout; matching macOS bounds keeps
-    # large or high-DPI windows from multiplying native, base64, and Node memory.
-    scale = min(1.0, MAX_SCREENSHOT_EDGE / max(original_width, original_height))
-    while scale >= MIN_SCREENSHOT_SCALE:
+    # Why: screenshots are sent through JSON/stdout; downscale to MAX_SCREENSHOT_EDGE
+    # before the first PNG encode and compute subsequent scale factors analytically
+    # so 2x Retina / 4K windows avoid repeated multi-MB PNG compressions.
+    scale = min(1.0, MAX_SCREENSHOT_EDGE / max_edge)
+    floor_scale = MIN_SCREENSHOT_SCALE if scale >= MIN_SCREENSHOT_SCALE else min(scale, 320.0 / max_edge)
+    prev_dims = None
+
+    for _ in range(8):
         width = max(1, round(original_width * scale))
         height = max(1, round(original_height * scale))
+        if (width, height) == prev_dims:
+            break
+        prev_dims = (width, height)
+
         if width == original_width and height == original_height:
-            scale *= SCREENSHOT_SCALE_STEP
-            continue
-        scaled = pixbuf.scale_simple(width, height, GdkPixbuf.InterpType.BILINEAR)
-        if scaled is None:
-            scale *= SCREENSHOT_SCALE_STEP
-            continue
-        candidate = png_bytes(scaled)
-        if candidate is not None:
-            if len(candidate) <= MAX_SCREENSHOT_PNG_BYTES:
-                return screenshot_payload(candidate, width, height, original_width)
-        scale *= SCREENSHOT_SCALE_STEP
+            target = pixbuf
+        else:
+            target = pixbuf.scale_simple(width, height, GdkPixbuf.InterpType.BILINEAR)
+            if target is None:
+                break
+
+        candidate = png_bytes(target)
+        if candidate is None:
+            return None
+        if len(candidate) <= MAX_SCREENSHOT_PNG_BYTES:
+            return screenshot_payload(candidate, width, height, original_width)
+
+        next_scale = next_screenshot_scale(scale, len(candidate), MAX_SCREENSHOT_PNG_BYTES, floor_scale)
+        if next_scale is None:
+            break
+        scale = next_scale
 
     return {
         "error": {
@@ -1559,14 +1577,152 @@ def drag_between(start, end):
     Atspi.generate_mouse_event(round(end[0]), round(end[1]), "b1r")
 
 
+HOTKEY_MODIFIER_MAP = {
+    "ctrl": "ctrl",
+    "control": "ctrl",
+    "cmdorctrl": "ctrl",
+    "commandorcontrol": "ctrl",
+    "shift": "shift",
+    "alt": "alt",
+    "option": "alt",
+    "meta": "super",
+    "super": "super",
+    "win": "super",
+    "cmd": "super",
+    "command": "super",
+}
+
+KEYSYM_ALIASES = {
+    "return": "Return",
+    "enter": "Return",
+    "tab": "Tab",
+    "escape": "Escape",
+    "esc": "Escape",
+    "backspace": "BackSpace",
+    "delete": "Delete",
+    "forwarddelete": "Delete",
+    "space": "space",
+    "left": "Left",
+    "right": "Right",
+    "up": "Up",
+    "down": "Down",
+    "home": "Home",
+    "end": "End",
+    "insert": "Insert",
+    "pageup": "Page_Up",
+    "page_up": "Page_Up",
+    "pagedown": "Page_Down",
+    "page_down": "Page_Down",
+    "plus": "plus",
+    "minus": "minus",
+    "equal": "equal",
+    "comma": "comma",
+    "period": "period",
+    "slash": "slash",
+    "backslash": "backslash",
+    "bracketleft": "bracketleft",
+    "bracketright": "bracketright",
+    "semicolon": "semicolon",
+    "apostrophe": "apostrophe",
+    "grave": "grave",
+    "quoteleft": "grave",
+    "underscore": "underscore",
+    "bar": "bar",
+    "colon": "colon",
+    "less": "less",
+    "greater": "greater",
+    "question": "question",
+    "exclam": "exclam",
+    "at": "at",
+    "numbersign": "numbersign",
+    "dollar": "dollar",
+    "percent": "percent",
+    "asciicircum": "asciicircum",
+    "ampersand": "ampersand",
+    "asterisk": "asterisk",
+    "parenleft": "parenleft",
+    "parenright": "parenright",
+    "braceleft": "braceleft",
+    "braceright": "braceright",
+    "asciitilde": "asciitilde",
+    "quotedbl": "quotedbl",
+    "kp_enter": "KP_Enter",
+    "iso_left_tab": "ISO_Left_Tab",
+    "print": "Print",
+    "pause": "Pause",
+    "menu": "Menu",
+    "caps_lock": "Caps_Lock",
+    "num_lock": "Num_Lock",
+    "scroll_lock": "Scroll_Lock",
+    **{f"f{n}": f"F{n}" for n in range(1, 25)},
+}
+
+SINGLE_CHAR_X11_KEYSYMS = {
+    "=": "equal",
+    "-": "minus",
+    "[": "bracketleft",
+    "]": "bracketright",
+    "'": "apostrophe",
+    ";": "semicolon",
+    "\\": "backslash",
+    ",": "comma",
+    ".": "period",
+    "/": "slash",
+    "`": "grave",
+}
+
+
+def _normalize_modifier_token(token):
+    stripped = token.strip()
+    if not stripped or stripped.startswith(("-", "_")):
+        return None
+    normalized = re.sub(r"[\s_-]+", "", stripped.lower())
+    return HOTKEY_MODIFIER_MAP.get(normalized)
+
+
+def _normalize_hotkey_keysym(token):
+    stripped = token.strip()
+    if not stripped or _normalize_modifier_token(stripped) is not None:
+        return None
+    if len(stripped) == 1:
+        if stripped.isascii() and stripped.isalnum():
+            return stripped.lower()
+        return SINGLE_CHAR_X11_KEYSYMS.get(stripped)
+    if stripped.startswith("-"):
+        return None
+    return KEYSYM_ALIASES.get(stripped.lower())
+
+
+def normalize_hotkey_spec(raw):
+    if raw is None:
+        raise RuntimeError("invalid_argument: hotkey requires a modifier and one key")
+    text = str(raw)
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in text):
+        raise RuntimeError("invalid_argument: hotkey contains control characters")
+    parts = [part.strip() for part in text.split("+")]
+    if len(parts) < 2 or any(not part for part in parts):
+        raise RuntimeError("invalid_argument: hotkey requires a modifier and one key, e.g. CmdOrCtrl+A")
+    modifiers = []
+    for mod_part in parts[:-1]:
+        mapped = _normalize_modifier_token(mod_part)
+        if mapped is None:
+            raise RuntimeError(f"invalid_argument: invalid hotkey modifier '{mod_part}'")
+        if mapped not in modifiers:
+            modifiers.append(mapped)
+    keysym = _normalize_hotkey_keysym(parts[-1])
+    if keysym is None:
+        raise RuntimeError(f"invalid_argument: unsupported hotkey key '{parts[-1]}'")
+    return "+".join([*modifiers, keysym])
+
+
 def key_name(raw):
-    aliases = {
-        "return": "Return", "enter": "Return", "tab": "Tab", "escape": "Escape", "esc": "Escape",
-        "backspace": "BackSpace", "delete": "Delete", "space": "space", "left": "Left", "right": "Right",
-        "up": "Up", "down": "Down", "home": "Home", "end": "End", "insert": "Insert",
-        "pageup": "Page_Up", "page_up": "Page_Up", "pagedown": "Page_Down", "page_down": "Page_Down",
-    }
-    return aliases.get(str(raw).lower(), str(raw))
+    text = str(raw).strip()
+    if len(text) == 1 and text.isascii() and 0x20 <= ord(text) <= 0x7E:
+        return text
+    mapped = KEYSYM_ALIASES.get(text.lower())
+    if mapped is None:
+        raise RuntimeError(f"invalid_argument: unsupported key '{raw}'")
+    return mapped
 
 
 def press_key(raw):
@@ -1580,14 +1736,11 @@ def press_key(raw):
 
 
 def hotkey(raw):
-    key_spec = re.sub(r"(?i)commandorcontrol|cmdorctrl", "ctrl", str(raw))
+    key_spec = normalize_hotkey_spec(raw)
     xdotool = shutil.which("xdotool")
-    if xdotool:
-        subprocess.run([xdotool, "key", key_spec], check=True)
-        return
-    if "+" in key_spec:
+    if not xdotool:
         raise RuntimeError("hotkey combinations require xdotool")
-    press_key(key_spec)
+    subprocess.run([xdotool, "key", "--", key_spec], check=True, timeout=5)
 
 
 def type_text(value):
