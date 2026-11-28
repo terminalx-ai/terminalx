@@ -34,6 +34,7 @@ const { invoke, flow, draft, mayStart, noLocal, modelConnection, catalog } = vi.
 vi.mock("@tauri-apps/api/webview", () => ({ getCurrentWebview: () => ({ onDragDropEvent: vi.fn(async () => vi.fn()) }) }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
+vi.mock("@/icons", () => new Proxy({}, { has: () => true, get: (_, prop) => (prop === "then" || typeof prop === "symbol" ? undefined : prop === "__esModule" ? true : () => null) }));
 vi.mock("@/components/ui/tooltip", () => ({ WithTooltip: ({ children }: { children: React.ReactNode }) => children }));
 vi.mock("@/components/raccoon/Raccoon", () => ({ RaccoonScene: () => null }));
 vi.mock("@/components/chat/Dictation", () => ({

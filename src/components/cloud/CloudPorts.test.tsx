@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { ReactElement } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RpcWireRequest } from "@terminalx/portable/rpc";
@@ -9,6 +9,16 @@ const mocks = vi.hoisted(() => ({ invoke: vi.fn(), openUrl: vi.fn(), listen: vi.
 vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: mocks.listen }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: mocks.openUrl }));
+vi.mock("@/icons", () => new Proxy({}, { has: () => true, get: (_, prop) => (prop === "then" || typeof prop === "symbol" ? undefined : prop === "__esModule" ? true : (props: Record<string, unknown>) => <svg {...props} />) }));
+vi.mock("@/components/ui/tooltip", () => ({
+  TooltipProvider: ({ children }: { children: React.ReactNode }) => children,
+  WithTooltip: ({ children }: { children: React.ReactNode }) => children,
+  Tooltip: ({ children }: { children: React.ReactNode }) => children,
+  TooltipTrigger: ({ children }: { children: React.ReactNode }) => children,
+  TooltipContent: () => null,
+  Kbd: ({ children }: { children: React.ReactNode }) => <kbd data-slot="kbd">{children}</kbd>,
+  KbdGroup: ({ keys }: { keys: string[] }) => <span data-slot="kbd">{keys.map((k, i) => <kbd key={i}>{k}</kbd>)}</span>,
+}));
 
 const { CloudPortsView, POLL_MS, connectionText, portErrorMessage, resetPortsMemory } = await import("./CloudPorts");
 const { TooltipProvider } = await import("@/components/ui/tooltip");
@@ -182,30 +192,39 @@ describe("the Ports tab (PRO-28, 14.11)", () => {
 
   // Found in the live run: Stop, with a read already under way, showed the stopped forward as expired.
   it("never calls a forward stopped here expired, even when a read from before the Stop lands after it", async () => {
-    const { client } = setup();
-    draw(<CloudPortsView workspaceKey="ws-1" client={client} state={live} connectionId="cloud-1" mayOpen active />);
-    await waitFor(() => expect(screen.getAllByTestId("cloud-port")).toHaveLength(2));
-    fireEvent.click(within(row(3000)).getByRole("button", { name: "Forward" }));
-    await waitFor(() => expect(row(3000).getAttribute("data-state")).toBe("open"));
-    // The next read of the open forwards is held until after the Stop.
-    let release: (() => void) | null = null;
-    const before = forwards;
-    const answer = mocks.invoke.getMockImplementation()!;
-    mocks.invoke.mockImplementation(async (command: string, args: never) => {
-      if (command === "cloud_port_forwards" && !release) return new Promise((resolve) => (release = () => resolve(before)));
-      return answer(command, args);
-    });
-    await waitFor(() => expect(release).not.toBeNull(), { timeout: POLL_MS + 1_000 });
-    fireEvent.click(within(row(3000)).getByRole("button", { name: "Stop forwarding 3000" }));
-    await waitFor(() => expect(row(3000).getAttribute("data-state")).toBe("listening"));
-    release!();
-    // One more read, with nothing open: still nothing reads as expired.
-    const reads = mocks.invoke.mock.calls.filter(([command]) => command === "cloud_port_forwards").length;
-    await waitFor(() => expect(mocks.invoke.mock.calls.filter(([command]) => command === "cloud_port_forwards").length).toBeGreaterThan(reads), { timeout: POLL_MS + 1_000 });
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    expect(screen.queryByTestId("cloud-port-expired")).toBeNull();
-    expect(row(3000).getAttribute("data-state")).toBe("listening");
-  }, 10_000);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    try {
+      const { client } = setup();
+      draw(<CloudPortsView workspaceKey="ws-1" client={client} state={live} connectionId="cloud-1" mayOpen active />);
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      expect(screen.getAllByTestId("cloud-port")).toHaveLength(2);
+      fireEvent.click(within(row(3000)).getByRole("button", { name: "Forward" }));
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      expect(row(3000).getAttribute("data-state")).toBe("open");
+      // The next read of the open forwards is held until after the Stop.
+      let release: (() => void) | null = null;
+      const before = forwards;
+      const answer = mocks.invoke.getMockImplementation()!;
+      mocks.invoke.mockImplementation(async (command: string, args: never) => {
+        if (command === "cloud_port_forwards" && !release) return new Promise((resolve) => (release = () => resolve(before)));
+        return answer(command, args);
+      });
+      await act(async () => { await vi.advanceTimersByTimeAsync(POLL_MS); });
+      expect(release).not.toBeNull();
+      fireEvent.click(within(row(3000)).getByRole("button", { name: "Stop forwarding 3000" }));
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      expect(row(3000).getAttribute("data-state")).toBe("listening");
+      release!();
+      // One more read, with nothing open: still nothing reads as expired.
+      const reads = mocks.invoke.mock.calls.filter(([command]) => command === "cloud_port_forwards").length;
+      await act(async () => { await vi.advanceTimersByTimeAsync(POLL_MS); });
+      expect(mocks.invoke.mock.calls.filter(([command]) => command === "cloud_port_forwards").length).toBeGreaterThan(reads);
+      expect(screen.queryByTestId("cloud-port-expired")).toBeNull();
+      expect(row(3000).getAttribute("data-state")).toBe("listening");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 
   it("says a forward expired when it went while the tab was not drawn", async () => {
     const { client } = setup();
@@ -244,16 +263,21 @@ describe("the Ports tab (PRO-28, 14.11)", () => {
   });
 
   it("reads again every 2 seconds, so an application that just started shows within seconds", async () => {
-    // The runtime's own listeners are always there: the list is never empty to wait on.
-    let listed = [{ port: 41000 }];
-    const { runtime, client } = setup(live, () => ({ detected: true, ports: listed, streams: [] }));
-    draw(<CloudPortsView workspaceKey="ws-1" client={client} state={live} connectionId="cloud-1" mayOpen active />);
-    await waitFor(() => expect(screen.getAllByTestId("cloud-port")).toHaveLength(1));
-    listed = [{ port: 5173 }, { port: 41000 }];
-    const asked = Date.now();
-    await waitFor(() => expect(screen.getAllByTestId("cloud-port")).toHaveLength(2), { timeout: POLL_MS + 1_000 });
-    expect(Date.now() - asked).toBeLessThanOrEqual(POLL_MS + 500);
-    expect(runtime.sent.filter((frame) => frame.method === "ports.list").length).toBe(2);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    try {
+      // The runtime's own listeners are always there: the list is never empty to wait on.
+      let listed = [{ port: 41000 }];
+      const { runtime, client } = setup(live, () => ({ detected: true, ports: listed, streams: [] }));
+      draw(<CloudPortsView workspaceKey="ws-1" client={client} state={live} connectionId="cloud-1" mayOpen active />);
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      expect(screen.getAllByTestId("cloud-port")).toHaveLength(1);
+      listed = [{ port: 5173 }, { port: 41000 }];
+      await act(async () => { await vi.advanceTimersByTimeAsync(POLL_MS); });
+      expect(screen.getAllByTestId("cloud-port")).toHaveLength(2);
+      expect(runtime.sent.filter((frame) => frame.method === "ports.list").length).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("has words for restarting and unavailable connections, and asks nothing of them", async () => {
@@ -269,7 +293,7 @@ describe("the Ports tab (PRO-28, 14.11)", () => {
     const { runtime, client } = setup(restarting);
     draw(<CloudPortsView workspaceKey="ws-1" client={client} state={restarting} connectionId="cloud-1" mayOpen active />);
     expect(screen.getByTestId("cloud-ports-restarting").textContent).toContain("starting or restarting");
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await new Promise((resolve) => setTimeout(resolve, 0));
     expect(runtime.sent).toEqual([]);
   });
 
@@ -307,7 +331,7 @@ describe("the Ports tab (PRO-28, 14.11)", () => {
     expect(screen.getByTestId("cloud-ports-stopped").textContent).toContain("Looking here never starts it");
     expect(screen.queryByRole("button", { name: "Forward" })).toBeNull();
     expect(screen.queryByRole("switch")).toBeNull();
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await new Promise((resolve) => setTimeout(resolve, 0));
     expect(runtime.sent).toEqual([]);
     expect(mocks.invoke).not.toHaveBeenCalled();
   });
@@ -316,7 +340,7 @@ describe("the Ports tab (PRO-28, 14.11)", () => {
     const { runtime, client } = setup();
     draw(<CloudPortsView workspaceKey="ws-1" client={client} state={live} connectionId="cloud-1" mayOpen={false} active />);
     expect(screen.getByTestId("cloud-ports-forbidden").textContent).toContain("needs the right to approve permissions");
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await new Promise((resolve) => setTimeout(resolve, 0));
     expect(runtime.sent.filter((frame) => frame.method === "ports.list")).toEqual([]);
     expect(mocks.invoke).not.toHaveBeenCalled();
   });
@@ -329,7 +353,7 @@ describe("the Ports tab (PRO-28, 14.11)", () => {
     view.unmount();
     const hidden = setup();
     draw(<CloudPortsView workspaceKey="ws-1" client={hidden.client} state={live} connectionId="cloud-1" mayOpen active={false} />);
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await new Promise((resolve) => setTimeout(resolve, 0));
     expect(hidden.runtime.sent.filter((frame) => frame.method === "ports.list")).toEqual([]);
   });
 

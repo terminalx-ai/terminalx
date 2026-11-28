@@ -22,6 +22,7 @@ const { invoke, sessionStore } = vi.hoisted(() => ({
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: vi.fn() }));
+vi.mock("@/icons", () => new Proxy({}, { has: () => true, get: (_, prop) => (prop === "then" || typeof prop === "symbol" ? undefined : prop === "__esModule" ? true : () => null) }));
 vi.mock("@/components/chat/Markdown", () => ({ Markdown: ({ text }: { text: string }) => <div>{text}</div> }));
 vi.mock("@/components/ui/tooltip", () => ({ WithTooltip: ({ children }: { children: ReactNode }) => children }));
 vi.mock("@/lib/hotkeys", () => ({ hasEscapeOverlay: () => false, useHeldShortcut: vi.fn(), useHotkey: vi.fn(), useShortcut: vi.fn(), useShortcutKeys: () => [], useShortcutKeycaps: () => () => [] }));
@@ -85,7 +86,12 @@ function list(provider: IssueProvider, filter: IssueFilter): Issue[] {
       ({ provider, id, identifier, number, title, url, state, stateType, workflowStateType, labels, assignee, assignees, updatedAt, body: provider === "linear" ? body : null, team }));
 }
 
+const nativeSetTimeout = window.setTimeout;
+let timerSpy: ReturnType<typeof vi.spyOn> | null = null;
+
 beforeEach(() => {
+  timerSpy = vi.spyOn(window, "setTimeout").mockImplementation(((fn: TimerHandler, delay?: number, ...args: unknown[]) =>
+    nativeSetTimeout(fn, delay === 250 ? 0 : delay, ...args)) as typeof window.setTimeout);
   forgetIssueViewers();
   tracker = createIssueOpsMock({
     issues: [
@@ -112,6 +118,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  timerSpy?.mockRestore();
+  timerSpy = null;
   cleanup();
   invoke.mockReset();
 });
@@ -297,7 +305,7 @@ describe("a list read that is older than a change made here", () => {
       name === "issues_list" ? Promise.resolve(answer(name, args)).then((rows) => (rows as Issue[]).concat(rows && !(rows as Issue[]).some((each) => each.id === "41") ? [{ ...before, body: null }] : [])) : answer(name, args));
     fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
     await waitFor(() => expect(invoke.mock.calls.filter(([command]) => command === "issues_list").length).toBeGreaterThan(1));
-    await act(() => new Promise((resolve) => setTimeout(resolve, 300)));
+    await act(() => new Promise((resolve) => setTimeout(resolve, 0)));
     const listedRow = row("Repair the login timeout");
     expect(within(listedRow).queryByText("bug")).toBeNull();
     expect(within(listedRow).getByText("Labels changed")).toBeTruthy();

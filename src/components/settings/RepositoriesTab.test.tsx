@@ -9,6 +9,16 @@ import type { Project } from "@/types/session";
 
 const mock = vi.hoisted(() => ({ persist: vi.fn(), preview: vi.fn(), update: vi.fn(), reveal: vi.fn(), copy: vi.fn(), remove: vi.fn(), projects: [] as Project[] }));
 vi.mock("@/lib/api", () => ({ api: { repositoryFilesPreview: mock.preview }, errorMessage: (e: unknown) => String(e) }));
+vi.mock("@/icons", () => new Proxy({}, { has: () => true, get: (_, prop) => (prop === "then" || typeof prop === "symbol" ? undefined : prop === "__esModule" ? true : (props: Record<string, unknown>) => <svg {...props} />) }));
+vi.mock("@/components/ui/tooltip", () => ({
+  TooltipProvider: ({ children }: { children: React.ReactNode }) => children,
+  WithTooltip: ({ children }: { children: React.ReactNode }) => children,
+  Tooltip: ({ children }: { children: React.ReactNode }) => children,
+  TooltipTrigger: ({ children }: { children: React.ReactNode }) => children,
+  TooltipContent: () => null,
+  Kbd: ({ children }: { children: React.ReactNode }) => <kbd data-slot="kbd">{children}</kbd>,
+  KbdGroup: ({ keys }: { keys: string[] }) => <span data-slot="kbd">{keys.map((k, i) => <kbd key={i}>{k}</kbd>)}</span>,
+}));
 vi.mock("@/lib/sessions", () => ({ useSessionStore: () => ({ projects: mock.projects, sessions: [], chatsPath: null, workspaces: {} }), updateProject: mock.update }));
 vi.mock("@/components/layout/SessionSidebar", () => ({ confirmRemoveProject: mock.remove, conversationLink: () => null }));
 vi.mock("./SettingsFiles", () => ({ ProjectSettingsFiles: ({ projectPath }: { projectPath: string }) => <p>Settings files for {projectPath}</p> }));

@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { beforeEach, expect, it, vi } from "vitest";
 
 // On Windows the installer ends the app before the install returns, so what the relaunched app needs (the runtime

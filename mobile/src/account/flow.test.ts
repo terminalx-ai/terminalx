@@ -1,4 +1,5 @@
 import { beforeEach, expect, it, vi } from "vitest";
+const waitFor = <T>(cb: () => T | Promise<T>, opts?: { timeout?: number; interval?: number }) => vi.waitFor(cb, { interval: 1, ...opts });
 import { CloudApiError, NotSentSignedOutError } from "../cloud/api";
 import { accountDeletionText as T, type AccountDeletionAttempt, type AccountDeletionRead } from "./deletion";
 import { plainRead } from "./fixtures";
@@ -171,7 +172,7 @@ it("says it is stopping running cloud workspaces, follows until they stop, then 
   api.accountDeletion.mockResolvedValueOnce({ ...read, deletion: attempt("stopping") }).mockRejectedValueOnce(new CloudApiError("unauthorized", 401));
   flow.confirm("alex@example.com");
   expect(flow.getSnapshot().sending).toBe("stopping");
-  await vi.waitFor(() => expect(flow.getSnapshot().phase.kind).toBe("scheduled"));
+  await waitFor(() => expect(flow.getSnapshot().phase.kind).toBe("scheduled"));
   // Every device was signed out before the server said the day: the page says the grace it gave, and Settings remembers nothing.
   expect(flow.getSnapshot().phase).toEqual({ kind: "scheduled", deleteAfter: null, graceDays: 14, stopped: 2 });
   expect(stored.value).toBeNull();
@@ -185,7 +186,7 @@ it("says the day a stopping answer gave when every device is signed out before t
   api.requestAccountDeletion.mockResolvedValueOnce(attempt("stopping", { deleteAfter: "2026-12-09T12:00:07.000Z" }));
   api.accountDeletion.mockRejectedValueOnce(new CloudApiError("unauthorized", 401));
   flow.confirm("alex@example.com");
-  await vi.waitFor(() => expect(flow.getSnapshot().phase.kind).toBe("scheduled"));
+  await waitFor(() => expect(flow.getSnapshot().phase.kind).toBe("scheduled"));
   expect(flow.getSnapshot().phase).toMatchObject({ deleteAfter: Date.parse("2026-12-09T12:00:07.000Z"), stopped: 1 });
   expect(stored.value).toBe(Date.parse("2026-12-09T12:00:07.000Z"));
 });
@@ -198,7 +199,7 @@ it("takes the day from a scheduled answer read while following", async () => {
   api.requestAccountDeletion.mockResolvedValueOnce(attempt("stopping"));
   api.accountDeletion.mockResolvedValueOnce({ ...read, deletion: attempt("scheduled", { deleteAfter: "2026-12-09T12:00:05.000Z" }) });
   flow.confirm("alex@example.com");
-  await vi.waitFor(() => expect(flow.getSnapshot().phase.kind).toBe("scheduled"));
+  await waitFor(() => expect(flow.getSnapshot().phase.kind).toBe("scheduled"));
   expect(flow.getSnapshot().phase).toMatchObject({ deleteAfter: Date.parse("2026-12-09T12:00:05.000Z") });
   expect(stored.value).toBe(Date.parse("2026-12-09T12:00:05.000Z"));
 });

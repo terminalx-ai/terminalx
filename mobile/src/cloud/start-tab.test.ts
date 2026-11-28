@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+const waitFor = <T>(cb: () => T | Promise<T>, opts?: { timeout?: number; interval?: number }) => vi.waitFor(cb, { interval: 1, ...opts });
 import { WorkspaceRpcError, type RuntimeAgent, type RuntimeAgentsReport } from "@terminalx/portable/workspace";
 import type { CloudCommand, CloudWorkspace } from "./api";
 import { b64, type CommandEnvelope } from "./crypto";
@@ -159,7 +160,7 @@ function harness(you: Record<string, unknown>) {
   return { session, api, runtimes, answers, sent, setTabs: (next: typeof tabs) => (tabs = next) };
 }
 
-const live = (h: ReturnType<typeof harness>) => vi.waitFor(() => expect(h.session.getSnapshot().tabs[0]?.source).toBe("live"));
+const live = (h: ReturnType<typeof harness>) => waitFor(() => expect(h.session.getSnapshot().tabs[0]?.source).toBe("live"));
 const MANAGER = { userId: "u-me", role: "manager", canApprove: true, canStart: true };
 
 beforeEach(() => vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] }));
@@ -263,7 +264,7 @@ describe("a tab that is gone (25.10)", () => {
     // Closed from elsewhere: the runtime no longer names it.
     h.setTabs([]);
     h.runtimes[0]!.encrypted({ event: "session.tabs", params: { tabs: [] } });
-    await vi.waitFor(() => expect(h.session.getSnapshot().tabs[0]).toMatchObject({ tabId: "t1", gone: true }));
+    await waitFor(() => expect(h.session.getSnapshot().tabs[0]).toMatchObject({ tabId: "t1", gone: true }));
     await h.session.cancel(entry.clientCommandId);
     await h.session.dismiss(entry.clientCommandId);
     expect(h.session.getSnapshot().tabs).toEqual([]);
@@ -275,7 +276,7 @@ describe("a tab that is gone (25.10)", () => {
     await h.session.start();
     await live(h);
     h.runtimes[0]!.encrypted({ event: "session.tabs", params: { tabs: [] } });
-    await vi.waitFor(() => expect(h.session.getSnapshot().tabs).toEqual([]));
+    await waitFor(() => expect(h.session.getSnapshot().tabs).toEqual([]));
     h.session.close();
   });
 });

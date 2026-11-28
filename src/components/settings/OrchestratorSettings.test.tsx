@@ -16,6 +16,16 @@ vi.mock("@/lib/api", () => ({
 }));
 vi.mock("@/lib/settingsFile", () => ({ useSettingsFile: () => ({ revision: 0 }) }));
 vi.mock("@/lib/sessions", () => ({ useSessionStore: () => ({ projects: mocks.projects }) }));
+vi.mock("@/icons", () => new Proxy({}, { has: () => true, get: (_, prop) => (prop === "then" || typeof prop === "symbol" ? undefined : prop === "__esModule" ? true : (props: Record<string, unknown>) => <svg {...props} />) }));
+vi.mock("@/components/ui/tooltip", () => ({
+  TooltipProvider: ({ children }: { children: React.ReactNode }) => children,
+  WithTooltip: ({ children }: { children: React.ReactNode }) => children,
+  Tooltip: ({ children }: { children: React.ReactNode }) => children,
+  TooltipTrigger: ({ children }: { children: React.ReactNode }) => children,
+  TooltipContent: () => null,
+  Kbd: ({ children }: { children: React.ReactNode }) => <kbd data-slot="kbd">{children}</kbd>,
+  KbdGroup: ({ keys }: { keys: string[] }) => <span data-slot="kbd">{keys.map((k, i) => <kbd key={i}>{k}</kbd>)}</span>,
+}));
 
 const { OrchestratorTab, RepositoryOrchestratorSettings } = await import("./OrchestratorSettings");
 const { defaultRoute, sameRoute } = await import("@/lib/orchestration");
@@ -69,7 +79,14 @@ beforeEach(() => {
 });
 afterEach(cleanup);
 
-const limit = (name: RegExp | string) => screen.getByRole("spinbutton", { name }) as HTMLInputElement;
+const limit = (name: RegExp | string) => {
+  const found = [...document.querySelectorAll<HTMLInputElement>('input[type="number"]')].find((el) => {
+    const label = el.getAttribute("aria-label") ?? "";
+    return typeof name === "string" ? label === name : name.test(label);
+  });
+  if (!found) throw new Error(`spinbutton not found: ${String(name)}`);
+  return found;
+};
 
 describe("Settings → Orchestrator (PRO-274)", () => {
   it("shows the three limits as stored and says what each does", async () => {

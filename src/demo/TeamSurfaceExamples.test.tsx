@@ -86,11 +86,13 @@ it("gates organization callbacks while keeping the local automation filter usabl
 
 for (const surface of surfaceIds) {
   describe(teamSurfaceDesigns[surface].title, () => {
-    for (const state of surfaceStatuses) {
-      it(`renders the ${state} design without retaining private ready data or firing an action`, () => {
-        const onAction = vi.fn();
-        render(<TeamSurfaceExample surface={surface} data={data} state={state} canAct onAction={onAction} />);
-        openSurface(surface);
+    it("renders each non-ready design without retaining private ready data or firing an action, and renders its ready recipe", () => {
+      const onAction = vi.fn();
+      const view = render(<TeamSurfaceExample surface={surface} data={data} state={surfaceStatuses[0]} canAct onAction={onAction} />);
+      openSurface(surface);
+      for (const state of surfaceStatuses) {
+        onAction.mockClear();
+        view.rerender(<TeamSurfaceExample surface={surface} data={data} state={state} canAct onAction={onAction} />);
         const message = surfaceMessage(surface, state);
         expect(screen.getByRole(state === "error" ? "alert" : "status").textContent).toContain(message.title);
         expect(screen.getByText(message.description)).toBeTruthy();
@@ -101,12 +103,9 @@ for (const surface of surfaceIds) {
           fireEvent.click(screen.getByRole("button", { name: "Try again" }));
           expect(onAction).toHaveBeenCalledWith(`Retry ${surface}`);
         }
-      });
-    }
-    it("renders its ready recipe from explicit data without triggering a mutation", () => {
-      const onAction = vi.fn();
-      render(<TeamSurfaceExample surface={surface} data={data} state="ready" canAct={false} onAction={onAction} />);
-      openSurface(surface);
+      }
+      onAction.mockClear();
+      view.rerender(<TeamSurfaceExample surface={surface} data={data} state="ready" canAct={false} onAction={onAction} />);
       expect(screen.queryByRole("alert")).toBeNull();
       expect(onAction).not.toHaveBeenCalled();
     });

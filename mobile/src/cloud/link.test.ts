@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+const waitFor = <T>(cb: () => T | Promise<T>, opts?: { timeout?: number; interval?: number }) => vi.waitFor(cb, { interval: 1, ...opts });
 import { WorkspaceRpcClient, type WorkspaceConnectionState } from "@terminalx/portable/workspace";
 import { CloudApiError } from "./api";
 import { NOW, pairingCode, relayHostId, Runtime } from "./fake-runtime";
@@ -67,7 +68,7 @@ function service(h: ReturnType<typeof harness>, polls = 0) {
 const settle = async () => {
   for (let index = 0; index < 40; index++) await Promise.resolve();
 };
-const connected = async (h: ReturnType<typeof harness>) => vi.waitFor(() => expect(h.link.state.state).toBe("connected"));
+const connected = async (h: ReturnType<typeof harness>) => waitFor(() => expect(h.link.state.state).toBe("connected"));
 
 beforeEach(() => vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] }));
 afterEach(() => vi.useRealTimers());
@@ -101,7 +102,7 @@ describe("the phone's connection to a cloud workspace", () => {
     const events: string[] = [];
     client.onNotification((notification) => events.push(notification.event));
     h.runtimes[0].encrypted({ event: "collab.presence", params: { participants: [] } });
-    await vi.waitFor(() => expect(events).toEqual(["collab.presence"]));
+    await waitFor(() => expect(events).toEqual(["collab.presence"]));
     client.close();
   });
 
@@ -230,14 +231,14 @@ describe("the phone's connection to a cloud workspace", () => {
     const older = harness();
     older.each((runtime) => (runtime.generation = 2));
     older.link.start();
-    await vi.waitFor(() => expect(older.link.state.state).toBe("reconnecting"));
+    await waitFor(() => expect(older.link.state.state).toBe("reconnecting"));
     expect(older.link.state).toMatchObject({ reason: "relay:4101" });
     expect(older.states.some((state) => state.state === "connected")).toBe(false);
 
     const generous = harness();
     generous.each((runtime) => (runtime.authority = "manage"));
     generous.link.start();
-    await vi.waitFor(() => expect(generous.link.state.state).toBe("reconnecting"));
+    await waitFor(() => expect(generous.link.state.state).toBe("reconnecting"));
     expect(generous.states.some((state) => state.state === "connected")).toBe(false);
     expect(generous.link.problem).toMatchObject({ kind: "protocol" });
   });
@@ -257,7 +258,7 @@ describe("the phone's connection to a cloud workspace", () => {
     const h = harness();
     h.each((runtime) => (runtime.refuse = 4404));
     h.link.start();
-    await vi.waitFor(() => expect(h.link.state.state).toBe("reconnecting"));
+    await waitFor(() => expect(h.link.state.state).toBe("reconnecting"));
     expect(h.link.state).toMatchObject({ reason: "relay:4404" });
     expect(h.link.problem).toEqual({ kind: "relay", code: 4404 });
     expect(h.runtimes[0].deviceToken).toBeNull();

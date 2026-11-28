@@ -2,6 +2,7 @@
 import { act, useEffect, useImperativeHandle, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+const waitFor = <T,>(cb: () => T | Promise<T>, opts?: { timeout?: number; interval?: number }) => vi.waitFor(cb, { interval: 1, ...opts });
 import * as DocumentPicker from "expo-document-picker";
 import * as ImagePicker from "expo-image-picker";
 import type { AgentEvent } from "@terminalx/portable/events";
@@ -462,9 +463,8 @@ describe("messages for the agent and worktree notes (#541)", () => {
     await publish("Ship it");
     await act(async () => {
       for (const listener of listeners) listener({ method: "chat.changed", params: { worktreeId: "worktree" } });
-      await new Promise((resolve) => setTimeout(resolve, 200));
     });
-    expect(shown("Ship it")).toEqual([expect.objectContaining({ kind: "turn", row: expect.objectContaining({ kind: "prompt" }) })]);
+    await waitFor(() => expect(shown("Ship it")).toEqual([expect.objectContaining({ kind: "turn", row: expect.objectContaining({ kind: "prompt" }) })]));
   });
 
   it("hides the note an older phone saved just before sending it, but not one added long before", async () => {
@@ -903,9 +903,8 @@ describe("mobile conversation navigation", () => {
     mocks.app.api.syncTranscript.mockResolvedValueOnce(page(11));
     await act(async () => {
       mocks.sessionListeners.get("claude")!(event("claude", "live", 11));
-      await new Promise((resolve) => setTimeout(resolve, 120));
     });
-    expect(container.textContent).toContain("synced 11");
+    await waitFor(() => expect(container.textContent).toContain("synced 11"));
     mocks.app.api.tail.mockResolvedValueOnce({ events: [event("claude", "oldest", 1)], hasMore: false });
     await click("Load earlier");
     expect(mocks.app.api.tail).toHaveBeenLastCalledWith("worktree", "claude", 5);
@@ -1059,7 +1058,7 @@ describe("the phone's terminal view, as on the desktop", () => {
   const openTerminalView = async () => {
     await render();
     await click("Terminal");
-    await vi.waitFor(() => expect(mocks.terminalListeners.has("claude")).toBe(true));
+    await waitFor(() => expect(mocks.terminalListeners.has("claude")).toBe(true));
   };
 
   it("keeps an unsent screenshot when returning to chat", async () => {
@@ -1083,11 +1082,11 @@ describe("the phone's terminal view, as on the desktop", () => {
     expect(mocks.app.api.openTerminal.mock.invocationCallOrder[0]).toBeLessThan(mocks.app.api.subscribeTerminal.mock.invocationCallOrder[0]);
     // The chat's transcript requests stop: only the terminal is shown.
     await show({ type: "scrollback", serialized: "\x1b[?1049h\x1b[2J\x1b[1;1H\x1b[1mCodex\x1b[0m ready\x1b[3;1H› ", cols: 40, rows: 4 });
-    await vi.waitFor(() => expect(container.textContent).toContain("Codex ready"));
+    await waitFor(() => expect(container.textContent).toContain("Codex ready"));
     expect(container.textContent).not.toContain("\x1b[");
     await show({ type: "resized", cols: 60, rows: 6 });
     await show({ type: "data", chunk: "\x1b[2J\x1b[1;1Hredrawn at 60 columns" });
-    await vi.waitFor(() => expect(container.textContent).toContain("redrawn at 60 columns"));
+    await waitFor(() => expect(container.textContent).toContain("redrawn at 60 columns"));
     expect(container.textContent).not.toContain("Codex ready");
   });
 
@@ -1095,14 +1094,14 @@ describe("the phone's terminal view, as on the desktop", () => {
     terminalMac();
     await openTerminalView();
     await show({ type: "scrollback", serialized: "$ ", cols: 40, rows: 4 });
-    await vi.waitFor(() => expect(button("Escape").disabled).toBe(false));
+    await waitFor(() => expect(button("Escape").disabled).toBe(false));
     await type("l");
     await click("Escape");
     await click("Up");
     await click("Control"); await type("c");
     // A full-screen program turns on application cursor keys and bracketed paste.
     await show({ type: "data", chunk: "\x1b[?1h\x1b[?2004h" });
-    await vi.waitFor(async () => { await click("Up"); expect(sent().at(-1)).toBe("\x1bOA"); });
+    await waitFor(async () => { await click("Up"); expect(sent().at(-1)).toBe("\x1bOA"); });
     // Sent whole as a paste (line breaks to Enter is `pasteSequence`'s, in keys.test.ts).
     await click("Buffered");
     await type("git status");
@@ -1117,7 +1116,7 @@ describe("the phone's terminal view, as on the desktop", () => {
     mocks.app.api.openTerminal.mockResolvedValueOnce({ opened: false, message: "Wait for Codex to finish this turn, or interrupt it, before opening its terminal." });
     await render();
     await click("Terminal");
-    await vi.waitFor(() => expect(container.textContent).toContain("Wait for Codex to finish this turn"));
+    await waitFor(() => expect(container.textContent).toContain("Wait for Codex to finish this turn"));
     expect(mocks.app.api.subscribeTerminal).not.toHaveBeenCalled();
     expect(button("Escape").disabled).toBe(true);
     let finish!: (value: { opened: boolean }) => void;
@@ -1126,7 +1125,7 @@ describe("the phone's terminal view, as on the desktop", () => {
     expect(container.textContent).toContain("Opening…");
     expect(container.textContent).not.toContain("Wait for Codex to finish this turn");
     await act(async () => finish({ opened: true }));
-    await vi.waitFor(() => expect(mocks.terminalListeners.has("claude")).toBe(true));
+    await waitFor(() => expect(mocks.terminalListeners.has("claude")).toBe(true));
     expect(mocks.app.api.openTerminal).toHaveBeenCalledTimes(2);
   });
 
@@ -1135,7 +1134,7 @@ describe("the phone's terminal view, as on the desktop", () => {
     mocks.app.api.queueInput.mockResolvedValueOnce({ accepted: false, message: "Another mobile client or terminal instance owns this driver lease." });
     await openTerminalView();
     await show({ type: "scrollback", serialized: "$ ", cols: 40, rows: 4 });
-    await vi.waitFor(() => expect(button("Escape").disabled).toBe(false));
+    await waitFor(() => expect(button("Escape").disabled).toBe(false));
     await click("Escape");
     expect(container.textContent).toContain("owns this driver lease");
     await click("Tab");
@@ -1160,14 +1159,14 @@ describe("the phone's terminal view, as on the desktop", () => {
     expect(labels()).not.toContain("Terminal");
     mocks.app.api.features = async () => ({ terminal: 1 });
     await act(async () => { for (const listener of mocks.featureListeners) listener(); });
-    await vi.waitFor(() => expect(labels()).toContain("Terminal"));
+    await waitFor(() => expect(labels()).toContain("Terminal"));
     await click("Terminal");
-    await vi.waitFor(() => expect(mocks.terminalListeners.has("claude")).toBe(true));
+    await waitFor(() => expect(mocks.terminalListeners.has("claude")).toBe(true));
     // And it goes again with a runtime that does not serve it: the chat is shown.
     mocks.app.api.features = async () => ({});
     await act(async () => { for (const listener of mocks.featureListeners) listener(); });
-    await vi.waitFor(() => expect(labels()).not.toContain("Terminal"));
-    await vi.waitFor(() => expect(container.textContent).toContain("claude transcript"));
+    await waitFor(() => expect(labels()).not.toContain("Terminal"));
+    await waitFor(() => expect(container.textContent).toContain("claude transcript"));
     expect(mocks.terminalListeners.has("claude")).toBe(false);
   });
 
@@ -1177,14 +1176,14 @@ describe("the phone's terminal view, as on the desktop", () => {
     mocks.app.api.openTerminal.mockResolvedValue({ opened: false, message: "TerminalX on your computer needs updating or restarting to do this." });
     await render();
     await click("Terminal");
-    await vi.waitFor(() => expect(container.textContent).toContain("The terminal isn't available"));
+    await waitFor(() => expect(container.textContent).toContain("The terminal isn't available"));
     expect(container.textContent).toContain("TerminalX on your computer needs updating or restarting to do this.");
     expect(container.textContent).not.toContain("Unsupported paired-device owner operation");
     await click("Chat");
-    await vi.waitFor(() => expect(container.textContent).toContain("claude transcript"));
+    await waitFor(() => expect(container.textContent).toContain("claude transcript"));
     await type("still here");
     await click("Send");
-    await vi.waitFor(() => expect(mocks.app.api.sendSession).toHaveBeenCalled());
+    await waitFor(() => expect(mocks.app.api.sendSession).toHaveBeenCalled());
   });
 });
 
@@ -1216,7 +1215,7 @@ describe("a compaction on the paired Mac, as the desktop shows it (#644)", () =>
   it("says compacted once it ended", async () => {
     mocks.app.api.tail.mockResolvedValue({ events: [...started, lifecycle(4, { type: "item_completed", turnId: "turn", itemId: "item" })], hasMore: false });
     await render();
-    await vi.waitFor(() => expect(container.textContent).toContain("Context compacted"));
+    await waitFor(() => expect(container.textContent).toContain("Context compacted"));
     expect(container.textContent).not.toContain("Compacting context…");
   });
 });
