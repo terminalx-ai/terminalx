@@ -24,6 +24,21 @@ fn err<E: std::fmt::Display>(e: E) -> String {
     format!("{e:#}")
 }
 
+/// Enforce that a privileged Tauri command was invoked by the `"main"` window
+/// (matching `issue_confirmation`), so `floating` and `chat-*` windows cannot
+/// bypass `capabilities/floating.json` isolation.
+pub(crate) fn require_main_window_label(label: &str) -> CmdResult<()> {
+    if label == "main" {
+        Ok(())
+    } else {
+        Err("This action is only allowed from the main TerminalX window.".into())
+    }
+}
+
+pub(crate) fn require_main_window(window: &tauri::WebviewWindow) -> CmdResult<()> {
+    require_main_window_label(window.label())
+}
+
 
 // ------------------------------------------------------------------ account
 
@@ -51,8 +66,10 @@ pub async fn account_refresh_roles(
 #[tauri::command]
 pub async fn account_sign_in(
     app: AppHandle,
+    window: tauri::WebviewWindow,
     state: tauri::State<'_, crate::AppState>,
 ) -> CmdResult<crate::account::AccountStatus> {
+    require_main_window(&window)?;
     let account = state.account.clone();
     tauri::async_runtime::spawn_blocking(move || account.begin_sign_in(&app)).await.map_err(err)?.map_err(err)
 }
@@ -63,9 +80,11 @@ pub async fn account_sign_in(
 #[tauri::command]
 pub async fn account_paste_callback(
     app: AppHandle,
+    window: tauri::WebviewWindow,
     state: tauri::State<'_, crate::AppState>,
     link: String,
 ) -> CmdResult<()> {
+    require_main_window(&window)?;
     let account = state.account.clone();
     tauri::async_runtime::spawn_blocking(move || account.paste_callback(&app, &link)).await.map_err(err)?.map_err(err)
 }
@@ -73,7 +92,8 @@ pub async fn account_paste_callback(
 /// Opens an organization's page in the web console in the system browser
 /// (PRO-40: API keys and webhooks are managed there).
 #[tauri::command]
-pub fn organization_console_open(app: AppHandle, organization_id: String) -> CmdResult<()> {
+pub fn organization_console_open(app: AppHandle, window: tauri::WebviewWindow, organization_id: String) -> CmdResult<()> {
+    require_main_window(&window)?;
     use tauri_plugin_opener::OpenerExt;
     let url = crate::account::organization_console_url(&organization_id).map_err(err)?;
     app.opener().open_url(url.as_str(), None::<&str>).map_err(err)
@@ -82,8 +102,10 @@ pub fn organization_console_open(app: AppHandle, organization_id: String) -> Cmd
 #[tauri::command]
 pub async fn account_sign_out(
     app: AppHandle,
+    window: tauri::WebviewWindow,
     state: tauri::State<'_, crate::AppState>,
 ) -> CmdResult<crate::account::AccountStatus> {
+    require_main_window(&window)?;
     state.pairing.sign_out().await;
     // Withdrawn while the token still works: this Mac's issues stop showing as worked on.
     let claims = state.work_claims.clone();
@@ -93,10 +115,12 @@ pub async fn account_sign_out(
 
 #[tauri::command]
 pub async fn organization_create(
+    window: tauri::WebviewWindow,
     name: String,
     idempotency_key: String,
     state: tauri::State<'_, crate::AppState>,
 ) -> CmdResult<crate::account::OrganizationCreated> {
+    require_main_window(&window)?;
     let account = state.account.clone();
     tauri::async_runtime::spawn_blocking(move || account.create_organization(&name, &idempotency_key))
         .await
@@ -140,11 +164,15 @@ pub async fn organization_computer_save(
 #[tauri::command]
 pub async fn organization_delete(
     app: AppHandle,
+    window: tauri::WebviewWindow,
     organization_id: String,
     context_revision: String,
     confirmation_name: String,
     state: tauri::State<'_, crate::AppState>,
 ) -> Result<crate::account::RolesRefresh, crate::account::organization_delete::DeleteError> {
+    if require_main_window(&window).is_err() {
+        return Err(crate::account::organization_delete::DeleteError::local("main_window_required"));
+    }
     let account = state.account.clone();
     tauri::async_runtime::spawn_blocking(move || account.delete_organization(&app, &organization_id, &context_revision, &confirmation_name))
         .await.map_err(|_| crate::account::organization_delete::DeleteError::local("organization_delete_outcome_unknown"))?
@@ -1824,9 +1852,11 @@ pub async fn pairing_retry_relay(state: tauri::State<'_, crate::AppState>) -> Cm
 
 #[tauri::command]
 pub async fn pairing_generate(
+    window: tauri::WebviewWindow,
     connection_mode: Option<crate::pairing::PairingConnectionMode>,
     state: tauri::State<'_, crate::AppState>,
 ) -> CmdResult<crate::pairing::PairingStatus> {
+    require_main_window(&window)?;
     state
         .pairing
         .clone()
@@ -1837,18 +1867,22 @@ pub async fn pairing_generate(
 
 #[tauri::command]
 pub async fn pairing_revoke(
+    window: tauri::WebviewWindow,
     device_id: String,
     state: tauri::State<'_, crate::AppState>,
 ) -> CmdResult<crate::pairing::PairingStatus> {
+    require_main_window(&window)?;
     state.pairing.revoke_device(&device_id).await.map_err(err)
 }
 
 /// The person approved the phone waiting with `request_id` (PRO-314).
 #[tauri::command]
 pub async fn pairing_approve(
+    window: tauri::WebviewWindow,
     request_id: String,
     state: tauri::State<'_, crate::AppState>,
 ) -> CmdResult<crate::pairing::PairingStatus> {
+    require_main_window(&window)?;
     let pairing = state.pairing.clone();
     tauri::async_runtime::spawn_blocking(move || pairing.approve_pairing(&request_id)).await.map_err(err)?.map_err(err)
 }
@@ -1856,9 +1890,11 @@ pub async fn pairing_approve(
 /// Off the main thread: declining removes the device token from the Keychain.
 #[tauri::command]
 pub async fn pairing_decline(
+    window: tauri::WebviewWindow,
     request_id: String,
     state: tauri::State<'_, crate::AppState>,
 ) -> CmdResult<crate::pairing::PairingStatus> {
+    require_main_window(&window)?;
     let pairing = state.pairing.clone();
     tauri::async_runtime::spawn_blocking(move || pairing.decline_pairing(&request_id)).await.map_err(err)?.map_err(err)
 }
@@ -1866,9 +1902,11 @@ pub async fn pairing_decline(
 /// End a phone's connections and keep its pairing.
 #[tauri::command]
 pub async fn pairing_disconnect(
+    window: tauri::WebviewWindow,
     device_id: String,
     state: tauri::State<'_, crate::AppState>,
 ) -> CmdResult<crate::pairing::PairingStatus> {
+    require_main_window(&window)?;
     let pairing = state.pairing.clone();
     tauri::async_runtime::spawn_blocking(move || pairing.disconnect_device(&device_id)).await.map_err(err)?.map_err(err)
 }
@@ -1876,9 +1914,11 @@ pub async fn pairing_disconnect(
 /// Keep this Mac awake while a phone is connected.
 #[tauri::command]
 pub async fn pairing_set_keep_awake(
+    window: tauri::WebviewWindow,
     enabled: bool,
     state: tauri::State<'_, crate::AppState>,
 ) -> CmdResult<crate::pairing::PairingStatus> {
+    require_main_window(&window)?;
     let pairing = state.pairing.clone();
     tauri::async_runtime::spawn_blocking(move || pairing.set_keep_awake(enabled)).await.map_err(err)?.map_err(err)
 }
@@ -1894,9 +1934,11 @@ pub async fn machine_name(state: tauri::State<'_, crate::AppState>) -> CmdResult
 /// Work status sent from here carries the new name straight away.
 #[tauri::command]
 pub async fn set_machine_name(
+    window: tauri::WebviewWindow,
     name: Option<String>,
     state: tauri::State<'_, crate::AppState>,
 ) -> CmdResult<crate::pairing::MachineName> {
+    require_main_window(&window)?;
     let named = state.pairing.set_host_name(name.as_deref()).await.map_err(err)?;
     state.work_claims.nudge();
     Ok(named)
@@ -1936,7 +1978,8 @@ pub async fn repository_folders(path: String, measure: bool) -> CmdResult<crate:
 pub(crate) const PROJECTS_CHANGED_EVENT: &str = "projects_changed";
 
 #[tauri::command]
-pub fn add_project(app: AppHandle, path: String) -> CmdResult<Project> {
+pub fn add_project(app: AppHandle, window: tauri::WebviewWindow, path: String) -> CmdResult<Project> {
+    require_main_window(&window)?;
     let project = projects::add(&path).map_err(err)?;
     let _ = app.emit(PROJECTS_CHANGED_EVENT, &());
     Ok(project)
@@ -1956,7 +1999,8 @@ pub fn chats_dir() -> CmdResult<String> {
 }
 
 #[tauri::command]
-pub fn remove_project(app: AppHandle, path: String) -> CmdResult<()> {
+pub fn remove_project(app: AppHandle, window: tauri::WebviewWindow, path: String) -> CmdResult<()> {
+    require_main_window(&window)?;
     projects::remove(&path).map_err(err)?;
     let _ = app.emit(PROJECTS_CHANGED_EVENT, &());
     Ok(())
@@ -1985,7 +2029,8 @@ pub async fn github_repositories() -> CmdResult<crate::project_start::GithubRepo
 /// Clone a repository under `parent`. Resolves when the clone is whole (or
 /// was already there); `id` names it for progress events and for canceling.
 #[tauri::command]
-pub async fn project_clone(app: AppHandle, id: String, source: String, parent: String) -> StartResult<crate::project_start::CloneOutcome> {
+pub async fn project_clone(app: AppHandle, window: tauri::WebviewWindow, id: String, source: String, parent: String) -> StartResult<crate::project_start::CloneOutcome> {
+    require_main_window(&window).map_err(start_failure)?;
     crate::project_start::clone_queued(id, source, parent, move |progress| {
         let _ = app.emit(PROJECT_CLONE_PROGRESS_EVENT, &progress);
     }).await
@@ -2004,7 +2049,8 @@ pub fn project_start_defaults(parent: Option<String>) -> crate::project_start::S
 /// "Create a project": a new Git repository at `parent/name` holding `template`'s
 /// files in one first commit on `main`, returned as a path to add.
 #[tauri::command]
-pub async fn project_create(parent: String, name: String, template: String) -> StartResult<String> {
+pub async fn project_create(window: tauri::WebviewWindow, parent: String, name: String, template: String) -> StartResult<String> {
+    require_main_window(&window).map_err(start_failure)?;
     tauri::async_runtime::spawn_blocking(move || crate::project_start::create_project(&parent, &name, &template)).await.map_err(start_failure)?
 }
 
@@ -2016,13 +2062,15 @@ pub fn project_templates() -> StartResult<Vec<crate::project_templates::Template
 
 /// Keep the folder at `path` as a template for new projects.
 #[tauri::command]
-pub async fn project_template_add(path: String) -> StartResult<crate::project_templates::TemplateInfo> {
+pub async fn project_template_add(window: tauri::WebviewWindow, path: String) -> StartResult<crate::project_templates::TemplateInfo> {
+    require_main_window(&window).map_err(start_failure)?;
     tauri::async_runtime::spawn_blocking(move || crate::project_templates::add(&path)).await.map_err(start_failure)?
 }
 
 /// Forget a template the reader added; its folder is left as it is.
 #[tauri::command]
-pub fn project_template_remove(id: String) -> StartResult<()> {
+pub fn project_template_remove(window: tauri::WebviewWindow, id: String) -> StartResult<()> {
+    require_main_window(&window).map_err(start_failure)?;
     crate::project_templates::remove(&id)
 }
 
@@ -2096,19 +2144,22 @@ pub async fn automation_source_preview(project_path: String, source: crate::auto
 }
 
 #[tauri::command]
-pub async fn automation_create(state: State<'_, AppState>, input: crate::automations::AutomationInput) -> CmdResult<crate::automations::Automation> {
+pub async fn automation_create(window: tauri::WebviewWindow, state: State<'_, AppState>, input: crate::automations::AutomationInput) -> CmdResult<crate::automations::Automation> {
+    require_main_window(&window)?;
     let sessions = state.sessions().map_err(err)?;
     tauri::async_runtime::spawn_blocking(move || sessions.save_automation(None, input).map_err(err)).await.map_err(err)?
 }
 
 #[tauri::command]
-pub async fn automation_update(state: State<'_, AppState>, id: String, input: crate::automations::AutomationInput) -> CmdResult<crate::automations::Automation> {
+pub async fn automation_update(window: tauri::WebviewWindow, state: State<'_, AppState>, id: String, input: crate::automations::AutomationInput) -> CmdResult<crate::automations::Automation> {
+    require_main_window(&window)?;
     let sessions = state.sessions().map_err(err)?;
     tauri::async_runtime::spawn_blocking(move || sessions.save_automation(Some(&id), input).map_err(err)).await.map_err(err)?
 }
 
 #[tauri::command]
-pub async fn automation_delete(state: State<'_, AppState>, id: String) -> CmdResult<()> {
+pub async fn automation_delete(window: tauri::WebviewWindow, state: State<'_, AppState>, id: String) -> CmdResult<()> {
+    require_main_window(&window)?;
     let sessions = state.sessions().map_err(err)?;
     tauri::async_runtime::spawn_blocking(move || sessions.delete_automation(&id).map_err(err)).await.map_err(err)?
 }
@@ -2116,13 +2167,15 @@ pub async fn automation_delete(state: State<'_, AppState>, id: String) -> CmdRes
 /// The editor's Try it for an automation's first check (PRO-484). The owner
 /// runs it, with the environment an automation session would get.
 #[tauri::command]
-pub async fn automation_precheck_try(state: State<'_, AppState>, input: serde_json::Value) -> CmdResult<crate::automations::precheck::PrecheckTrial> {
+pub async fn automation_precheck_try(window: tauri::WebviewWindow, state: State<'_, AppState>, input: serde_json::Value) -> CmdResult<crate::automations::precheck::PrecheckTrial> {
+    require_main_window(&window)?;
     let sessions = state.sessions().map_err(err)?;
     tauri::async_runtime::spawn_blocking(move || sessions.try_automation_precheck(input).map_err(err)).await.map_err(err)?
 }
 
 #[tauri::command]
-pub async fn automation_run_now(state: State<'_, AppState>, id: String) -> CmdResult<crate::automations::AutomationRun> {
+pub async fn automation_run_now(window: tauri::WebviewWindow, state: State<'_, AppState>, id: String) -> CmdResult<crate::automations::AutomationRun> {
+    require_main_window(&window)?;
     let sessions = state.sessions().map_err(err)?;
     tauri::async_runtime::spawn_blocking(move || sessions.run_automation(&id).map_err(err))
         .await
@@ -2481,7 +2534,8 @@ pub fn conversation_settings() -> crate::store::settings::ConversationSettings {
 
 /// The runtime reads the limit again at its next sweep.
 #[tauri::command]
-pub fn set_archive_idle_days(days: u32) -> CmdResult<crate::store::settings::ConversationSettings> {
+pub fn set_archive_idle_days(window: tauri::WebviewWindow, days: u32) -> CmdResult<crate::store::settings::ConversationSettings> {
+    require_main_window(&window)?;
     if !crate::store::settings::ARCHIVE_IDLE_DAYS.contains(&days) {
         return Err(format!("{days} days is not one of the idle limits offered."));
     }
@@ -2611,7 +2665,8 @@ pub async fn list_harnesses() -> CmdResult<Vec<harness::HarnessInfo>> {
 /// which the webview shows; its exit code says how the step ended
 /// (`harness::setup::exit`).
 #[tauri::command]
-pub async fn agent_setup_start(state: State<'_, AppState>, id: String, harness: String, step: String, cols: u16, rows: u16) -> CmdResult<()> {
+pub async fn agent_setup_start(window: tauri::WebviewWindow, state: State<'_, AppState>, id: String, harness: String, step: String, cols: u16, rows: u16) -> CmdResult<()> {
+    require_main_window(&window)?;
     let runtime = state.runtime().ok_or_else(|| state.runtime_error.lock().unwrap().clone())?;
     tauri::async_runtime::spawn_blocking(move || runtime.terminals()?.agent_setup(&id, &harness, &step, cols, rows)).await.map_err(err)?.map_err(err)
 }
@@ -2669,7 +2724,8 @@ pub async fn agent_configs_preview(changes: Vec<crate::agent_configs::Change>) -
 /// Write the previewed copies, backing each file up first. `token` is the
 /// preview's: anything else (the files changed since) is refused.
 #[tauri::command]
-pub async fn agent_configs_apply(changes: Vec<crate::agent_configs::Change>, token: String) -> CmdResult<Vec<crate::agent_configs::Written>> {
+pub async fn agent_configs_apply(window: tauri::WebviewWindow, changes: Vec<crate::agent_configs::Change>, token: String) -> CmdResult<Vec<crate::agent_configs::Written>> {
+    require_main_window(&window)?;
     tauri::async_runtime::spawn_blocking(move || crate::agent_configs::apply(&changes, &token).map_err(err)).await.map_err(err)?
 }
 
@@ -2940,26 +2996,27 @@ pub async fn send_message(
 /// size limit and more than ten.
 #[tauri::command]
 pub async fn store_attachments(session_id: String, files: Vec<crate::attachments::FileInput>) -> CmdResult<Vec<crate::events::FileRef>> {
-    tauri::async_runtime::spawn_blocking(move || crate::attachments::store(&session_id, &files).map_err(err)).await.map_err(err)?
+    tauri::async_runtime::spawn_blocking(move || crate::attachments::store_confined(&session_id, &files).map_err(err)).await.map_err(err)?
 }
 
 /// Size and media type of dropped or picked paths, in the order given.
 #[tauri::command]
 pub async fn inspect_attachments(paths: Vec<String>) -> CmdResult<Vec<crate::attachments::FileFacts>> {
-    tauri::async_runtime::spawn_blocking(move || Ok(crate::attachments::inspect(&paths))).await.map_err(err)?
+    tauri::async_runtime::spawn_blocking(move || Ok(crate::attachments::inspect_confined(&paths))).await.map_err(err)?
 }
 
 /// One part of a file attached to a message for a machine (PRO-407), read
 /// here so only its bytes are uploaded, never its path.
 #[tauri::command]
 pub async fn read_attachment_part(path: String, offset: u64) -> CmdResult<crate::attachments::FilePart> {
-    tauri::async_runtime::spawn_blocking(move || crate::attachments::read_part(&path, offset).map_err(err)).await.map_err(err)?
+    tauri::async_runtime::spawn_blocking(move || crate::attachments::read_part_confined(&path, offset).map_err(err)).await.map_err(err)?
 }
 
 /// A file tab's Download: a copy of a stored attachment, written where the
 /// person chose in the save dialog.
 #[tauri::command]
-pub async fn save_attachment_copy(path: String, to: String) -> CmdResult<()> {
+pub async fn save_attachment_copy(window: tauri::WebviewWindow, path: String, to: String) -> CmdResult<()> {
+    require_main_window(&window)?;
     tauri::async_runtime::spawn_blocking(move || crate::attachments::save_copy(&path, &to).map_err(err)).await.map_err(err)?
 }
 
@@ -3208,7 +3265,8 @@ pub fn status_bar_settings() -> crate::store::settings::StatusBarSettings {
 }
 
 #[tauri::command]
-pub fn set_status_bar_settings(app: AppHandle, patch: StatusBarPatch) -> CmdResult<crate::store::settings::StatusBarSettings> {
+pub fn set_status_bar_settings(app: AppHandle, window: tauri::WebviewWindow, patch: StatusBarPatch) -> CmdResult<crate::store::settings::StatusBarSettings> {
+    require_main_window(&window)?;
     let mut settings = store::settings::load();
     if let Some(value) = patch.visible {
         settings.status_bar.visible = value;
@@ -3269,10 +3327,12 @@ pub async fn status_resource_sample(state: State<'_, AppState>) -> CmdResult<ser
 
 #[tauri::command]
 pub async fn status_resource_kill(
+    window: tauri::WebviewWindow,
     state: State<'_, AppState>,
     pane_id: String,
     confirmed: Option<bool>,
 ) -> CmdResult<serde_json::Value> {
+    require_main_window(&window)?;
     let sessions = state.sessions().map_err(err)?;
     tauri::async_runtime::spawn_blocking(move || sessions.resource_kill(&pane_id, confirmed.unwrap_or(false)).map_err(err))
         .await
@@ -3283,7 +3343,7 @@ pub async fn status_resource_kill(
 
 #[tauri::command]
 pub async fn list_files(cwd: String, limit: Option<usize>) -> CmdResult<crate::files::FileList> {
-    tauri::async_runtime::spawn_blocking(move || crate::files::list_all(Path::new(&cwd), limit.unwrap_or(60_000)))
+    tauri::async_runtime::spawn_blocking(move || crate::files::list_all_confined(Path::new(&cwd), limit.unwrap_or(60_000)))
         .await
         .map_err(err)?
         .map_err(err)
@@ -3292,7 +3352,7 @@ pub async fn list_files(cwd: String, limit: Option<usize>) -> CmdResult<crate::f
 #[tauri::command]
 pub async fn search_files(cwd: String, query: String, limit: Option<usize>, include_ignored: Option<bool>) -> CmdResult<Vec<crate::files::FileHit>> {
     tauri::async_runtime::spawn_blocking(move || {
-        crate::files::search(Path::new(&cwd), &query, limit.unwrap_or(40), include_ignored.unwrap_or(false)).map_err(err)
+        crate::files::search_confined(Path::new(&cwd), &query, limit.unwrap_or(40), include_ignored.unwrap_or(false)).map_err(err)
     })
     .await
     .map_err(err)?
@@ -3301,9 +3361,9 @@ pub async fn search_files(cwd: String, query: String, limit: Option<usize>, incl
 /// How many files `search_files` looks through in this checkout.
 #[tauri::command]
 pub async fn count_files(cwd: String, include_ignored: Option<bool>) -> CmdResult<crate::files::FileCount> {
-    tauri::async_runtime::spawn_blocking(move || crate::files::count(Path::new(&cwd), include_ignored.unwrap_or(false)))
+    tauri::async_runtime::spawn_blocking(move || crate::files::count_confined(Path::new(&cwd), include_ignored.unwrap_or(false)).map_err(err))
         .await
-        .map_err(err)
+        .map_err(err)?
 }
 
 #[tauri::command]
@@ -3331,6 +3391,8 @@ pub struct ImageFile {
 #[tauri::command]
 pub async fn read_image_file(path: String) -> CmdResult<Option<ImageFile>> {
     tauri::async_runtime::spawn_blocking(move || {
+        use std::io::Read;
+        const MAX_IMAGE_BYTES: u64 = 5 * 1024 * 1024;
         let p = Path::new(&path);
         let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
         let media = match ext.as_str() {
@@ -3340,16 +3402,21 @@ pub async fn read_image_file(path: String) -> CmdResult<Option<ImageFile>> {
             "webp" => "image/webp",
             _ => return Ok(None),
         };
-        let meta = std::fs::metadata(p).map_err(err)?;
-        if meta.len() > 5 * 1024 * 1024 {
+        let (canonical, file) = crate::files::open_confined_read_in(p, &crate::files::allowed_read_roots(), true, false).map_err(err)?;
+        let meta = file.metadata().map_err(err)?;
+        if !meta.is_file() || meta.len() > MAX_IMAGE_BYTES {
+            return Ok(None);
+        }
+        let mut bytes = Vec::with_capacity(meta.len() as usize);
+        file.take(MAX_IMAGE_BYTES + 1).read_to_end(&mut bytes).map_err(err)?;
+        if bytes.len() as u64 > MAX_IMAGE_BYTES {
             return Ok(None);
         }
         use base64::Engine as _;
-        let bytes = std::fs::read(p).map_err(err)?;
         Ok(Some(ImageFile {
             media_type: media.into(),
             data: base64::engine::general_purpose::STANDARD.encode(bytes),
-            name: p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+            name: canonical.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
         }))
     })
     .await
@@ -3454,7 +3521,8 @@ pub async fn git_has_remote(cwd: String) -> CmdResult<bool> {
 }
 
 #[tauri::command]
-pub async fn git_add_remote(cwd: String, url: String) -> CmdResult<()> {
+pub async fn git_add_remote(window: tauri::WebviewWindow, cwd: String, url: String) -> CmdResult<()> {
+    require_main_window(&window)?;
     tauri::async_runtime::spawn_blocking(move || git::add_remote(Path::new(&cwd), &url).map_err(err)).await.map_err(err)?
 }
 
@@ -3464,13 +3532,15 @@ pub async fn gh_connection_status(cwd: Option<String>) -> CmdResult<crate::githu
 }
 
 #[tauri::command]
-pub async fn gh_login_start(state: State<'_, AppState>, id: String, hostname: String) -> CmdResult<()> {
+pub async fn gh_login_start(window: tauri::WebviewWindow, state: State<'_, AppState>, id: String, hostname: String) -> CmdResult<()> {
+    require_main_window(&window)?;
     let runtime = state.runtime().ok_or_else(|| state.runtime_error.lock().unwrap().clone())?;
     github_work(move || runtime.terminals()?.github_login(&id, &hostname)).await.map_err(err)?.map_err(err)
 }
 
 #[tauri::command]
-pub async fn gh_create_repository(cwd: String, name: String, private: bool) -> CmdResult<()> {
+pub async fn gh_create_repository(window: tauri::WebviewWindow, cwd: String, name: String, private: bool) -> CmdResult<()> {
+    require_main_window(&window)?;
     github_work(move || crate::github::create_repository(Path::new(&cwd), &name, private).map_err(err)).await.map_err(err)?
 }
 
@@ -4179,34 +4249,35 @@ pub fn cloud_control_reply(id: String, result: serde_json::Value) {
 
 #[tauri::command]
 pub async fn list_dir(root: String, rel: String) -> CmdResult<Vec<crate::files::DirEntry>> {
-    tauri::async_runtime::spawn_blocking(move || crate::files::list_dir(Path::new(&root), &rel)).await.map_err(err)?.map_err(err)
+    tauri::async_runtime::spawn_blocking(move || crate::files::list_dir_confined(Path::new(&root), &rel)).await.map_err(err)?.map_err(err)
 }
 
 #[tauri::command]
 pub async fn read_text_file(path: String) -> CmdResult<crate::files::TextFile> {
-    tauri::async_runtime::spawn_blocking(move || crate::files::read_text(Path::new(&path))).await.map_err(err)?.map_err(err)
+    tauri::async_runtime::spawn_blocking(move || crate::files::read_text_confined(Path::new(&path))).await.map_err(err)?.map_err(err)
 }
 
 #[tauri::command]
 pub async fn write_text_file(path: String, content: String) -> CmdResult<u64> {
-    tauri::async_runtime::spawn_blocking(move || crate::files::write_text(Path::new(&path), &content)).await.map_err(err)?.map_err(err)
+    tauri::async_runtime::spawn_blocking(move || crate::files::write_text_confined(Path::new(&path), &content)).await.map_err(err)?.map_err(err)
 }
 
 /// Exclusive create: refused when the path already exists.
 #[tauri::command]
 pub async fn create_text_file(path: String, content: String) -> CmdResult<u64> {
-    tauri::async_runtime::spawn_blocking(move || crate::files::create_text(Path::new(&path), &content)).await.map_err(err)?.map_err(err)
+    tauri::async_runtime::spawn_blocking(move || crate::files::create_text_confined(Path::new(&path), &content)).await.map_err(err)?.map_err(err)
 }
 
 #[tauri::command]
 pub async fn read_whole_text_file(path: String) -> CmdResult<String> {
-    tauri::async_runtime::spawn_blocking(move || crate::files::read_whole_text(Path::new(&path))).await.map_err(err)?.map_err(err)
+    tauri::async_runtime::spawn_blocking(move || crate::files::read_whole_text_confined(Path::new(&path))).await.map_err(err)?.map_err(err)
 }
 
 /// Local-main-window only: the file tab's Download, to a path the person chose in a save dialog.
 #[tauri::command]
-pub async fn export_file(to: String, from: Option<String>, content: Option<String>) -> CmdResult<u64> {
-    tauri::async_runtime::spawn_blocking(move || crate::files::export_file(Path::new(&to), from.as_deref().map(Path::new), content.as_deref()))
+pub async fn export_file(window: tauri::WebviewWindow, to: String, from: Option<String>, content: Option<String>) -> CmdResult<u64> {
+    require_main_window(&window)?;
+    tauri::async_runtime::spawn_blocking(move || crate::files::export_file_confined(Path::new(&to), from.as_deref().map(Path::new), content.as_deref()))
         .await
         .map_err(err)?
         .map_err(err)
@@ -4214,22 +4285,24 @@ pub async fn export_file(to: String, from: Option<String>, content: Option<Strin
 
 #[tauri::command]
 pub fn file_mtime(path: String) -> Option<u64> {
-    crate::files::stat_mtime(Path::new(&path))
+    crate::files::stat_mtime_confined(Path::new(&path))
 }
 
 #[tauri::command]
 pub async fn inspect_local_path(base: String, path: String) -> CmdResult<crate::files::LocalPathInfo> {
-    tauri::async_runtime::spawn_blocking(move || crate::files::inspect_local_path(Path::new(&base), Path::new(&path)))
+    tauri::async_runtime::spawn_blocking(move || crate::files::inspect_local_path_confined(Path::new(&base), Path::new(&path)))
         .await
         .map_err(err)?
         .map_err(err)
 }
 
 /// Local-main-window only (not ACP/paired RPC): open an existing filesystem
-/// object with the OS default application, with no caller-selected program.
+/// object inside a registered workspace/attachment root with the OS default
+/// application, blocking executables, scripts, bundles, HTML, and SVG files.
 #[tauri::command]
-pub async fn open_local_path(app: AppHandle, path: String) -> CmdResult<()> {
-    let path = tauri::async_runtime::spawn_blocking(move || crate::files::existing_local_path(Path::new(&path)))
+pub async fn open_local_path(app: AppHandle, window: tauri::WebviewWindow, path: String) -> CmdResult<()> {
+    require_main_window(&window)?;
+    let path = tauri::async_runtime::spawn_blocking(move || crate::files::validate_open_local_path(Path::new(&path)))
         .await
         .map_err(err)?
         .map_err(err)?;
@@ -4248,7 +4321,7 @@ pub async fn search_text(
     replacement: Option<String>,
 ) -> CmdResult<crate::files::TextSearch> {
     tauri::async_runtime::spawn_blocking(move || {
-        crate::files::search_text(Path::new(&root), &query, regex, case_sensitive, whole_word.unwrap_or(false), limit.unwrap_or(500), replacement.as_deref())
+        crate::files::search_text_confined(Path::new(&root), &query, regex, case_sensitive, whole_word.unwrap_or(false), limit.unwrap_or(500), replacement.as_deref())
     })
     .await
     .map_err(err)?
@@ -4268,7 +4341,7 @@ pub async fn replace_text(
     skip: Option<Vec<String>>,
 ) -> CmdResult<crate::files::ReplaceReport> {
     tauri::async_runtime::spawn_blocking(move || {
-        crate::files::replace_text(Path::new(&root), &query, &replacement, regex, case_sensitive, whole_word.unwrap_or(false), targets, &skip.unwrap_or_default())
+        crate::files::replace_text_confined(Path::new(&root), &query, &replacement, regex, case_sensitive, whole_word.unwrap_or(false), targets, &skip.unwrap_or_default())
     })
     .await
     .map_err(err)?
@@ -4510,7 +4583,8 @@ pub fn linear_status() -> LinearStatus {
 
 /// Store a key after checking it answers; an empty key disconnects.
 #[tauri::command]
-pub async fn linear_set_api_key(key: String) -> CmdResult<LinearStatus> {
+pub async fn linear_set_api_key(window: tauri::WebviewWindow, key: String) -> CmdResult<LinearStatus> {
+    require_main_window(&window)?;
     tauri::async_runtime::spawn_blocking(move || {
         let key = key.trim().to_string();
         let mut s = store::settings::load();
@@ -5991,12 +6065,22 @@ mod command_tests {
         let error = validate_session_target(&req).unwrap_err();
         assert!(error.contains("onMain"));
     }
+
+    #[test]
+    fn main_window_guard_only_allows_main_label() {
+        assert!(super::require_main_window_label("main").is_ok());
+        for label in ["floating", "chat-1", "chat-abc", "MAIN", "main-2", ""] {
+            let err = super::require_main_window_label(label).unwrap_err();
+            assert!(err.contains("main TerminalX window"), "{label}: {err}");
+        }
+    }
 }
 
 // ------------------------------------------------------------------ projects & workspaces
 
 #[tauri::command]
-pub fn update_project(app: AppHandle, path: String, patch: projects::ProjectPatch) -> CmdResult<Project> {
+pub fn update_project(app: AppHandle, window: tauri::WebviewWindow, path: String, patch: projects::ProjectPatch) -> CmdResult<Project> {
+    require_main_window(&window)?;
     if patch.scripts.is_some() {
         app.state::<crate::AppState>().sessions().map_err(err)?.require_archive_support().map_err(err)?;
     }
@@ -6008,15 +6092,36 @@ pub fn update_project(app: AppHandle, path: String, patch: projects::ProjectPatc
 /// Copy a chosen image into the store so the project keeps it even if the
 /// original moves, and record it as the logo.
 #[tauri::command]
-pub fn set_project_logo(path: String, source: Option<String>) -> CmdResult<Project> {
+pub fn set_project_logo(window: tauri::WebviewWindow, path: String, source: Option<String>) -> CmdResult<Project> {
+    require_main_window(&window)?;
     let logo = match source {
         Some(src) => {
+            use std::io::Read;
+            const MAX_LOGO_BYTES: u64 = 5 * 1024 * 1024;
+            let src_path = Path::new(&src);
+            let ext = src_path
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.to_ascii_lowercase())
+                .filter(|e| matches!(e.as_str(), "png" | "jpg" | "jpeg" | "webp" | "gif" | "ico"))
+                .ok_or_else(|| "Project logo must be a PNG, JPEG, WebP, GIF, or ICO image.".to_string())?;
+            let canonical = crate::paths::canonicalize(src_path).map_err(err)?;
+            let parent = canonical.parent().ok_or_else(|| "Logo source has no parent directory.".to_string())?;
+            let mut file = crate::workspace_file::open(parent, &canonical).map_err(err)?;
+            let meta = file.metadata().map_err(err)?;
+            if !meta.is_file() || meta.len() > MAX_LOGO_BYTES {
+                return Err("Project logo must be a regular image file under 5 MB.".into());
+            }
+            let mut bytes = Vec::with_capacity(meta.len() as usize);
+            file.by_ref().take(MAX_LOGO_BYTES + 1).read_to_end(&mut bytes).map_err(err)?;
+            if bytes.len() as u64 > MAX_LOGO_BYTES {
+                return Err("Project logo must be under 5 MB.".into());
+            }
             let dir = store::root().map_err(err)?.join("logos");
             std::fs::create_dir_all(&dir).map_err(err)?;
-            let ext = Path::new(&src).extension().and_then(|e| e.to_str()).unwrap_or("png");
             let name = format!("{:x}.{ext}", md5_like(&path));
             let dest = dir.join(name);
-            std::fs::copy(&src, &dest).map_err(err)?;
+            std::fs::write(&dest, bytes).map_err(err)?;
             Some(dest.to_string_lossy().into_owned())
         }
         None => None,
@@ -6051,7 +6156,8 @@ pub async fn scan_leftovers() -> CmdResult<Vec<crate::cleanup::Leftover>> {
 /// anything in use, or not clean and merged, is left alone. How far it is
 /// goes out as `leftover_cleanup_progress` events carrying `run`.
 #[tauri::command]
-pub async fn remove_leftovers(app: AppHandle, ids: Vec<String>, run: Option<String>) -> CmdResult<crate::cleanup::Removal> {
+pub async fn remove_leftovers(app: AppHandle, window: tauri::WebviewWindow, ids: Vec<String>, run: Option<String>) -> CmdResult<crate::cleanup::Removal> {
+    require_main_window(&window)?;
     github_work(move || {
         let run = run.unwrap_or_default();
         let state = app.state::<crate::AppState>();
@@ -6103,7 +6209,8 @@ pub async fn worktree_cleanup_cancel_sizes(app: AppHandle, prefix: String) -> Cm
 /// How far it is goes out as `worktree_cleanup_progress` events carrying
 /// `run`; the list returned is what happened.
 #[tauri::command]
-pub async fn worktree_cleanup_remove(app: AppHandle, items: Vec<crate::worktree_cleanup::RemoveItem>, run: Option<String>) -> CmdResult<serde_json::Value> {
+pub async fn worktree_cleanup_remove(app: AppHandle, window: tauri::WebviewWindow, items: Vec<crate::worktree_cleanup::RemoveItem>, run: Option<String>) -> CmdResult<serde_json::Value> {
+    require_main_window(&window)?;
     github_work(move || {
         let state = app.state::<crate::AppState>();
         require_archive_runtime(&state, items.iter().map(|item| item.project_path.as_str()))?;
@@ -6156,7 +6263,8 @@ pub fn merged_cleanup_settings() -> crate::store::settings::MergedCleanupSetting
 }
 
 #[tauri::command]
-pub fn set_merged_cleanup_settings(app: AppHandle, patch: MergedCleanupPatch) -> CmdResult<crate::store::settings::MergedCleanupSettings> {
+pub fn set_merged_cleanup_settings(app: AppHandle, window: tauri::WebviewWindow, patch: MergedCleanupPatch) -> CmdResult<crate::store::settings::MergedCleanupSettings> {
+    require_main_window(&window)?;
     let mut settings = store::settings::load();
     let cleanup = &mut settings.merged_cleanup;
     if let Some(value) = patch.enabled {
@@ -6204,7 +6312,8 @@ pub fn work_status_settings() -> crate::store::settings::WorkStatusSettings {
 }
 
 #[tauri::command]
-pub fn set_work_status_settings(share_with_team: bool, state: tauri::State<'_, crate::AppState>) -> CmdResult<crate::store::settings::WorkStatusSettings> {
+pub fn set_work_status_settings(window: tauri::WebviewWindow, share_with_team: bool, state: tauri::State<'_, crate::AppState>) -> CmdResult<crate::store::settings::WorkStatusSettings> {
+    require_main_window(&window)?;
     let mut settings = store::settings::load();
     settings.work_status.share_with_team = share_with_team;
     store::settings::save(&settings).map_err(err)?;
@@ -6220,7 +6329,8 @@ pub fn agent_settings() -> crate::store::settings::AgentSettings {
 
 /// Applied by the owner at the next permission hook, including running tabs.
 #[tauri::command]
-pub fn set_read_only_commands(enabled: bool) -> CmdResult<crate::store::settings::AgentSettings> {
+pub fn set_read_only_commands(window: tauri::WebviewWindow, enabled: bool) -> CmdResult<crate::store::settings::AgentSettings> {
+    require_main_window(&window)?;
     let mut settings = store::settings::load();
     settings.agents.read_only_commands = enabled;
     store::settings::save(&settings).map_err(err)?;
@@ -6236,7 +6346,8 @@ pub fn diagnostics_settings() -> crate::store::settings::DiagnosticsSettings {
 /// The runtime follows the change at its next line: it reads the file again
 /// whenever the file has changed.
 #[tauri::command]
-pub fn set_recovery_incidents(enabled: bool) -> CmdResult<crate::store::settings::DiagnosticsSettings> {
+pub fn set_recovery_incidents(window: tauri::WebviewWindow, enabled: bool) -> CmdResult<crate::store::settings::DiagnosticsSettings> {
+    require_main_window(&window)?;
     let mut settings = store::settings::load();
     settings.diagnostics.recovery_incidents = enabled;
     store::settings::save(&settings).map_err(err)?;
@@ -6252,7 +6363,8 @@ pub async fn recovery_incidents_summary() -> CmdResult<serde_json::Value> {
 /// Write the incidents, sessions and tabs named by salted hashes, and their
 /// summary to `path`, a file the reader chose.
 #[tauri::command]
-pub async fn recovery_incidents_export(path: String) -> CmdResult<()> {
+pub async fn recovery_incidents_export(window: tauri::WebviewWindow, path: String) -> CmdResult<()> {
+    require_main_window(&window)?;
     let mut target = std::path::PathBuf::from(&path);
     if !target.is_absolute() { return Err("Choose where to save the export.".into()); }
     if !target.extension().and_then(|extension| extension.to_str()).is_some_and(|extension| extension.eq_ignore_ascii_case("json")) {
@@ -6263,14 +6375,16 @@ pub async fn recovery_incidents_export(path: String) -> CmdResult<()> {
 
 /// Remove every recorded incident.
 #[tauri::command]
-pub fn clear_recovery_incidents() -> CmdResult<()> {
+pub fn clear_recovery_incidents(window: tauri::WebviewWindow) -> CmdResult<()> {
+    require_main_window(&window)?;
     crate::recovery_log::clear().map_err(err)
 }
 
 /// The runtime that owns the agents reads the limit again at its next look,
 /// within a minute.
 #[tauri::command]
-pub fn set_agent_idle_stop_minutes(minutes: u32) -> CmdResult<crate::store::settings::AgentSettings> {
+pub fn set_agent_idle_stop_minutes(window: tauri::WebviewWindow, minutes: u32) -> CmdResult<crate::store::settings::AgentSettings> {
+    require_main_window(&window)?;
     if !crate::store::settings::IDLE_STOP_MINUTES.contains(&minutes) {
         return Err(format!("{minutes} minutes is not one of the idle limits offered."));
     }
@@ -6314,6 +6428,7 @@ pub fn experimental_unsupported() -> ExperimentalUnsupported {
 /// others are left as they are.
 #[tauri::command]
 pub async fn set_experimental_settings(
+    window: tauri::WebviewWindow,
     state: State<'_, AppState>,
     native_codex: Option<bool>,
     session_cost: Option<bool>,
@@ -6322,6 +6437,7 @@ pub async fn set_experimental_settings(
     opencode: Option<bool>,
     bots: Option<bool>,
 ) -> CmdResult<crate::store::settings::ExperimentalSettings> {
+    require_main_window(&window)?;
     let unsupported = experimental_unsupported_here();
     for (wanted, why) in [(local_vm_tasks, unsupported.local_vm_tasks), (bots, unsupported.bots)] {
         if let (Some(true), Some(why)) = (wanted, why) {
@@ -6391,12 +6507,14 @@ pub async fn bot_templates(state: State<'_, AppState>) -> CmdResult<serde_json::
 /// answers (`bot_list`, `bots_pause_all`, `bots_resume_all`) and `bots_changed`
 /// carry the store's revision: the higher one is the newer list.
 #[tauri::command]
-pub async fn bot_create(state: State<'_, AppState>, role_template_id: String, name: String) -> CmdResult<crate::bots::Bot> {
+pub async fn bot_create(window: tauri::WebviewWindow, state: State<'_, AppState>, role_template_id: String, name: String) -> CmdResult<crate::bots::Bot> {
+    require_main_window(&window)?;
     bots_call(state, "create", serde_json::json!({"roleTemplateId": role_template_id, "name": name})).await
 }
 
 #[tauri::command]
-pub async fn bot_update(state: State<'_, AppState>, id: String, patch: serde_json::Value) -> CmdResult<crate::bots::Bot> {
+pub async fn bot_update(window: tauri::WebviewWindow, state: State<'_, AppState>, id: String, patch: serde_json::Value) -> CmdResult<crate::bots::Bot> {
+    require_main_window(&window)?;
     bots_call(state, "update", serde_json::json!({"id": id, "patch": patch})).await
 }
 
@@ -6405,7 +6523,8 @@ pub async fn bot_update(state: State<'_, AppState>, id: String, patch: serde_jso
 /// `moveOut` marks it moved, `moveBack` undoes that, `moveImport` takes a
 /// bundle in. Each needs the window's proof that a person asked.
 #[tauri::command]
-pub async fn bot_move(state: State<'_, AppState>, operation: String, params: serde_json::Value) -> CmdResult<serde_json::Value> {
+pub async fn bot_move(window: tauri::WebviewWindow, state: State<'_, AppState>, operation: String, params: serde_json::Value) -> CmdResult<serde_json::Value> {
+    require_main_window(&window)?;
     let operation: &'static str = match operation.as_str() {
         "moveExport" => "moveExport",
         "moveOut" => "moveOut",
@@ -6418,7 +6537,8 @@ pub async fn bot_move(state: State<'_, AppState>, operation: String, params: ser
 
 /// The bot's home folder goes to the app's trash, not away.
 #[tauri::command]
-pub async fn bot_delete(state: State<'_, AppState>, id: String) -> CmdResult<()> {
+pub async fn bot_delete(window: tauri::WebviewWindow, state: State<'_, AppState>, id: String) -> CmdResult<()> {
+    require_main_window(&window)?;
     bots_call(state, "delete", serde_json::json!({"id": id})).await
 }
 
@@ -6434,7 +6554,8 @@ pub async fn bot_resume(state: State<'_, AppState>, id: String) -> CmdResult<cra
 }
 
 #[tauri::command]
-pub async fn bots_pause_all(state: State<'_, AppState>, from: Option<String>) -> CmdResult<crate::bots::BotList> {
+pub async fn bots_pause_all(window: tauri::WebviewWindow, state: State<'_, AppState>, from: Option<String>) -> CmdResult<crate::bots::BotList> {
+    require_main_window(&window)?;
     bots_call(state, "pauseAll", serde_json::json!({"from": from})).await
 }
 
@@ -6446,7 +6567,8 @@ pub async fn bots_pause_held(state: State<'_, AppState>) -> CmdResult<serde_json
 }
 
 #[tauri::command]
-pub async fn bots_resume_all(state: State<'_, AppState>) -> CmdResult<crate::bots::BotList> {
+pub async fn bots_resume_all(window: tauri::WebviewWindow, state: State<'_, AppState>) -> CmdResult<crate::bots::BotList> {
+    require_main_window(&window)?;
     bots_call(state, "resumeAll", serde_json::json!({})).await
 }
 
@@ -6801,7 +6923,8 @@ fn given<'de, T: Deserialize<'de>, D: serde::Deserializer<'de>>(deserializer: D)
 }
 
 #[tauri::command]
-pub fn set_orchestrator_settings(patch: OrchestratorPatch) -> CmdResult<crate::store::settings::OrchestratorSettings> {
+pub fn set_orchestrator_settings(window: tauri::WebviewWindow, patch: OrchestratorPatch) -> CmdResult<crate::store::settings::OrchestratorSettings> {
+    require_main_window(&window)?;
     use crate::store::settings::{valid_dollars, valid_percent, valid_stall_minutes, valid_workers, MAX_BUDGET_DOLLARS, MAX_PIECE_LIMIT, MAX_REVIEW_DIFF_LINES, MAX_STALL_MINUTES, MAX_WORKERS, WORKER_MODES};
     if let Some(Some(lines)) = patch.review_diff_lines {
         if !(1..=MAX_REVIEW_DIFF_LINES).contains(&lines) {
@@ -7256,22 +7379,26 @@ pub async fn local_vm_status() -> CmdResult<crate::container_vm::VmStatus> {
 }
 
 #[tauri::command]
-pub async fn local_vm_start() -> CmdResult<crate::container_vm::VmStatus> {
+pub async fn local_vm_start(window: tauri::WebviewWindow) -> CmdResult<crate::container_vm::VmStatus> {
+    require_main_window(&window)?;
     local_vm(crate::container_vm::start).await
 }
 
 #[tauri::command]
-pub async fn local_vm_stop() -> CmdResult<crate::container_vm::VmStatus> {
+pub async fn local_vm_stop(window: tauri::WebviewWindow) -> CmdResult<crate::container_vm::VmStatus> {
+    require_main_window(&window)?;
     local_vm(crate::container_vm::stop).await
 }
 
 #[tauri::command]
-pub async fn local_vm_reset() -> CmdResult<crate::container_vm::VmStatus> {
+pub async fn local_vm_reset(window: tauri::WebviewWindow) -> CmdResult<crate::container_vm::VmStatus> {
+    require_main_window(&window)?;
     local_vm(crate::container_vm::reset).await
 }
 
 #[tauri::command]
-pub async fn local_vm_start_runtime() -> CmdResult<crate::container_vm::VmStatus> {
+pub async fn local_vm_start_runtime(window: tauri::WebviewWindow) -> CmdResult<crate::container_vm::VmStatus> {
+    require_main_window(&window)?;
     local_vm(crate::container_vm::start_runtime).await
 }
 
@@ -7307,8 +7434,9 @@ fn require_archive_runtime<'a>(state: &crate::AppState, paths: impl Iterator<Ite
 /// changed since, it no longer matches and nothing is removed.
 #[allow(clippy::too_many_arguments)]
 #[tauri::command]
-pub async fn remove_workspace(app: AppHandle, project_path: String, path: String, keep_sessions: bool,
+pub async fn remove_workspace(app: AppHandle, window: tauri::WebviewWindow, project_path: String, path: String, keep_sessions: bool,
     delete_branch: bool, confirmed_digest: Option<String>, expected_sessions: Vec<String>, archive_failure: Option<String>, archive_retry: Option<String>) -> CmdResult<WorkspaceRemoveReport> {
+    require_main_window(&window)?;
     github_work(move || {
         let state = app.state::<crate::AppState>();
         require_archive_runtime(&state, std::iter::once(project_path.as_str()))?;
@@ -7361,7 +7489,8 @@ pub async fn preview_workspace_restore(app: AppHandle, session_id: String) -> Cm
 }
 
 #[tauri::command]
-pub async fn restore_workspace(app: AppHandle, session_id: String, expected: crate::workspace_restore::Preview, new_branch: Option<String>, detached: Option<bool>) -> CmdResult<serde_json::Value> {
+pub async fn restore_workspace(app: AppHandle, window: tauri::WebviewWindow, session_id: String, expected: crate::workspace_restore::Preview, new_branch: Option<String>, detached: Option<bool>) -> CmdResult<serde_json::Value> {
+    require_main_window(&window)?;
     tauri::async_runtime::spawn_blocking(move || {
         app.state::<crate::AppState>().sessions().map_err(err)?.workspace("restoreWorkspace", serde_json::json!({ "sessionId": session_id, "expected": expected, "newBranch": new_branch, "detached": detached.unwrap_or(false) })).map_err(err)
     }).await.map_err(err)?
@@ -7496,7 +7625,8 @@ pub async fn cloud_mirror_claim_owner(account: String, legacy_email: Option<Stri
 /// Selected-task operations run off the window thread. The adapter owns the
 /// immutable environment binding and never falls back to local tools.
 #[tauri::command]
-pub async fn local_vm_request(method: String, params: serde_json::Value, state: tauri::State<'_, crate::AppState>) -> CmdResult<serde_json::Value> {
+pub async fn local_vm_request(window: tauri::WebviewWindow, method: String, params: serde_json::Value, state: tauri::State<'_, crate::AppState>) -> CmdResult<serde_json::Value> {
+    require_main_window(&window)?;
     #[cfg(unix)]
     { let sessions = state.sessions().map_err(err)?; tauri::async_runtime::spawn_blocking(move || sessions.local_vm(&method, params).map_err(err)).await.map_err(err)? }
     #[cfg(not(unix))]

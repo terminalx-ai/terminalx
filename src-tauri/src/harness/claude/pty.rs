@@ -101,7 +101,23 @@ pub struct LaunchOptions<'a> {
 }
 
 fn quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\\''"))
+    crate::pty::posix_quote(s)
+}
+
+/// Restrict untrusted Claude Code PTY launches to user setting sources so
+/// untrusted repository `.claude/settings.json` hooks/MCP servers/statusLine/
+/// apiKeyHelper cannot execute silently.
+pub(crate) fn harden_untrusted_launch_argv(argv: &mut Vec<String>, cwd: &str) {
+    let is_claude_launch = argv.iter().any(|a| a == "--settings")
+        && argv.iter().any(|a| a == "--session-id" || a == "--resume");
+    if !is_claude_launch {
+        return;
+    }
+    let already_scoped = argv.iter().any(|a| a == "--setting-sources" || a.starts_with("--setting-sources="));
+    if !already_scoped && !super::trust::is_trusted(cwd) {
+        argv.push("--setting-sources".into());
+        argv.push("user".into());
+    }
 }
 
 /// The program a test's sessions launch as Claude Code (`claude_program_for_tests`).
@@ -132,8 +148,16 @@ impl Drop for TestProgram {
 }
 
 /// The shell command line the pane runs. `Terminals::spawn` execs it from a
-/// login shell, so it is one string rather than an argv.
+/// login shell (or passes direct argv / `fish_quote` on Unix), and injects
+/// `--setting-sources user` automatically when `cwd` is not trusted.
 pub fn launch_command(opts: LaunchOptions<'_>) -> Option<String> {
+    launch_command_with_trust(opts, true)
+}
+
+/// Like [`launch_command`], explicitly scoping setting sources to `user`
+/// when `repo_trusted` is `false` so untrusted repo `.claude/settings.json`
+/// hooks/MCP servers/statusLine/apiKeyHelper cannot execute.
+pub fn launch_command_with_trust(opts: LaunchOptions<'_>, repo_trusted: bool) -> Option<String> {
     #[cfg(test)]
     let pinned = TEST_PROGRAM.lock().unwrap_or_else(|e| e.into_inner()).clone();
     #[cfg(not(test))]
@@ -162,6 +186,9 @@ pub fn launch_command(opts: LaunchOptions<'_>) -> Option<String> {
     }
     if let Some(t) = opts.title.filter(|t| !t.is_empty()) {
         c.push_str(&format!(" --name {}", quote(t)));
+    }
+    if !repo_trusted {
+        c.push_str(" --setting-sources user");
     }
     // Bypass mode otherwise opens on the CLI's own "Yes, I accept" disclaimer,
     // which nobody watching the chat can see. The reader accepted the same
@@ -865,8 +892,36 @@ mod tests {
         assert!(!c.contains("--resume 'minted'"));
     }
 
+    #[test]
+    fn untrusted_launch_enforces_user_setting_sources() {
+        let _home = crate::store::temp_home();
+        let _program = claude_program_for_tests(std::path::PathBuf::from("/opt/claude"));
+        let settings = json!({});
+        let untrusted = launch_command_with_trust(
+            LaunchOptions {
+                provider_session_id: "s1",
+                resume: false,
+                fork_from: None,
+                model: "",
+                effort: None,
+                permission_mode: "manual",
+                title: None,
+                settings: &settings,
+            },
+            false,
+        )
+        .unwrap();
+        assert!(untrusted.contains("--setting-sources user"), "{untrusted}");
 
+        let repo = tempfile::tempdir().unwrap();
+        let cwd = repo.path().to_str().unwrap();
+        let mut argv = vec!["/opt/claude".into(), "--session-id".into(), "s1".into(), "--settings".into(), "{}".into()];
+        harden_untrusted_launch_argv(&mut argv, cwd);
+        assert!(argv.windows(2).any(|w| w == ["--setting-sources", "user"]), "untrusted cwd must get --setting-sources user: {argv:?}");
 
-
-
+        super::super::trust::approve(cwd).unwrap();
+        let mut argv_trusted = vec!["/opt/claude".into(), "--session-id".into(), "s1".into(), "--settings".into(), "{}".into()];
+        harden_untrusted_launch_argv(&mut argv_trusted, cwd);
+        assert!(!argv_trusted.iter().any(|a| a == "--setting-sources"), "approved cwd may load project settings: {argv_trusted:?}");
+    }
 }

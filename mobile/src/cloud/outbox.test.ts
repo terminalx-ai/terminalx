@@ -293,4 +293,28 @@ describe("the phone's command outbox", () => {
     expect(h.outbox.entries().map((entry) => entry.state)).toEqual(["queued", "queued"]);
     expect(h.outbox.stopped).toBe(false);
   });
+
+  it("caches decrypted OutboxEntry views across calls and invalidates on update or key rotation (P-13)", async () => {
+    const h = await harness();
+    await h.outbox.enqueue("tab-1", "send", { text: "cached command" });
+
+    const firstList = h.outbox.entries();
+    const secondList = h.outbox.entries();
+    expect(secondList).toBe(firstList);
+    expect(secondList[0]).toBe(firstList[0]);
+    expect(h.outbox.entries("tab-1")[0]).toBe(firstList[0]);
+
+    // Item update invalidates cached entry.
+    h.api.commandStatuses.mockResolvedValueOnce([command(h.posted[0], "leased")]);
+    await h.outbox.sync();
+    const afterUpdate = h.outbox.entries();
+    expect(afterUpdate[0]).not.toBe(firstList[0]);
+    expect(afterUpdate[0].state).toBe("leased");
+
+    // Key set change invalidates cached entry so text becomes null when keys are cleared.
+    await h.keys.clear();
+    const afterClear = h.outbox.entries();
+    expect(afterClear[0]).not.toBe(afterUpdate[0]);
+    expect(afterClear[0].text).toBeNull();
+  });
 });

@@ -29,16 +29,22 @@ describe("media in the chat", () => {
       if (command === "close_media_file") return undefined;
       throw new Error(`Unexpected command: ${command}`);
     });
-    const { unmount } = render(<ChatMedia paths={["/gen/shot.png", "clip.mp4", "chart.svg", "missing.png"]} context={context} />);
+    const { unmount } = render(<ChatMedia paths={["/repo/gen/shot.png", "clip.mp4", "chart.svg", "missing.png", "/outside/secret.png", "../escape.png"]} context={context} />);
     const picture = await screen.findByRole("img", { name: "shot.png" });
     expect(picture.getAttribute("src")).toBe("http://127.0.0.1:9/t-shot.png");
     expect((await screen.findByRole("img", { name: "chart.svg" })).getAttribute("src")).toBe("data:image/svg+xml;charset=utf-8,%3Csvg%2F%3E");
     await vi.waitFor(() => expect(document.querySelector("video")?.getAttribute("src")).toBe("http://127.0.0.1:9/t-clip.mp4"));
     expect(screen.getAllByTestId("chat-media-item")).toHaveLength(3);
 
-    // A picture opens in the image viewer, with its file for Open in default app.
+    // S-25: out-of-workspace absolute and `..` traversal paths are never even inspected.
+    expect(invoke).not.toHaveBeenCalledWith("inspect_local_path", { base: "/repo", path: "/outside/secret.png" });
+    expect(invoke).not.toHaveBeenCalledWith("inspect_local_path", { base: "/repo", path: "../escape.png" });
+
+    // A raster picture opens in the image viewer with its path; an SVG never passes a path for external OS open.
     fireEvent.click(screen.getByRole("button", { name: "View shot.png" }));
-    expect(openImageViewer).toHaveBeenCalledWith([expect.objectContaining({ name: "shot.png", path: "/gen/shot.png" })]);
+    expect(openImageViewer).toHaveBeenCalledWith([expect.objectContaining({ name: "shot.png", path: "/repo/gen/shot.png" })]);
+    fireEvent.click(screen.getByRole("button", { name: "View chart.svg" }));
+    expect(openImageViewer).toHaveBeenLastCalledWith([expect.objectContaining({ name: "chart.svg", path: undefined })]);
 
     // The files it opened are let go with the message.
     unmount();

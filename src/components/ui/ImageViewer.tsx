@@ -4,6 +4,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState, type Pointer
 import { Dialog as DialogPrimitive } from "radix-ui";
 import { ChevronLeft, ChevronRight, Copy, ExternalLink, Expand, Minus, Plus, RotateCw, X } from "@/icons";
 import { fs } from "@/lib/api";
+import { isBlockedExternalPath } from "@/lib/chatLinks";
 import { cn } from "@/lib/cn";
 import { familyNow } from "@/lib/platform";
 import { closeImageViewer, stepImageViewer, useImageViewer } from "@/lib/imageViewer";
@@ -197,7 +198,13 @@ function Viewer({ images, index }: { images: { src: string; name: string; path?:
       say("Could not copy this image");
     }
   }
-  const openOutside = image.path ? () => void fs.openPath(image.path!).catch(() => say("Could not open it")) : null;
+  // S-25: Never open SVGs or blocked executable/active paths externally via OS default handlers.
+  const isSvgImage =
+    /\.svgz?(?:$|[?#])/i.test(image.path ?? "")
+    || /\.svgz?(?:$|[?#])/i.test(image.name ?? "")
+    || /^data:image\/svg\+xml/i.test(image.src);
+  const canOpenOutside = !!image.path && !isSvgImage && !isBlockedExternalPath(image.path);
+  const openOutside = canOpenOutside ? () => void fs.openPath(image.path!).catch(() => say("Could not open it")) : null;
 
   const percent = Math.round(view.scale * 100);
   const transform = `translate(${view.x}px, ${view.y}px) rotate(${view.turns * 90}deg) scale(${view.scale})`;

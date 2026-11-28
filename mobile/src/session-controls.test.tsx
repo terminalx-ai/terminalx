@@ -320,3 +320,69 @@ describe("the controls while the phone is not connected (#983)", () => {
     expect(container.textContent).not.toContain("Interrupt");
   });
 });
+
+describe("SessionControls RPC and storage throttling (P-47)", () => {
+  const mkEvent = (seq: number, payload: AgentEvent["payload"]): AgentEvent => ({
+    id: `ev-${seq}`,
+    sessionId: "s",
+    tabId: "t",
+    harness: "claude",
+    seq,
+    ts: "2026-11-01T00:00:00Z",
+    payload,
+  });
+
+  it("ignores noisy streaming events, refreshes on control-affecting events, and dedupes in-flight RPCs", async () => {
+    await render([]);
+    expect(mocks.app.api.tabControls).toHaveBeenCalledTimes(1);
+
+    // Streaming delta, assistant_text, and reasoning events must NOT fire session.tab RPCs.
+    const noisy: AgentEvent[] = [
+      mkEvent(1, { type: "delta", delta: "text_delta", block: { messageId: "m1", index: 0 }, text: "Hi" }),
+      mkEvent(2, { type: "assistant_text", text: "Hi there" }),
+      mkEvent(3, { type: "reasoning", text: "Thinking" }),
+    ];
+    await render([noisy[0]]);
+    await render([noisy[0], noisy[1]]);
+    await render(noisy);
+    expect(mocks.app.api.tabControls).toHaveBeenCalledTimes(1);
+
+    // A control-affecting event triggers a refresh.
+    await render([...noisy, mkEvent(4, { type: "turn_started" })]);
+    expect(mocks.app.api.tabControls).toHaveBeenCalledTimes(2);
+
+    // Unchanged TabControls payload must not trigger extra AsyncStorage writes.
+    const setItemSpy = vi.fn();
+    const originalSet = mocks.storage.set.bind(mocks.storage);
+    mocks.storage.set = ((k: string, v: string) => { setItemSpy(k, v); return originalSet(k, v); }) as typeof mocks.storage.set;
+    try {
+      await render([...noisy, mkEvent(4, { type: "turn_started" }), mkEvent(5, { type: "turn_completed", status: "ok", authFailed: false })]);
+      expect(mocks.app.api.tabControls).toHaveBeenCalledTimes(3);
+      expect(setItemSpy).not.toHaveBeenCalled();
+    } finally {
+      mocks.storage.set = originalSet;
+    }
+
+    // Dedupe overlapping in-flight tabControls RPCs.
+    let resolveRpc!: (value: unknown) => void;
+    mocks.app.api.tabControls.mockImplementationOnce(() => new Promise((resolve) => { resolveRpc = resolve; }));
+    const ev6 = mkEvent(6, { type: "settings_changed", model: "sonnet" });
+    const ev7 = mkEvent(7, { type: "error", message: "oops", fatal: false });
+    await act(async () => {
+      root.render(<SessionControls sessionId="s" tabId="t" events={[...noisy, ev6]} asks={0} connected onOpenTab={openTab} />);
+    });
+    expect(mocks.app.api.tabControls).toHaveBeenCalledTimes(4);
+    await act(async () => {
+      root.render(<SessionControls sessionId="s" tabId="t" events={[...noisy, ev6, ev7]} asks={0} connected onOpenTab={openTab} />);
+    });
+    // Still only 4 calls while first RPC is in flight.
+    expect(mocks.app.api.tabControls).toHaveBeenCalledTimes(4);
+    await act(async () => {
+      resolveRpc({ harness: "claude", model: "sonnet", effort: "high", permissionMode: "auto", status: "idle" });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    // Coalesced trailing refresh runs once after the in-flight RPC completes.
+    expect(mocks.app.api.tabControls).toHaveBeenCalledTimes(5);
+  });
+});

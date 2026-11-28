@@ -50,6 +50,18 @@ pub(crate) fn supported(command: &str) -> bool {
     ) || crate::machine_control::supported(command)
 }
 
+/// The subset of [`supported`] window services that strictly read state and
+/// perform no UI automation, sharing, or remote mutation (S-16 default-deny).
+pub(crate) fn read_only(command: &str) -> bool {
+    matches!(
+        command,
+        "cloud.status" | "cloud.projects.list" | "cloud.sessions.list" | "cloud.read" | "cloud.wait"
+            | "machine.list" | "machine.status" | "machine.projects.list" | "machine.sessions.list"
+            | "machine.tabs.list" | "machine.read" | "machine.wait" | "machine.permissions.list"
+            | "machine.worktrees.list"
+    )
+}
+
 /// A window service asked for while the attached window has not proved it is
 /// the window and Bots is on (PRO-507).
 pub(crate) const UNPROVEN: &str = "While Bots is on, this TerminalX runtime takes window services only from a window that proves it is TerminalX with its key in Keychain, and the window attached has not.";

@@ -101,6 +101,11 @@ pub fn reported_scope<'a>(input: &Value, reported: Option<&'a str>) -> Option<&'
 /// person's rights in every shell they open, and the command is one they
 /// approved, so what it gains is only the directory scope.
 pub fn session_input(tool: &str, input: &Value, key: &str) -> Option<Value> {
+    let sh = if tool == "Bash" { "/bin/sh".to_string() } else { crate::pty::shell() };
+    session_input_for_shell(tool, input, key, &sh)
+}
+
+fn session_input_for_shell(tool: &str, input: &Value, key: &str, shell: &str) -> Option<Value> {
     let scope: Value = serde_json::from_str(key).ok()?;
     let cwd = scope.get(2)?.as_str()?;
     if session_key(tool, input, Some(cwd))?.as_str() != key {
@@ -111,17 +116,30 @@ pub fn session_input(tool: &str, input: &Value, key: &str) -> Option<Value> {
         "printf '%s\\n' {} >&2; exit 125",
         quote("TerminalX blocked a session allowance outside its approved directory. Request a separate one-time approval for this workdir.")
     );
-    // The subshell fails with 125 when the check fails, so `&&` never
-    // reaches the command; it runs in the outer shell, where a `cd` in it
-    // still moves the provider's working directory as it always did.
-    let script = format!(
-        "({} '.' '-ef' {} || {} '-c' {}) && 'eval' {}",
-        quote(&unpredictable("/bin", "test")),
-        quote(cwd),
-        quote(&unpredictable("/bin", "sh")),
-        quote(&reject),
-        quote(original)
-    );
+    let script = if tool != "Bash" && crate::pty::is_fish_shell(shell) {
+        // In `fish`, `\` escapes `'` inside single quotes and `(...)` is command
+        // substitution rather than a subshell. Use `fish_quote` and `begin; ...; end`.
+        format!(
+            "begin; {} '.' '-ef' {}; or {} '-c' {}; end; and eval {}",
+            crate::pty::fish_quote(&unpredictable("/bin", "test")),
+            crate::pty::fish_quote(cwd),
+            crate::pty::fish_quote(&unpredictable("/bin", "sh")),
+            crate::pty::fish_quote(&reject),
+            crate::pty::fish_quote(original)
+        )
+    } else {
+        // The subshell fails with 125 when the check fails, so `&&` never
+        // reaches the command; it runs in the outer shell, where a `cd` in it
+        // still moves the provider's working directory as it always did.
+        format!(
+            "({} '.' '-ef' {} || {} '-c' {}) && 'eval' {}",
+            quote(&unpredictable("/bin", "test")),
+            quote(cwd),
+            quote(&unpredictable("/bin", "sh")),
+            quote(&reject),
+            quote(original)
+        )
+    };
     let mut updated = input.clone();
     let field = if input.get("command").is_some() {
         "command"
@@ -1141,5 +1159,25 @@ mod tests {
         ] {
             assert!(reported_scope(&input, Some("/session")).is_none());
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn session_input_uses_fish_quoting_and_blocks_backslash_quote_injection_on_fish() {
+        let evil_cwd = r"/tmp/repo\' ; touch /tmp/pwned ; echo '";
+        let input = serde_json::json!({"command": "echo ok"});
+        let key = session_key("shell_command", &input, Some(evil_cwd)).unwrap();
+
+        let rewritten = session_input_for_shell("shell_command", &input, &key, "/opt/homebrew/bin/fish").unwrap();
+        let script = rewritten["command"].as_str().unwrap();
+        assert!(script.starts_with("begin; "), "fish script must use begin/end, not (...) command substitution: {script}");
+        assert!(script.contains(&crate::pty::fish_quote(evil_cwd)), "cwd must be fish-quoted: {script}");
+        assert!(!script.contains(&quote(evil_cwd)), "must not interpolate raw POSIX quote into fish: {script}");
+
+        // Claude's Bash tool stays POSIX even if user's $SHELL is fish.
+        let bash_key = session_key("Bash", &input, Some(evil_cwd)).unwrap();
+        let bash_rewritten = session_input_for_shell("Bash", &input, &bash_key, "/opt/homebrew/bin/fish").unwrap();
+        let bash_script = bash_rewritten["command"].as_str().unwrap();
+        assert!(bash_script.starts_with('('), "Bash tool keeps POSIX subshell syntax: {bash_script}");
     }
 }

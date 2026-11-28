@@ -10,7 +10,7 @@ import {
   type UsageSnapshot,
 } from "@/lib/api";
 
-interface StatusState {
+export interface StatusState {
   settings: StatusBarSettings;
   usage: UsageSnapshot;
   usageRefreshing: boolean;
@@ -84,6 +84,18 @@ export function useStatus(): StatusState {
     },
     () => state,
     () => state,
+  );
+}
+
+/** Narrow selector subscription: skips re-renders when unrelated status fields (e.g. 2s resource samples) change. */
+export function useStatusSelector<T>(selector: (status: StatusState) => T): T {
+  return useSyncExternalStore(
+    (listener) => {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    () => selector(state),
+    () => selector(state),
   );
 }
 

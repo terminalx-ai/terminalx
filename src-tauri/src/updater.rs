@@ -22,7 +22,8 @@ pub enum DownloadEvent {
 }
 
 #[tauri::command]
-pub async fn app_update_check(app: tauri::AppHandle, channel: String) -> Result<Option<Available>, String> {
+pub async fn app_update_check(app: tauri::AppHandle, window: tauri::WebviewWindow, channel: String) -> Result<Option<Available>, String> {
+    crate::commands::require_main_window(&window)?;
     let privacy = crate::data_privacy::Ticket::default();
     let result = async {
         anyhow::ensure!(matches!(channel.as_str(), "stable" | "beta"), "Unknown update channel");
@@ -57,7 +58,8 @@ fn no_build_for_this_system(error: &tauri_plugin_updater::Error) -> bool {
 
 /// Download the update found by [`app_update_check`]; [`app_update_apply`] installs it.
 #[tauri::command]
-pub async fn app_update_download(id: String, progress: tauri::ipc::Channel<DownloadEvent>) -> Result<(), String> {
+pub async fn app_update_download(window: tauri::WebviewWindow, id: String, progress: tauri::ipc::Channel<DownloadEvent>) -> Result<(), String> {
+    crate::commands::require_main_window(&window)?;
     let result = async {
         let found = {
             let mut found = FOUND.lock().unwrap();
@@ -82,7 +84,8 @@ pub async fn app_update_download(id: String, progress: tauri::ipc::Channel<Downl
 /// Install the update [`app_update_download`] downloaded. On Windows the
 /// installer takes over and this process exits before the call returns.
 #[tauri::command]
-pub async fn app_update_apply(id: String) -> Result<(), String> {
+pub async fn app_update_apply(window: tauri::WebviewWindow, id: String) -> Result<(), String> {
+    crate::commands::require_main_window(&window)?;
     let result = async {
         let (found, bytes) = {
             let mut downloaded = DOWNLOADED.lock().unwrap();
@@ -109,5 +112,13 @@ mod tests {
             assert_eq!(super::no_build_for_this_system(error), !cfg!(target_os = "macos"), "{error}");
         }
         assert!(!super::no_build_for_this_system(&Error::Network("refused".into())));
+    }
+
+    #[test]
+    fn updater_main_window_guard_rejects_floating_and_chat_windows() {
+        assert!(crate::commands::require_main_window_label("main").is_ok());
+        assert!(crate::commands::require_main_window_label("floating").is_err());
+        assert!(crate::commands::require_main_window_label("chat-1234").is_err());
+        assert!(crate::commands::require_main_window_label("").is_err());
     }
 }

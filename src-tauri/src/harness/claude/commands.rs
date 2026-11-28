@@ -78,7 +78,9 @@ pub fn parse_commands(reply: &Value) -> Vec<SlashCommand> {
 
 fn probe(cwd: &Path) -> Result<Vec<SlashCommand>> {
     // The reader's own setup is the point here: plugin and user commands come from it.
-    Ok(parse_commands(&super::ask_initialize(cwd, &[])?))
+    // Restrict setting sources to `user` so untrusted repo `.claude/settings.json`
+    // hooks, statusLine, apiKeyHelper, or MCP servers can never execute during a probe.
+    Ok(parse_commands(&super::ask_initialize(cwd, &["--setting-sources", "user"])?))
 }
 
 #[cfg(test)]

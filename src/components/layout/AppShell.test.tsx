@@ -131,7 +131,11 @@ vi.mock("@/lib/orchestration", async (importOriginal) => ({
   showRunView: runShortcut.showRunView,
   useRun: (sessionId: string | undefined, enabled = true) => (enabled && sessionId ? runShortcut.runs[sessionId] ?? null : undefined),
 }));
-vi.mock("@/lib/status", () => ({ bootStatus: vi.fn(), useStatus: () => ({ settings: { visible: true } }) }));
+vi.mock("@/lib/status", () => ({
+  bootStatus: vi.fn(),
+  useStatus: () => ({ settings: { visible: true } }),
+  useStatusSelector: (selector: (s: { settings: { visible: boolean } }) => unknown) => selector({ settings: { visible: true } }),
+}));
 vi.mock("@/components/layout/StatusBar", () => ({
   StatusBar: ({ onOpenAgentSettings, onOpenUsageDetails }: { onOpenAgentSettings: () => void; onOpenUsageDetails: () => void }) => (
     <><button type="button" onClick={onOpenAgentSettings}>Agent settings</button><button type="button" onClick={onOpenUsageDetails}>Open Stats & Usage</button></>
@@ -350,12 +354,12 @@ describe("machine sessions (PRO-346)", () => {
 it.each([
   ["cloud:org:w1:s1", "cloud-session"],
   ["machine:m1:P1:s1", "machine-session"],
-])("shows local phone access while viewing %s with its right panel open", (key, view) => {
+])("shows local phone access while viewing %s with its right panel open", async (key, view) => {
   sessionStore.selectedSessionId = key as never;
   pairing.devices = [device({ connection: { transport: "relay", since: "2026-11-17T00:00:00Z" } })];
   render(<AppShell />);
 
-  expect(screen.getByTestId(view)).toBeTruthy();
+  expect(await screen.findByTestId(view)).toBeTruthy();
   expect(getPrefs().panelOpen).toBe(true);
   fireEvent.click(screen.getByRole("button", { name: "Device · 1 connected phone" }));
   const details = screen.getByRole("dialog", { name: "Device" });
@@ -374,10 +378,10 @@ describe("new-session right panel", () => {
     expect(screen.queryByTestId("right-panel")).toBeNull();
   });
 
-  it("renders the preset checkout in the persisted open panel", () => {
+  it("renders the preset checkout in the persisted open panel", async () => {
     render(<AppShell />);
 
-    const panel = screen.getByTestId("right-panel");
+    const panel = await screen.findByTestId("right-panel");
     expect(panel.getAttribute("data-cwd")).toBe("/outside/feature");
     expect(panel.getAttribute("data-branch")).toBe("feature/panel");
     expect(screen.getByRole("button", { name: "Toggle panel" })).toBeTruthy();
@@ -467,13 +471,13 @@ describe("start screen", () => {
     }
   });
 
-  it("stays out of the other destinations", () => {
+  it("stays out of the other destinations", async () => {
     sessionStore.projects = [];
     sessionStore.view = "issues";
     render(<AppShell />);
 
     expect(screen.queryByTestId("start-screen")).toBeNull();
-    expect(screen.getByTestId("issues")).toBeTruthy();
+    expect(await screen.findByTestId("issues")).toBeTruthy();
   });
 
   it("opens Agent settings from its no-agent notice", async () => {
@@ -504,13 +508,13 @@ describe("start screen", () => {
 });
 
 describe("automation navigation", () => {
-  it("opens the requested automation in the dedicated detail surface", () => {
+  it("opens the requested automation in the dedicated detail surface", async () => {
     sessionStore.view = "automations";
     sessionStore.selectedAutomationId = "automation-99";
 
     render(<AppShell />);
 
-    expect(screen.getByTestId("automations").getAttribute("data-automation-id")).toBe("automation-99");
+    expect((await screen.findByTestId("automations")).getAttribute("data-automation-id")).toBe("automation-99");
   });
 });
 
@@ -549,39 +553,40 @@ describe("a bot's view (PRO-468)", () => {
     sessionStore.view = "new";
   });
 
-  it("shows a selected chat of a listed bot in its bot's view", () => {
+  it("shows a selected chat of a listed bot in its bot's view", async () => {
     runShortcut.bots = true;
     botStore.listed = [{ id: "b1" }];
     sessionStore.sessions = [home as never];
     sessionStore.selectedSessionId = "home" as never;
     sessionStore.view = "welcome";
     render(<AppShell />);
-    expect(screen.getByTestId("bot-view").getAttribute("data-bot")).toBe("b1");
-    expect(screen.getByTestId("bot-view").getAttribute("data-chat")).toBe("home");
+    const bot = await screen.findByTestId("bot-view");
+    expect(bot.getAttribute("data-bot")).toBe("b1");
+    expect(bot.getAttribute("data-chat")).toBe("home");
     expect(screen.queryByTestId("session")).toBeNull();
   });
 
-  it("opens a bot's view on its home chat from openBot", () => {
+  it("opens a bot's view on its home chat from openBot", async () => {
     runShortcut.bots = true;
     botStore.listed = [{ id: "b1" }];
     sessionStore.view = "bot" as never;
     (sessionStore as { selectedBotId?: string | null }).selectedBotId = "b1";
     render(<AppShell />);
-    expect(screen.getByTestId("bot-view").getAttribute("data-chat")).toBe("");
+    expect((await screen.findByTestId("bot-view")).getAttribute("data-chat")).toBe("");
   });
 
-  it("shows the chat as an ordinary session while Bots is off, or when its bot is not listed", () => {
+  it("shows the chat as an ordinary session while Bots is off, or when its bot is not listed", async () => {
     sessionStore.sessions = [home as never];
     sessionStore.selectedSessionId = "home" as never;
     sessionStore.view = "welcome";
     const { unmount } = render(<AppShell />);
     expect(screen.queryByTestId("bot-view")).toBeNull();
-    expect(screen.getByTestId("session")).toBeTruthy();
+    expect(await screen.findByTestId("session")).toBeTruthy();
     unmount();
     runShortcut.bots = true;
     render(<AppShell />);
     expect(screen.queryByTestId("bot-view")).toBeNull();
-    expect(screen.getByTestId("session")).toBeTruthy();
+    expect(await screen.findByTestId("session")).toBeTruthy();
   });
 });
 
@@ -627,7 +632,7 @@ describe("settings page navigation", () => {
     sessionStore.view = "issues";
     render(<AppShell />);
 
-    expect(screen.getByTestId("issues")).toBeTruthy();
+    expect(await screen.findByTestId("issues")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Open settings" }));
 
     expect(await screen.findByTestId("settings-page")).toBeTruthy();
@@ -671,7 +676,7 @@ describe("settings page navigation", () => {
 
     // …and the shortcut, after another section was asked for by name.
     act(() => shortcuts.get("app.commandPalette")!());
-    fireEvent.click(screen.getByRole("button", { name: "Open Appearance settings" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Open Appearance settings" }));
     expect(await section()).toBe("appearance");
     close();
     pressSettingsShortcut();
@@ -744,7 +749,7 @@ describe("setting links (PRO-127)", () => {
   it("focuses Settings on the row a link names while the app runs, each time one arrives", async () => {
     sessionStore.view = "issues";
     render(<AppShell />);
-    expect(screen.getByTestId("issues")).toBeTruthy();
+    expect(await screen.findByTestId("issues")).toBeTruthy();
     await waitFor(() => expect(native.listeners.get("desktop_link_requested")?.size).toBe(1));
 
     native.pending = [{ id: "general.promptMap", enable: false }];
@@ -822,10 +827,10 @@ describe("cloud followers at launch", () => {
 
 
 describe("welcome routing", () => {
-  it.each(["mouse", "keyboard"])("opens Home from a selected session by %s", (input) => {
+  it.each(["mouse", "keyboard"])("opens Home from a selected session by %s", async (input) => {
     sessionStore.selectedSessionId = "machine:m1:P1:s1" as never;
     const { rerender } = render(<AppShell />);
-    expect(screen.getByTestId("machine-session")).toBeTruthy();
+    expect(await screen.findByTestId("machine-session")).toBeTruthy();
     if (input === "mouse") fireEvent.click(screen.getByRole("button", { name: "Home" }));
     else act(() => shortcuts.get("app.home")!());
     rerender(<AppShell />);
@@ -875,10 +880,10 @@ describe("welcome routing", () => {
     expect(screen.queryByTestId("welcome")).toBeNull();
   });
 
-  it.each(["issues", "agents", "automations", "skills"] as const)("keeps %s navigation", (view) => {
+  it.each(["issues", "agents", "automations", "skills"] as const)("keeps %s navigation", async (view) => {
     sessionStore.view = view;
     render(<AppShell />);
-    expect(screen.getByTestId(view)).toBeTruthy();
+    expect(await screen.findByTestId(view)).toBeTruthy();
     expect(screen.queryByTestId("welcome")).toBeNull();
   });
 });

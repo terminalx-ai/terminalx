@@ -109,7 +109,10 @@ exec /usr/bin/git upload-pack {origin}
         let server = Server::new(daemon, connections.clone());
         std::fs::write(&ssh, format!("#!/bin/sh\nprintf '%s\\n' \"$$\" >> {}\nexec /usr/bin/ssh \"$@\"\n", quote(&clients))).unwrap();
         for file in [&serve, &ssh] { std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o755)).unwrap(); }
-        std::fs::write(&config, format!("Host *\n HostName 127.0.0.1\n Port {}\n User {user}\n IdentityFile {}\n IdentitiesOnly yes\n BatchMode yes\n StrictHostKeyChecking no\n UserKnownHostsFile /dev/null\n LogLevel ERROR\n ControlMaster auto\n ControlPersist 60\n ControlPath {}\n", server.port, config_path(&identity), config_path(&socket))).unwrap();
+        let known_hosts = dir.join("known_hosts");
+        let host_pub = std::fs::read_to_string(host.with_extension("pub")).unwrap();
+        std::fs::write(&known_hosts, format!("[127.0.0.1]:{} {}\n", server.port, host_pub.trim())).unwrap();
+        std::fs::write(&config, format!("Host *\n HostName 127.0.0.1\n Port {}\n User {user}\n IdentityFile {}\n IdentitiesOnly yes\n BatchMode yes\n StrictHostKeyChecking yes\n UserKnownHostsFile {}\n LogLevel ERROR\n ControlMaster auto\n ControlPersist 60\n ControlPath {}\n", server.port, config_path(&identity), config_path(&known_hosts), config_path(&socket))).unwrap();
         git(&f.cwd, &["config", "core.sshCommand", &format!("{} -F {}", quote(&ssh), quote(&config))]);
         git(&f.cwd, &["config", "ssh.variant", "auto"]);
         Self { config, socket, connections, clients, entered, hold, master: None, master_host: "privacy-pull", _server: server, _socket_dir: socket_dir }

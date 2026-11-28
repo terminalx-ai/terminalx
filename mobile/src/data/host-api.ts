@@ -143,7 +143,8 @@ export class HostApi {
   private botListeners = new Set<() => void>();
   private settingsListeners = new Set<() => void>();
   private lists = new Map<string, { version: string; value: unknown }>();
-  private pendingLists = new Map<string, Promise<unknown>>();
+  private pendingLists = new Map<string, Promise<{ value: unknown; notModified: boolean }>>();
+  private cachedSummaries: { source: unknown; value: SessionSummary[] } | null = null;
 
   constructor(private readonly connection: HostConnection) {
     // What the Mac offers comes from its background runtime, which an update
@@ -161,7 +162,7 @@ export class HostApi {
   }
 
   resetConnection(hostChanged = false): void {
-    if (hostChanged) { this.lists = new Map(); this.pendingLists = new Map(); }
+    if (hostChanged) { this.lists = new Map(); this.pendingLists = new Map(); this.cachedSummaries = null; }
     this.featuresChanged();
   }
 
@@ -200,24 +201,28 @@ export class HostApi {
     return pending;
   }
 
-  private async list(method: string, params: Record<string, unknown> = {}): Promise<unknown> {
+  private async listWithStatus(method: string, params: Record<string, unknown> = {}): Promise<{ value: unknown; notModified: boolean }> {
     const key = JSON.stringify([method, params]);
     const pending = this.pendingLists.get(key);
     if (pending) return pending;
     const cache = this.lists;
     const requests = this.pendingLists;
-    const task = (async () => {
+    const task = (async (): Promise<{ value: unknown; notModified: boolean }> => {
       const supported = (await this.features()).conditionalLists === 1;
-      if (cache !== this.lists) return null;
+      if (cache !== this.lists) return { value: null, notModified: false };
       const previous = cache.get(key);
       const result = await this.connection.request<Record<string, unknown>>(method, supported && previous ? { ...params, version: previous.version } : params);
-      if (!result.ok) return null;
-      if (result.value.notModified === true) return previous?.value ?? null;
+      if (!result.ok) return { value: null, notModified: false };
+      if (result.value.notModified === true) return { value: previous?.value ?? null, notModified: true };
       if (supported && typeof result.value.version === "string") cache.set(key, { version: result.value.version, value: result.value });
-      return result.value;
+      return { value: result.value, notModified: false };
     })();
     requests.set(key, task);
     try { return await task; } finally { requests.delete(key); }
+  }
+
+  private async list(method: string, params: Record<string, unknown> = {}): Promise<unknown> {
+    return (await this.listWithStatus(method, params)).value;
   }
 
   /**
@@ -235,7 +240,13 @@ export class HostApi {
    */
   rememberList(method: string, params: Record<string, unknown>, version: string, value: Record<string, unknown>): void {
     const key = JSON.stringify([method, params]);
-    if (!this.lists.has(key)) this.lists.set(key, { version, value: { ...value, version } });
+    if (!this.lists.has(key)) {
+      const stored = { ...value, version };
+      this.lists.set(key, { version, value: stored });
+      if (method === "sessions.summaries" && Array.isArray(value.sessions) && value.sessions.every(isSessionSummary)) {
+        this.cachedSummaries = { source: stored, value: value.sessions };
+      }
+    }
   }
 
   async syncTranscript(sessionId: string, tabId: string, cursor?: SyncCursor): Promise<SyncPage> {
@@ -320,9 +331,24 @@ export class HostApi {
     return result.ok && (result.value as { forgotten?: unknown } | null)?.forgotten === true;
   }
 
+  private parseSummaries(value: unknown): SessionSummary[] | null {
+    if (!value || typeof value !== "object") return null;
+    if (this.cachedSummaries && this.cachedSummaries.source === value) return this.cachedSummaries.value;
+    const raw = (value as { sessions?: unknown }).sessions;
+    if (!Array.isArray(raw)) return null;
+    const parsed = raw.filter(isSessionSummary);
+    this.cachedSummaries = { source: value, value: parsed };
+    return parsed;
+  }
+
   async summaries(): Promise<SessionSummary[] | null> {
-    const value = await this.list("sessions.summaries") as { sessions?: unknown } | null;
-    return Array.isArray(value?.sessions) ? value.sessions.filter(isSessionSummary) : null;
+    return this.parseSummaries(await this.list("sessions.summaries"));
+  }
+
+  /** Like `summaries()`, plus whether the host answered `{ notModified: true }`. */
+  async summariesWithStatus(): Promise<{ notModified: true; sessions: SessionSummary[] | null } | { notModified: false; sessions: SessionSummary[] | null }> {
+    const { value, notModified } = await this.listWithStatus("sessions.summaries");
+    return { notModified, sessions: this.parseSummaries(value) };
   }
 
   async tail(sessionId: string, tabId: string, before?: number): Promise<{ events: AgentEvent[]; hasMore: boolean }> {

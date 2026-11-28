@@ -775,9 +775,18 @@ pub(crate) fn verify(home: &Path, binary: &Path) -> Result<Verified> {
     if crate::paths::canonicalize(binary).ok().as_ref() != Some(&path) {
         bail!("{} is not a runtime installed in this home", binary.display());
     }
-    let identity = checked(&path, &digest)?;
+    #[cfg_attr(target_os = "macos", allow(unused_mut))]
+    let (mut file, identity) = opened(&path, &digest)?;
     #[cfg(target_os = "macos")]
-    signed_alike(&path)?;
+    {
+        drop(file);
+        signed_alike(&path)?;
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        verify_release_signature(&path, &mut file)?;
+        drop(file);
+    }
     let answer = ask(&path)?;
     let version = answer["version"].as_str().and_then(|version| semver::Version::parse(version).ok()).context("the runtime did not say its version")?;
     let own = semver::Version::parse(env!("CARGO_PKG_VERSION")).expect("the crate's own version is semantic");
@@ -865,6 +874,167 @@ fn signed_alike(binary: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+// Optional test-only signing public key override (`#[cfg(test)]` ONLY —
+// production and debug builds always pin `crate::serve_cli::RUNTIME_SIGNING_KEY`).
+#[cfg(test)]
+thread_local! {
+    static TEST_SIGNING_KEY: std::cell::RefCell<Option<[u8; 32]>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Maximum size of a detached OpenSSH signature file next to `terminalx-serve`.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+const MAX_SIG_BYTES: u64 = 16 * 1024;
+
+/// Extract the raw 32-byte Ed25519 public key from an OpenSSH `ssh-ed25519 <b64>` key string.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+fn parse_openssh_ed25519_pubkey(key: &str) -> Result<[u8; 32]> {
+    let mut parts = key.split_whitespace();
+    let kind = parts.next().context("missing SSH public key type")?;
+    anyhow::ensure!(kind == "ssh-ed25519", "unsupported signing key type {kind}");
+    let blob_b64 = parts.next().context("missing SSH public key data")?;
+    let blob = base64::engine::general_purpose::STANDARD.decode(blob_b64).context("decode SSH public key")?;
+    let mut cursor = blob.as_slice();
+    let key_type = read_ssh_string(&mut cursor)?;
+    anyhow::ensure!(key_type == b"ssh-ed25519", "SSH key blob is not ssh-ed25519");
+    let raw = read_ssh_string(&mut cursor)?;
+    anyhow::ensure!(cursor.is_empty(), "trailing bytes in SSH public key");
+    let pubkey: [u8; 32] = raw.try_into().map_err(|_| anyhow::anyhow!("Ed25519 public key must be 32 bytes"))?;
+    Ok(pubkey)
+}
+
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+fn read_ssh_u32(cursor: &mut &[u8]) -> Result<u32> {
+    if cursor.len() < 4 {
+        bail!("truncated SSH wire integer");
+    }
+    let (head, tail) = cursor.split_at(4);
+    *cursor = tail;
+    Ok(u32::from_be_bytes([head[0], head[1], head[2], head[3]]))
+}
+
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+fn read_ssh_string<'a>(cursor: &mut &'a [u8]) -> Result<&'a [u8]> {
+    let len = read_ssh_u32(cursor)? as usize;
+    if cursor.len() < len {
+        bail!("truncated SSH wire string");
+    }
+    let (head, tail) = cursor.split_at(len);
+    *cursor = tail;
+    Ok(head)
+}
+
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+fn push_ssh_string(out: &mut Vec<u8>, data: &[u8]) {
+    let len = u32::try_from(data.len()).expect("SSH wire string length fits u32");
+    out.extend_from_slice(&len.to_be_bytes());
+    out.extend_from_slice(data);
+}
+
+/// Verify an OpenSSH `SSHSIG` armored signature over `message` against `expected_pubkey`
+/// and `expected_namespace` in-process using `ring` Ed25519 (S-02).
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+fn verify_sshsig_bytes(sig_pem: &str, message: &[u8], expected_pubkey: &[u8; 32], expected_namespace: &str) -> Result<()> {
+    use ring::signature::{UnparsedPublicKey, ED25519};
+    use sha2::{Digest, Sha256, Sha512};
+
+    let begin = "-----BEGIN SSH SIGNATURE-----";
+    let end = "-----END SSH SIGNATURE-----";
+    let mut lines = sig_pem.lines().map(str::trim);
+    anyhow::ensure!(lines.find(|line| !line.is_empty()) == Some(begin), "missing SSH SIGNATURE header");
+    let mut b64 = String::new();
+    let mut saw_end = false;
+    for line in lines {
+        if line == end {
+            saw_end = true;
+            break;
+        }
+        b64.push_str(line);
+    }
+    anyhow::ensure!(saw_end && !b64.is_empty(), "missing SSH SIGNATURE footer");
+    let blob = base64::engine::general_purpose::STANDARD.decode(&b64).context("decode SSH signature")?;
+    anyhow::ensure!(blob.starts_with(b"SSHSIG"), "invalid SSHSIG magic");
+    let mut cursor = &blob[6..];
+    let version = read_ssh_u32(&mut cursor)?;
+    anyhow::ensure!(version == 1, "unsupported SSHSIG version {version}");
+    let pubkey_blob = read_ssh_string(&mut cursor)?;
+    let namespace = read_ssh_string(&mut cursor)?;
+    let reserved = read_ssh_string(&mut cursor)?;
+    let hash_alg = read_ssh_string(&mut cursor)?;
+    let sig_blob = read_ssh_string(&mut cursor)?;
+    anyhow::ensure!(cursor.is_empty(), "trailing bytes in SSHSIG blob");
+    anyhow::ensure!(namespace == expected_namespace.as_bytes(), "SSH signature namespace mismatch");
+
+    // Verify embedded public key matches our pinned Ed25519 key.
+    let mut pk_cursor = pubkey_blob;
+    anyhow::ensure!(read_ssh_string(&mut pk_cursor)? == b"ssh-ed25519", "SSH signature key is not ssh-ed25519");
+    let raw_pk = read_ssh_string(&mut pk_cursor)?;
+    anyhow::ensure!(pk_cursor.is_empty() && raw_pk == expected_pubkey.as_slice(), "runtime binary is not signed by the pinned TerminalX release key");
+
+    // Extract raw 64-byte Ed25519 signature.
+    let mut sig_cursor = sig_blob;
+    anyhow::ensure!(read_ssh_string(&mut sig_cursor)? == b"ssh-ed25519", "SSH signature algorithm is not ssh-ed25519");
+    let raw_sig = read_ssh_string(&mut sig_cursor)?;
+    anyhow::ensure!(sig_cursor.is_empty() && raw_sig.len() == 64, "invalid Ed25519 signature length");
+
+    let hashed: Vec<u8> = match hash_alg {
+        b"sha512" => Sha512::digest(message).to_vec(),
+        b"sha256" => Sha256::digest(message).to_vec(),
+        other => bail!("unsupported SSHSIG hash algorithm {}", String::from_utf8_lossy(other)),
+    };
+    let mut signed_data = Vec::with_capacity(64 + namespace.len() + reserved.len() + hash_alg.len() + hashed.len());
+    signed_data.extend_from_slice(b"SSHSIG");
+    push_ssh_string(&mut signed_data, namespace);
+    push_ssh_string(&mut signed_data, reserved);
+    push_ssh_string(&mut signed_data, hash_alg);
+    push_ssh_string(&mut signed_data, &hashed);
+
+    UnparsedPublicKey::new(&ED25519, expected_pubkey)
+        .verify(&signed_data, raw_sig)
+        .map_err(|_| anyhow::anyhow!("runtime binary signature verification failed"))?;
+    Ok(())
+}
+
+/// Cryptographically verify a non-macOS (Linux) handover binary's detached
+/// OpenSSH signature (`<binary>.sig`) against the compiled-in TerminalX
+/// release Ed25519 signing key BEFORE executing `handover-formats` or `fexecve` (S-02).
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+fn verify_release_signature(binary_path: &Path, binary_file: &mut std::fs::File) -> Result<()> {
+    use std::io::{Read, Seek, SeekFrom};
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+
+    let mut sig_name = binary_path.as_os_str().to_os_string();
+    sig_name.push(".sig");
+    let sig_path = PathBuf::from(sig_name);
+    let sig_file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(&sig_path)
+        .with_context(|| format!("{} is missing its cryptographic signature ({})", binary_path.display(), sig_path.display()))?;
+    let meta = sig_file.metadata()?;
+    // SAFETY: geteuid has no preconditions.
+    if !meta.is_file() || meta.uid() != unsafe { libc::geteuid() } || meta.mode() & 0o022 != 0 || meta.len() > MAX_SIG_BYTES {
+        bail!("{} is not a valid private signature file", sig_path.display());
+    }
+    let mut sig_text = String::new();
+    sig_file.take(MAX_SIG_BYTES + 1).read_to_string(&mut sig_text).context("read runtime signature")?;
+
+    binary_file.seek(SeekFrom::Start(0))?;
+    let mut binary_bytes = Vec::new();
+    binary_file.read_to_end(&mut binary_bytes).context("read runtime binary for signature verification")?;
+    binary_file.seek(SeekFrom::Start(0))?;
+
+    #[cfg(test)]
+    let pinned_key = TEST_SIGNING_KEY.with(|slot| *slot.borrow());
+    #[cfg(not(test))]
+    let pinned_key: Option<[u8; 32]> = None;
+
+    let expected_pubkey = match pinned_key {
+        Some(key) => key,
+        None => parse_openssh_ed25519_pubkey(crate::serve_cli::RUNTIME_SIGNING_KEY)?,
+    };
+    verify_sshsig_bytes(&sig_text, &binary_bytes, &expected_pubkey, crate::serve_cli::SIGNATURE_NAMESPACE)
 }
 
 // --------------------------------------------------------------- the new side
@@ -1173,5 +1343,103 @@ mod tests {
         let linked = home.join("runtime").join("linked");
         std::os::unix::fs::symlink(&foreign, &linked).unwrap();
         assert!(format!("{:#}", verify(&home, &linked.join("terminalx-serve")).err().unwrap()).contains("not a private directory"));
+    }
+
+    /// Build a valid OpenSSH `SSHSIG` armored signature for test binaries (S-02).
+    fn sign_sshsig_for_test(keypair: &ring::signature::Ed25519KeyPair, namespace: &str, message: &[u8]) -> String {
+        use ring::signature::KeyPair as _;
+        use sha2::{Digest, Sha512};
+
+        let mut pubkey_blob = Vec::new();
+        push_ssh_string(&mut pubkey_blob, b"ssh-ed25519");
+        push_ssh_string(&mut pubkey_blob, keypair.public_key().as_ref());
+
+        let hash_alg = b"sha512";
+        let hashed = Sha512::digest(message);
+        let mut signed_data = Vec::new();
+        signed_data.extend_from_slice(b"SSHSIG");
+        push_ssh_string(&mut signed_data, namespace.as_bytes());
+        push_ssh_string(&mut signed_data, b"");
+        push_ssh_string(&mut signed_data, hash_alg);
+        push_ssh_string(&mut signed_data, &hashed);
+
+        let sig = keypair.sign(&signed_data);
+        let mut sig_blob = Vec::new();
+        push_ssh_string(&mut sig_blob, b"ssh-ed25519");
+        push_ssh_string(&mut sig_blob, sig.as_ref());
+
+        let mut blob = Vec::new();
+        blob.extend_from_slice(b"SSHSIG");
+        blob.extend_from_slice(&1u32.to_be_bytes());
+        push_ssh_string(&mut blob, &pubkey_blob);
+        push_ssh_string(&mut blob, namespace.as_bytes());
+        push_ssh_string(&mut blob, b"");
+        push_ssh_string(&mut blob, hash_alg);
+        push_ssh_string(&mut blob, &sig_blob);
+
+        let encoded = base64::engine::general_purpose::STANDARD.encode(blob);
+        format!("-----BEGIN SSH SIGNATURE-----\n{encoded}\n-----END SSH SIGNATURE-----\n")
+    }
+
+    /// S-02: Linux/non-macOS handover binaries require cryptographic Ed25519
+    /// signature verification before `handover-formats` or `fexecve` runs.
+    #[test]
+    fn release_signature_verification_accepts_valid_sshsig_and_rejects_unsigned_or_forged_s02() {
+        use ring::signature::{Ed25519KeyPair, KeyPair as _};
+        use std::os::unix::fs::PermissionsExt;
+
+        // Compiled-in production release key parses cleanly.
+        assert_eq!(parse_openssh_ed25519_pubkey(crate::serve_cli::RUNTIME_SIGNING_KEY).unwrap().len(), 32);
+
+        let seed = [42u8; 32];
+        let keypair = Ed25519KeyPair::from_seed_unchecked(&seed).unwrap();
+        let pubkey: [u8; 32] = keypair.public_key().as_ref().try_into().unwrap();
+        let other_keypair = Ed25519KeyPair::from_seed_unchecked(&[99u8; 32]).unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("terminalx-serve");
+        let sig_path = dir.path().join("terminalx-serve.sig");
+        let payload = b"#!/bin/sh\necho '{\"version\":\"9.9.9\",\"formats\":[1]}'\n";
+        std::fs::write(&bin, payload).unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        TEST_SIGNING_KEY.with(|slot| *slot.borrow_mut() = Some(pubkey));
+
+        // 1. Missing `.sig` file is rejected.
+        let mut f = std::fs::File::open(&bin).unwrap();
+        assert!(verify_release_signature(&bin, &mut f).is_err(), "unsigned binary must fail");
+
+        // 2. Valid signature under the pinned key and namespace passes.
+        let valid_sig = sign_sshsig_for_test(&keypair, crate::serve_cli::SIGNATURE_NAMESPACE, payload);
+        std::fs::write(&sig_path, &valid_sig).unwrap();
+        std::fs::set_permissions(&sig_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        verify_release_signature(&bin, &mut f).unwrap();
+
+        // 3. Wrong namespace is rejected.
+        let wrong_ns = sign_sshsig_for_test(&keypair, "other-namespace", payload);
+        std::fs::write(&sig_path, &wrong_ns).unwrap();
+        assert!(verify_release_signature(&bin, &mut f).is_err(), "wrong namespace must fail");
+
+        // 4. Signature by an untrusted key is rejected.
+        let wrong_key_sig = sign_sshsig_for_test(&other_keypair, crate::serve_cli::SIGNATURE_NAMESPACE, payload);
+        std::fs::write(&sig_path, &wrong_key_sig).unwrap();
+        assert!(verify_release_signature(&bin, &mut f).is_err(), "untrusted signer must fail");
+
+        // 5. Tampered binary is rejected against the valid signature.
+        std::fs::write(&sig_path, &valid_sig).unwrap();
+        std::fs::write(&bin, b"#!/bin/sh\nid\n").unwrap();
+        let mut tampered = std::fs::File::open(&bin).unwrap();
+        assert!(verify_release_signature(&bin, &mut tampered).is_err(), "tampered binary must fail");
+
+        // 6. Symlinked `.sig` file is rejected (`O_NOFOLLOW`).
+        std::fs::write(&bin, payload).unwrap();
+        let external_sig = dir.path().join("elsewhere.sig");
+        std::fs::write(&external_sig, &valid_sig).unwrap();
+        std::fs::remove_file(&sig_path).unwrap();
+        std::os::unix::fs::symlink(&external_sig, &sig_path).unwrap();
+        let mut f2 = std::fs::File::open(&bin).unwrap();
+        assert!(verify_release_signature(&bin, &mut f2).is_err(), "symlinked sig must fail");
+
+        TEST_SIGNING_KEY.with(|slot| *slot.borrow_mut() = None);
     }
 }

@@ -24,7 +24,9 @@ use crate::local_sharing::{
     self, Guest, Link, LinkSettings, Role, Share, IDENTITY_MS,
 };
 use crate::session::SessionManager;
-use crate::local_sharing::runtime::{message, validate_params};
+use crate::local_sharing::runtime::message;
+#[cfg(test)]
+use crate::local_sharing::runtime::validate_params;
 use crate::store::{
     self,
     index,
@@ -98,7 +100,10 @@ pub(crate) fn decode_link(link: &str) -> Result<ShareOffer> {
     if let Some(relay) = &offer.pairing.relay {
         if relay.v != 1
             || relay.e2ee_framing != 2
+            || relay.relay_host_id.len() != 16
+            || !crate::remote::host::valid_base64url_32(&relay.invite_token)
             || super::cloud::relay_director_url().as_deref() != Some(relay.director_url.as_str())
+            || !super::cloud::allowed_https_origin(&relay.director_url)
             || !super::cloud::allowed_https_origin(&relay.cell_url)
         {
             bail!("Invalid relay endpoint.");
@@ -475,8 +480,16 @@ impl PairingManager {
                 }
             }),
         );
-        let mut access_token = None::<String>;
+        let host_public_key_b64 = self.host_key(false)?.public_key_b64();
+        let audience = super::cloud::GuestAssertionAudience {
+            session_id: session_id.clone(),
+            link_id: link_id.clone(),
+            host_public_key_b64,
+            transcript_hash_b64: crypto.transcript_hash_b64.clone(),
+        };
+        let mut authenticated = false;
         let mut verified_at = now();
+        let mut verified_until = 0i64;
         let mut auth_attempts = 0;
         let mut requests = VecDeque::new();
         let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
@@ -485,12 +498,9 @@ impl PairingManager {
                 tokio::select! {
                     _ = cancelled.recv() => break,
                     _ = tick.tick() => {
-                        if let Some(token) = &access_token {
-                            if now() - verified_at >= IDENTITY_MS / 2 {
-                                let token = token.clone();
-                                let person = verify_identity(token, &mut cancelled).await?;
-                                self.refresh_share_guest(&session_id, &id, person)?;
-                                verified_at = now();
+                        if authenticated {
+                            if now() >= verified_until {
+                                bail!("Your sign-in is no longer valid. Sign in again.");
                             }
                             self.drain_share_queue(&session_id)?;
                             let status = self.guest_status(&session_id, &id)?;
@@ -522,22 +532,21 @@ impl PairingManager {
                                 requests.push_back(now());
                                 let method = request["method"].as_str().unwrap_or_default();
                                 let result = if method == "session.authenticate" {
-                                    if access_token.is_none() {
+                                    if !authenticated {
                                         auth_attempts += 1;
                                         if auth_attempts > 3 { bail!("Too many authentication attempts."); }
                                     } else if now() - verified_at < 5000 { bail!("Too many authentication attempts."); }
-                                    validate_params(method, &request["params"], &session_id)?;
-                                    let token = request["params"]["accessToken"].as_str().filter(|t| !t.is_empty() && t.len() < 16_384).context("Sign in to join.")?.to_string();
-                                    let verify = token.clone();
-                                    match verify_identity(verify, &mut cancelled).await {
-                                        Ok(person) => {
-                                            let admission = if access_token.is_some() {
-                                                self.refresh_share_guest(&session_id, &id, person)
-                                            } else { self.join_share_guest(&session_id, Guest { privacy:Default::default(), connection_id: id.clone(), link_id: link_id.clone(), person, role: Role::Viewer,
-                                                can_approve: false, admitted: false, verified_until: now() + IDENTITY_MS, active: active.clone(), cancel: cancel.clone(),
+                                    let assertion = validate_authenticate_params(&request["params"], &session_id)?;
+                                    match verify_identity(self.account.clone(), assertion, audience.clone(), &mut cancelled).await {
+                                        Ok(verified) => {
+                                            let until = verified.expires_at.min(now() + IDENTITY_MS);
+                                            let admission = if authenticated {
+                                                self.refresh_share_guest(&session_id, &id, verified.person)
+                                            } else { self.join_share_guest(&session_id, Guest { privacy:Default::default(), connection_id: id.clone(), link_id: link_id.clone(), person: verified.person, role: Role::Viewer,
+                                                can_approve: false, admitted: false, verified_until: until, active: active.clone(), cancel: cancel.clone(),
                                                 viewing: None, typing: false, last_write: 0, write_revision: 0 }) };
                                             match admission {
-                                                Ok(admitted) => { active.store(admitted, Ordering::SeqCst); access_token = Some(token); verified_at = now(); Ok(json!({ "admitted": admitted })) }
+                                                Ok(admitted) => { active.store(admitted, Ordering::SeqCst); authenticated = true; verified_at = now(); verified_until = until; Ok(json!({ "admitted": admitted })) }
                                                 Err(error) => Err(error),
                                             }
                                         }
@@ -634,13 +643,39 @@ impl PairingManager {
 
 }
 
+/// Validate `session.authenticate` params: accept only a scoped, short-lived
+/// `assertion` bound to `session`, and explicitly reject raw `accessToken`s.
+fn validate_authenticate_params(params: &Value, session: &str) -> Result<String> {
+    let Some(map) = params.as_object() else {
+        bail!("The request is outside this session's scope.");
+    };
+    if map.contains_key("accessToken") {
+        bail!("Raw account access tokens are not accepted; send a scoped guest assertion.");
+    }
+    if params["sessionId"].as_str() != Some(session)
+        || !map.keys().all(|k| matches!(k.as_str(), "sessionId" | "assertion"))
+    {
+        bail!("The request is outside this session's scope.");
+    }
+    let assertion = params["assertion"]
+        .as_str()
+        .filter(|a| !a.is_empty() && a.len() <= super::cloud::MAX_GUEST_ASSERTION_LEN)
+        .context("Sign in to join.")?;
+    Ok(assertion.to_string())
+}
+
 async fn verify_identity(
-    token: String,
+    account: Arc<crate::account::AccountManager>,
+    assertion: String,
+    audience: super::cloud::GuestAssertionAudience,
     cancelled: &mut mpsc::UnboundedReceiver<()>,
-) -> Result<local_sharing::Person> {
+) -> Result<super::cloud::VerifiedGuest> {
     tokio::select! {
         _ = cancelled.recv() => bail!("Access ended."),
-        result = tokio::task::spawn_blocking(move || super::cloud::verify_guest(&token)) => result?,
+        result = tokio::task::spawn_blocking(move || {
+            let host_context = account.context().context("Sign in to share this session.")?;
+            super::cloud::verify_guest_assertion(&host_context, &assertion, &audience)
+        }) => result?,
     }
 }
 
@@ -1009,5 +1044,17 @@ mod tests {
         assert!(validate_params("session.stop", &json!({"sessionId":"one", "tabId":"tab"}), "one").is_ok());
         assert!(validate_params("session.stop", &json!({"sessionId":"one", "tabId":"tab", "force": "yes"}), "one").is_err());
         assert!(validate_params("session.steer", &json!({"sessionId":"one", "tabId":"tab", "text": "now", "force": true}), "one").is_err());
+    }
+
+    #[test]
+    fn authenticate_params_accept_scoped_assertion_and_reject_raw_access_token() {
+        assert_eq!(
+            validate_authenticate_params(&json!({"sessionId": "one", "assertion": "scoped-123"}), "one").unwrap(),
+            "scoped-123"
+        );
+        assert!(validate_authenticate_params(&json!({"sessionId": "one", "accessToken": "master-token"}), "one").is_err());
+        assert!(validate_authenticate_params(&json!({"sessionId": "one", "assertion": "scoped-123", "accessToken": "master"}), "one").is_err());
+        assert!(validate_authenticate_params(&json!({"sessionId": "two", "assertion": "scoped-123"}), "one").is_err());
+        assert!(validate_authenticate_params(&json!({"sessionId": "one", "assertion": ""}), "one").is_err());
     }
 }

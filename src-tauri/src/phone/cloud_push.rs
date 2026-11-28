@@ -21,10 +21,11 @@ const MAX_HOST_LABEL_LEN: usize = 40;
 fn push_agent() -> &'static ureq::Agent {
     static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
     AGENT.get_or_init(|| {
-        ureq::AgentBuilder::new()
+        crate::data_privacy::http_agent()
             .timeout_connect(PUSH_NOTIFY_TIMEOUT)
             .timeout_read(PUSH_NOTIFY_TIMEOUT)
             .timeout_write(PUSH_NOTIFY_TIMEOUT)
+            .redirects(0)
             .build()
     })
 }

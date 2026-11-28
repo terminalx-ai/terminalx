@@ -2,7 +2,7 @@ import { PrivacyImage } from "@/components/ui/privacy-image";
 import { useEffect, useState } from "react";
 import { fs } from "@/lib/api";
 import { fileName } from "@/lib/paths";
-import { chatMediaKind, type ChatMediaKind } from "@/lib/chatMedia";
+import { chatMediaKind, isSafeWorkspaceMediaPath, type ChatMediaKind } from "@/lib/chatMedia";
 import type { ChatLinkContext } from "@/lib/chatLinks";
 import { openImageViewer } from "@/lib/imageViewer";
 
@@ -36,10 +36,11 @@ function MediaItem({ path, context }: { path: string; context: ChatLinkContext }
       return;
     }
     const kind = chatMediaKind(path);
-    if (!kind) return;
+    if (!kind || !base || !isSafeWorkspaceMediaPath(path, base)) return;
     void (async () => {
       const info = await fs.inspectPath(base, path);
       if (info.kind !== "file" || cancelled) return;
+      if (!isSafeWorkspaceMediaPath(info.path, base)) return;
       if (kind === "svg") {
         // Drawn as an image, so a script in it never runs.
         const file = await fs.readText(info.path);
@@ -68,7 +69,7 @@ function MediaItem({ path, context }: { path: string; context: ChatLinkContext }
       ) : shown.kind === "audio" ? (
         <audio src={shown.src} controls preload="metadata" className="max-w-full" />
       ) : (
-        <button type="button" onClick={() => openImageViewer([{ src: shown.src, name, path: path.startsWith("data:") ? undefined : path }])} aria-label={`View ${name}`} className="block max-w-full cursor-zoom-in rounded-lg">
+        <button type="button" onClick={() => openImageViewer([{ src: shown.src, name, path: path.startsWith("data:") || shown.kind === "svg" ? undefined : path }])} aria-label={`View ${name}`} className="block max-w-full cursor-zoom-in rounded-lg">
           <PrivacyImage src={shown.src} alt={name} className="max-h-96 max-w-full rounded-lg object-contain hairline" />
         </button>
       )}

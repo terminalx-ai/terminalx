@@ -52,10 +52,10 @@ const fileWord = (n: number) => `${n.toLocaleString()} ${n === 1 ? "file" : "fil
  * with no match offers search in files and a rerun over ignored files.
  * It sits under the title bar, at the same place whatever it lists.
  */
-export function QuickOpen({ sessionId, root, source, branch }: { sessionId: string; root: string; source?: FileSource; branch?: string | null }) {
+export function QuickOpen({ sessionId, root, source, branch, initialOpen = false }: { sessionId: string; root: string; source?: FileSource; branch?: string | null; initialOpen?: boolean }) {
   const reader = useMemo(() => source ?? localFileSource(root), [source, root]);
   const cloudKey = reader.kind === "cloud" ? reader.key : undefined;
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(initialOpen);
   const [q, setQ] = useState("");
   const [includeIgnored, setIncludeIgnored] = useState(false);
   /** The last answer, with the query and mode it answers: a stale one is never read as "no match". */

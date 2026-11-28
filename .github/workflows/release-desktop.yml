@@ -22,8 +22,11 @@ name: Release desktop (Windows, Linux)
 #   sidecars, the bundled runtime and the installer. Without them the
 #   installer is unsigned and Windows says the publisher is unknown.
 #
-# The build job runs third-party build scripts with a read-only token and no
-# GH_TOKEN. Only `publish` can write, and only to this repository's release.
+# The build job runs third-party build scripts with a read-only token, no
+# GH_TOKEN, and NO signing secrets (neither TAURI_SIGNING_PRIVATE_KEY nor
+# WINDOWS_CERTIFICATE). Authenticode signing (`sign-windows`) and updater
+# signing (`sign-updater`) each run in isolated post-build jobs gated strictly
+# on release tags. Only `publish` can write, and only to this repository's release.
 # Linux builds on Ubuntu 22.04: glibc floor 2.35, as release-serve.yml.
 on:
   release:
@@ -118,15 +121,19 @@ jobs:
             echo "::error::$TAG does not match the version $package"; exit 1
           fi
           echo "version=$package" >> "$GITHUB_OUTPUT"
-      # Whether each kind of signing can run. Only these booleans leave this step.
+      # Whether each kind of signing can run. Only these booleans leave this step,
+      # and signing is strictly disabled on non-release runs (empty tag).
       - id: secrets
         env:
+          TAG: ${{ steps.plan.outputs.tag }}
           HAS_UPDATER_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}
           HAS_WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE != '' && vars.WINDOWS_TIMESTAMP_URL != '' }}
         run: |
-          echo "sign_updater=$HAS_UPDATER_KEY" >> "$GITHUB_OUTPUT"
-          echo "sign_windows=$HAS_WINDOWS_CERTIFICATE" >> "$GITHUB_OUTPUT"
-          echo "Updater signing: $HAS_UPDATER_KEY. Windows Authenticode: $HAS_WINDOWS_CERTIFICATE."
+          if [ -n "$TAG" ] && [ "$HAS_UPDATER_KEY" = true ]; then sign_updater=true; else sign_updater=false; fi
+          if [ -n "$TAG" ] && [ "$HAS_WINDOWS_CERTIFICATE" = true ]; then sign_windows=true; else sign_windows=false; fi
+          echo "sign_updater=$sign_updater" >> "$GITHUB_OUTPUT"
+          echo "sign_windows=$sign_windows" >> "$GITHUB_OUTPUT"
+          echo "Updater signing: $sign_updater. Windows Authenticode: $sign_windows."
 
   build:
     needs: plan
@@ -166,38 +173,14 @@ jobs:
         run: rustup show && cargo --version
       - name: Install npm dependencies
         run: pnpm install --frozen-lockfile
-      # The certificate goes into this user's store for the build only, and the
-      # build is told its thumbprint: Tauri signs the app, its sidecars and the
-      # installer, and scripts/build-local-runtime.mjs the bundled runtime.
-      - name: Prepare Windows signing
-        if: runner.os == 'Windows' && needs.plan.outputs.sign_windows == 'true'
-        shell: pwsh
-        env:
-          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
-          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
-          WINDOWS_TIMESTAMP_URL: ${{ vars.WINDOWS_TIMESTAMP_URL }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $pfx = Join-Path $env:RUNNER_TEMP 'signing.pfx'
-          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
-          $password = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
-          $certificate = Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $password
-          Remove-Item $pfx
-          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" | Sort-Object FullName -Descending | Select-Object -First 1
-          $config = @{ bundle = @{ windows = @{ certificateThumbprint = $certificate.Thumbprint; digestAlgorithm = 'sha256'; timestampUrl = $env:WINDOWS_TIMESTAMP_URL } } } | ConvertTo-Json -Depth 5
-          Set-Content -Path (Join-Path $env:RUNNER_TEMP 'windows-signing.json') -Value $config -Encoding utf8
-          "TERMINALX_WINDOWS_CERTIFICATE_THUMBPRINT=$($certificate.Thumbprint)" >> $env:GITHUB_ENV
-          "TERMINALX_WINDOWS_TIMESTAMP_URL=$env:WINDOWS_TIMESTAMP_URL" >> $env:GITHUB_ENV
-          "TERMINALX_SIGNTOOL=$($signtool.FullName)" >> $env:GITHUB_ENV
-      # No updater artifacts here: they need the private key, which never
-      # reaches this job. In Tauri 2 the installer itself is what the updater
-      # downloads; `sign-updater` signs it.
+      # No signing keys ever enter the untrusted build job: neither Windows
+      # Authenticode certificates nor the Tauri updater key are present while
+      # npm, Vite, or Cargo build scripts execute. `sign-windows` and
+      # `sign-updater` sign the built artifacts in isolated post-build jobs.
       - name: Build the installers
         run: |
           set -euo pipefail
-          signing=()
-          if [ -f "$RUNNER_TEMP/windows-signing.json" ]; then signing=(--config "$RUNNER_TEMP/windows-signing.json"); fi
-          pnpm tauri build --ci --bundles ${{ matrix.bundles }} --config '{"bundle":{"createUpdaterArtifacts":false}}' "${signing[@]}"
+          pnpm tauri build --ci --bundles ${{ matrix.bundles }} --config '{"bundle":{"createUpdaterArtifacts":false}}'
       - name: Collect the installers
         run: |
           set -euo pipefail
@@ -265,11 +248,76 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  # Windows Authenticode signing runs in its own isolated post-build job gated
+  # strictly on release tags. Zero npm/Vite/Cargo build scripts execute here,
+  # and the certificate is always purged from Cert:\CurrentUser\My afterwards.
+  sign-windows:
+    needs: [plan, build]
+    if: needs.plan.outputs.sign_windows == 'true' && needs.plan.outputs.tag != ''
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: desktop-windows
+          path: dist
+      - id: import-cert
+        name: Import Windows signing certificate
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $pfx = Join-Path $env:RUNNER_TEMP 'signing.pfx'
+          try {
+            [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+            $password = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+            $certificate = Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $password
+            "thumbprint=$($certificate.Thumbprint)" >> $env:GITHUB_OUTPUT
+          } finally {
+            Remove-Item -LiteralPath $pfx -Force -ErrorAction SilentlyContinue
+          }
+      - name: Sign and verify Windows installers
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE_THUMBPRINT: ${{ steps.import-cert.outputs.thumbprint }}
+          WINDOWS_TIMESTAMP_URL: ${{ vars.WINDOWS_TIMESTAMP_URL }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" | Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $signtool) { throw 'signtool.exe not found in Windows Kits' }
+          $installers = Get-ChildItem dist\*-setup.exe
+          if (-not $installers) { throw 'No Windows setup installer found to sign' }
+          foreach ($installer in $installers) {
+            & $signtool.FullName sign /sha1 $env:WINDOWS_CERTIFICATE_THUMBPRINT /fd sha256 /tr $env:WINDOWS_TIMESTAMP_URL /td sha256 $installer.FullName
+            if ($LASTEXITCODE -ne 0) { throw "signtool sign failed for $($installer.Name) ($LASTEXITCODE)" }
+            & $signtool.FullName verify /pa $installer.FullName
+            if ($LASTEXITCODE -ne 0) { throw "signtool verify failed for $($installer.Name) ($LASTEXITCODE)" }
+          }
+      - name: Purge Windows signing certificate
+        if: always()
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE_THUMBPRINT: ${{ steps.import-cert.outputs.thumbprint }}
+        run: |
+          $pfx = Join-Path $env:RUNNER_TEMP 'signing.pfx'
+          Remove-Item -LiteralPath $pfx -Force -ErrorAction SilentlyContinue
+          if ($env:WINDOWS_CERTIFICATE_THUMBPRINT) {
+            Get-ChildItem Cert:\CurrentUser\My | Where-Object { $_.Thumbprint -eq $env:WINDOWS_CERTIFICATE_THUMBPRINT } | Remove-Item -Force -ErrorAction SilentlyContinue
+          }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: desktop-windows-signed
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
   # The updater key signs the installers in one step of its own job, which runs
   # no build scripts. Each signature is checked against the committed public key.
   sign-updater:
-    needs: [plan, build]
-    if: needs.plan.outputs.sign_updater == 'true' && needs.plan.outputs.tag != ''
+    needs: [plan, build, sign-windows]
+    if: always() && needs.plan.result == 'success' && needs.build.result == 'success' && (needs.sign-windows.result == 'success' || needs.sign-windows.result == 'skipped') && needs.plan.outputs.sign_updater == 'true' && needs.plan.outputs.tag != ''
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -285,9 +333,18 @@ jobs:
         run: pnpm install --frozen-lockfile --ignore-scripts
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          pattern: desktop-*
+          name: desktop-linux
           path: dist
-          merge-multiple: true
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        if: needs.sign-windows.result == 'success'
+        with:
+          name: desktop-windows-signed
+          path: dist
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        if: needs.sign-windows.result == 'skipped'
+        with:
+          name: desktop-windows
+          path: dist
       - name: Sign for the updater
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}

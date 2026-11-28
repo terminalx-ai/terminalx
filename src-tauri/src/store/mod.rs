@@ -26,14 +26,64 @@ pub(crate) mod managed_configuration;
 pub(crate) mod batch_journal;
 pub(crate) mod transaction;
 
+use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{LazyLock, Mutex};
 
 use anyhow::{Context, Result};
 
-static WRITE_LOCK: Mutex<()> = Mutex::new(());
+const WRITE_LOCK_STRIPES: usize = 64;
+static WRITE_LOCKS: [Mutex<()>; WRITE_LOCK_STRIPES] = [const { Mutex::new(()) }; WRITE_LOCK_STRIPES];
+
+pub(crate) fn write_lock_for(path: &Path) -> &'static Mutex<()> {
+    use std::hash::{Hash, Hasher};
+    // Key by the staging path stem so files sharing `<stem>.tmp.<pid>` serialize
+    // on the same stripe while unrelated store files write concurrently.
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    path.with_extension("").hash(&mut hasher);
+    &WRITE_LOCKS[(hasher.finish() as usize) % WRITE_LOCK_STRIPES]
+}
+
+/// Lightweight metadata fingerprint for cache invalidation without reading file contents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FileStamp {
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+    #[cfg(unix)]
+    ino: u64,
+    #[cfg(unix)]
+    ctime: i64,
+    #[cfg(unix)]
+    ctime_nsec: i64,
+}
+
+pub(crate) fn file_stamp(path: &Path) -> std::io::Result<Option<FileStamp>> {
+    match fs::metadata(path) {
+        Ok(meta) => {
+            #[cfg(unix)]
+            let stamp = {
+                use std::os::unix::fs::MetadataExt;
+                FileStamp {
+                    len: meta.len(),
+                    modified: meta.modified().ok(),
+                    ino: meta.ino(),
+                    ctime: meta.ctime(),
+                    ctime_nsec: meta.ctime_nsec(),
+                }
+            };
+            #[cfg(not(unix))]
+            let stamp = FileStamp {
+                len: meta.len(),
+                modified: meta.modified().ok(),
+            };
+            Ok(Some(stamp))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
+}
 
 /// `~/.raccoon`, created on first use with owner-only permissions so the
 /// transcripts and the orchestration socket in it are private to this user.
@@ -108,25 +158,148 @@ pub fn log_path(session_id: &str, tab_id: &str) -> Result<PathBuf> {
     log_path_in(&root()?, session_id, tab_id)
 }
 
+#[derive(Clone, PartialEq, Eq)]
+enum ResetLogEntry {
+    Valid(String),
+    Invalid,
+}
+
+struct CachedLogPaths {
+    stamp: Option<FileStamp>,
+    entries: HashMap<(String, String), ResetLogEntry>,
+    last_used: u64,
+}
+
+#[derive(Default)]
+struct LogPathCache {
+    tick: u64,
+    by_index: HashMap<PathBuf, CachedLogPaths>,
+}
+
+const MAX_LOG_PATH_CACHE_ROOTS: usize = 16;
+static LOG_PATH_CACHE: LazyLock<Mutex<LogPathCache>> = LazyLock::new(Default::default);
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static TEST_LOG_PATH_PARSES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+fn invalidate_log_path_cache(path: &Path) {
+    if path.file_name().is_some_and(|name| name == "index.json") {
+        LOG_PATH_CACHE.lock().unwrap_or_else(|e| e.into_inner()).by_index.remove(path);
+    }
+}
+
+fn parse_reset_log_entries(index_path: &Path) -> Result<HashMap<(String, String), ResetLogEntry>> {
+    #[derive(serde::Deserialize, Default)]
+    #[serde(rename_all = "camelCase")]
+    struct MinimalIndex {
+        #[serde(default)]
+        sessions: Vec<MinimalSession>,
+        #[serde(default)]
+        closed_tabs: Vec<MinimalClosedTab>,
+    }
+    #[derive(serde::Deserialize)]
+    struct MinimalSession {
+        #[serde(default)]
+        id: String,
+        #[serde(default)]
+        tabs: Vec<MinimalTab>,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct MinimalClosedTab {
+        #[serde(default)]
+        session_id: String,
+        tab: MinimalTab,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct MinimalTab {
+        #[serde(default)]
+        id: String,
+        #[serde(default)]
+        reset_log_id: Option<serde_json::Value>,
+    }
+
+    #[cfg(test)]
+    TEST_LOG_PATH_PARSES.with(|count| count.set(count.get() + 1));
+
+    let minimal: MinimalIndex = read_json(index_path)?.unwrap_or_default();
+    let mut entries = HashMap::new();
+    let classify = |val: Option<serde_json::Value>| -> Option<ResetLogEntry> {
+        match val {
+            None | Some(serde_json::Value::Null) => None,
+            Some(serde_json::Value::String(id)) if uuid::Uuid::parse_str(&id).is_ok() => Some(ResetLogEntry::Valid(id)),
+            Some(_) => Some(ResetLogEntry::Invalid),
+        }
+    };
+    // Active tabs take precedence over closed tabs, matching the original `.find().or_else(...)` order.
+    for session in minimal.sessions {
+        for tab in session.tabs {
+            if let Some(entry) = classify(tab.reset_log_id) {
+                entries.entry((session.id.clone(), tab.id)).or_insert(entry);
+            }
+        }
+    }
+    for closed in minimal.closed_tabs {
+        if let Some(entry) = classify(closed.tab.reset_log_id) {
+            entries.entry((closed.session_id, closed.tab.id)).or_insert(entry);
+        }
+    }
+    Ok(entries)
+}
+
 /// The index selects an immutable log generation together with its provider
 /// conversation. A reset never exposes half of that switch after a crash.
 /// Read the raw index here: projecting message activity would recurse.
 pub(crate) fn log_path_in(root: &Path, session_id: &str, tab_id: &str) -> Result<PathBuf> {
-    let index: serde_json::Value = read_json(&root.join("sessions/index.json"))?.unwrap_or_default();
-    let generation = index["sessions"].as_array().into_iter().flatten()
-        .find(|s| s["id"] == session_id)
-        .and_then(|s| s["tabs"].as_array()).into_iter().flatten()
-        .find(|t| t["id"] == tab_id)
-        .or_else(|| index["closedTabs"].as_array().into_iter().flatten()
-            .find(|closed| closed["sessionId"] == session_id && closed["tab"]["id"] == tab_id).map(|closed| &closed["tab"]))
-        .and_then(|t| t.get("resetLogId"));
-    let name = match generation {
-        Some(serde_json::Value::String(id)) => {
-            anyhow::ensure!(uuid::Uuid::parse_str(id).is_ok(), "Invalid reset log id.");
-            format!("{tab_id}.reset-{id}.jsonl")
+    let index_path = root.join("sessions/index.json");
+    let current_stamp = file_stamp(&index_path)?;
+
+    let cached_entry = {
+        let mut cache = LOG_PATH_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        let hit = cache.by_index.get(&index_path).is_some_and(|c| c.stamp == current_stamp);
+        if hit {
+            cache.tick = cache.tick.wrapping_add(1);
+            let tick = cache.tick;
+            let entry = cache.by_index.get_mut(&index_path).unwrap();
+            entry.last_used = tick;
+            Some(entry.entries.get(&(session_id.to_owned(), tab_id.to_owned())).cloned())
+        } else {
+            None
         }
-        None | Some(serde_json::Value::Null) => format!("{tab_id}.jsonl"),
-        _ => anyhow::bail!("Invalid reset log id."),
+    };
+
+    let generation = match cached_entry {
+        Some(entry) => entry,
+        None => {
+            let parsed = parse_reset_log_entries(&index_path)?;
+            let result = parsed.get(&(session_id.to_owned(), tab_id.to_owned())).cloned();
+            let mut cache = LOG_PATH_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+            cache.tick = cache.tick.wrapping_add(1);
+            let tick = cache.tick;
+            if !cache.by_index.contains_key(&index_path) && cache.by_index.len() >= MAX_LOG_PATH_CACHE_ROOTS {
+                if let Some(oldest) = cache.by_index.iter().min_by_key(|(_, v)| v.last_used).map(|(k, _)| k.clone()) {
+                    cache.by_index.remove(&oldest);
+                }
+            }
+            cache.by_index.insert(
+                index_path,
+                CachedLogPaths {
+                    stamp: current_stamp,
+                    entries: parsed,
+                    last_used: tick,
+                },
+            );
+            result
+        }
+    };
+
+    let name = match generation {
+        Some(ResetLogEntry::Valid(id)) => format!("{tab_id}.reset-{id}.jsonl"),
+        None => format!("{tab_id}.jsonl"),
+        Some(ResetLogEntry::Invalid) => anyhow::bail!("Invalid reset log id."),
     };
     Ok(root.join("sessions").join(session_id).join(name))
 }
@@ -149,6 +322,12 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     write_atomic_unless(path, bytes, || false).map(|_| ())
 }
 
+/// Atomic write+rename without `fsync`/`F_FULLFSYNC`, for derived or ephemeral
+/// caches that can be rebuilt on crash and must not stall on NVMe flush barriers.
+pub fn write_atomic_nosync(path: &Path, bytes: &[u8]) -> Result<()> {
+    write_atomic_inner(path, bytes, false, || false).map(|_| ())
+}
+
 /// [`write_atomic`], asking `abandon` once the new bytes are written and
 /// fsynced beside `path`, right before the rename swaps them in. When it
 /// says so, the temp file is removed, `path` is left untouched and
@@ -156,8 +335,16 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
 /// which another program's write to `path` is lost: one landing after
 /// `abandon` answered and before the rename is still replaced.
 pub fn write_atomic_unless(path: &Path, bytes: &[u8], abandon: impl FnOnce() -> bool) -> Result<bool> {
-    let _guard = WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
+    write_atomic_inner(path, bytes, true, abandon)
+}
+
+fn temp_path(path: &Path) -> PathBuf {
+    path.with_extension(format!("tmp.{}", std::process::id()))
+}
+
+fn write_atomic_inner(path: &Path, bytes: &[u8], sync: bool, abandon: impl FnOnce() -> bool) -> Result<bool> {
+    let _guard = write_lock_for(path).lock().unwrap_or_else(|e| e.into_inner());
+    let tmp = temp_path(path);
     let written = (|| -> Result<()> {
         let mut f = match create_private(&tmp, mode_of(path)) {
             Err(error) if matches!(fs::symlink_metadata(&tmp), Ok(meta) if !meta.is_dir()) => {
@@ -168,7 +355,9 @@ pub fn write_atomic_unless(path: &Path, bytes: &[u8], abandon: impl FnOnce() -> 
         }
         .with_context(|| format!("create {}", tmp.display()))?;
         f.write_all(bytes)?;
-        f.sync_all()?;
+        if sync {
+            f.sync_all()?;
+        }
         Ok(())
     })();
     if let Err(error) = written {
@@ -183,6 +372,7 @@ pub fn write_atomic_unless(path: &Path, bytes: &[u8], abandon: impl FnOnce() -> 
         let _ = fs::remove_file(&tmp);
         return Err(error);
     }
+    invalidate_log_path_cache(path);
     Ok(true)
 }
 
@@ -213,6 +403,11 @@ fn create_private(path: &Path, _keep: Option<u32>) -> std::io::Result<fs::File> 
 pub fn write_json<T: serde::Serialize>(path: &Path, value: &T) -> Result<()> {
     let bytes = serde_json::to_vec_pretty(value)?;
     write_atomic(path, &bytes)
+}
+
+pub fn write_json_nosync<T: serde::Serialize>(path: &Path, value: &T) -> Result<()> {
+    let bytes = serde_json::to_vec_pretty(value)?;
+    write_atomic_nosync(path, &bytes)
 }
 
 /// Read a JSON file; a missing file is `None`, a broken one is an error the
@@ -409,5 +604,41 @@ mod reset_log_tests {
         assert_eq!(log_path_in(root, "s", "t").unwrap(), selected);
         write_json(&index, &json!({"sessions":[{"id":"s","tabs":[{"id":"t","resetLogId":"../../outside"}]}]})).unwrap();
         assert!(log_path_in(root, "s", "t").is_err());
+    }
+
+    #[test]
+    fn log_path_in_caches_parsed_index_and_invalidates_on_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("sessions")).unwrap();
+        let index = root.join("sessions/index.json");
+        let id = "22222222-2222-4222-8222-222222222222";
+        write_json(&index, &json!({"sessions":[{"id":"s","tabs":[{"id":"t"}]}]})).unwrap();
+
+        TEST_LOG_PATH_PARSES.with(|c| c.set(0));
+        assert_eq!(log_path_in(root, "s", "t").unwrap(), root.join("sessions/s/t.jsonl"));
+        for _ in 0..50 {
+            assert_eq!(log_path_in(root, "s", "t").unwrap(), root.join("sessions/s/t.jsonl"));
+        }
+        assert_eq!(TEST_LOG_PATH_PARSES.with(|c| c.get()), 1, "repeated log_path_in calls must hit cache");
+
+        write_json(&index, &json!({"sessions":[{"id":"s","tabs":[{"id":"t","resetLogId":id}]}]})).unwrap();
+        assert_eq!(log_path_in(root, "s", "t").unwrap(), root.join(format!("sessions/s/t.reset-{id}.jsonl")));
+        assert_eq!(TEST_LOG_PATH_PARSES.with(|c| c.get()), 2, "index write must invalidate log_path cache");
+    }
+
+    #[test]
+    fn striped_locks_allow_concurrent_writes_to_distinct_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let p1 = dir.path().join("alpha.json");
+        let p2 = dir.path().join("beta.json");
+        // Verify write_atomic_nosync preserves atomicity and leaves no temp files.
+        write_json_nosync(&p1, &json!({"k": 1})).unwrap();
+        write_json_nosync(&p2, &json!({"k": 2})).unwrap();
+        assert_eq!(read_json::<serde_json::Value>(&p1).unwrap().unwrap()["k"], 1);
+        assert_eq!(read_json::<serde_json::Value>(&p2).unwrap().unwrap()["k"], 2);
+        let mut names: Vec<_> = fs::read_dir(dir.path()).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        names.sort();
+        assert_eq!(names, ["alpha.json", "beta.json"]);
     }
 }

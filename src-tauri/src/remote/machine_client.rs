@@ -600,21 +600,40 @@ async fn open_direct(target: &Target, endpoint: &str) -> Result<Connection, Dial
     Ok(connection)
 }
 
+fn resolve_agent() -> &'static ureq::Agent {
+    static AGENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
+    AGENT.get_or_init(|| crate::data_privacy::http_agent().redirects(0).build())
+}
+
+fn valid_relay_access(access: &RelayAccess, expected_machine_id: &str) -> bool {
+    access.relay_host_id == expected_machine_id
+        && super::host::valid_relay_origin(&access.director_url)
+        && super::host::valid_relay_origin(&access.cell_url)
+        && super::host::valid_opaque_id(&access.relay_device_id)
+        && super::host::valid_base64url_32(&access.invite_token)
+}
+
 /// The cell for the credential, from the director as the phone asks
 /// (`POST /v1/resolve`), else the saved one.
 async fn resolve_cell(relay: &RelayCredential) -> (String, u64) {
     let saved = (relay.info.cell_url.clone(), relay.info.assignment_epoch);
+    if !super::host::valid_relay_origin(&relay.info.director_url) {
+        log::warn!("machines: refusing relay resolve against untrusted director origin");
+        return saved;
+    }
     let url = format!("{}/v1/resolve", relay.info.director_url.trim_end_matches('/'));
     let body = json!({ "v": 1, "relayHostId": relay.info.relay_host_id, "resumeToken": relay.resume_token.as_str() });
     let resolved = tokio::task::spawn_blocking(move || -> Result<(String, u64)> {
-        let response: Value = crate::data_privacy::http_agent()
-            .build()
+        let response: Value = resolve_agent()
             .post(&url)
             .timeout(Duration::from_secs(5))
             .send_json(body)
             .map_err(|error| anyhow!("relay resolve failed: {}", protocol::redact(&error.to_string())))?
             .into_json()?;
         let cell = response["cellUrl"].as_str().ok_or_else(|| anyhow!("resolve lacks cellUrl"))?.to_string();
+        if !super::host::valid_relay_origin(&cell) {
+            bail!("resolve returned untrusted cellUrl");
+        }
         let epoch = response["assignmentEpoch"].as_u64().ok_or_else(|| anyhow!("resolve lacks assignmentEpoch"))?;
         Ok((cell, epoch))
     })
@@ -633,6 +652,9 @@ async fn open_relay(target: &Target) -> Result<Connection, DialFailure> {
     let relay = target.relay.as_ref().ok_or_else(|| DialFailure::unreachable("no relay credential"))?;
     let deadline = tokio::time::Instant::now() + RELAY_TIMEOUT;
     let (cell_url, _) = resolve_cell(relay).await;
+    if !super::host::valid_relay_origin(&cell_url) {
+        return Err(DialFailure::unreachable("relay cell origin is not trusted"));
+    }
     let route = RelayRoute { cell_url: &cell_url, relay_host_id: &relay.info.relay_host_id, public_key_b64: &target.public_key_b64, client_secret: Some(*target.client_secret) };
     let mut connection = match relay_connect(&route, &Credential::Resume(relay.resume_token.to_string()), None, deadline).await {
         Ok(connection) => connection,
@@ -689,9 +711,9 @@ async fn establish(connection: &mut Connection, target: &Target, want_relay_acce
     let relay_access = if want_relay_access && granted(super::machine::MACHINE_2) {
         match request(connection, "machine.relayAccess", json!({})).await? {
             Ok(answer) if answer["relay"].is_object() => match serde_json::from_value::<RelayAccess>(answer["relay"].clone()) {
-                Ok(access) if access.relay_host_id == target.machine_id => Some(access),
+                Ok(access) if valid_relay_access(&access, &target.machine_id) => Some(access),
                 _ => {
-                    log::warn!("machines: the machine's relay access was not for it");
+                    log::warn!("machines: the machine's relay access was invalid or untrusted");
                     None
                 }
             },
@@ -739,8 +761,8 @@ fn spawn_pump(connection: Connection, link: u64, events: LinkEvents) -> mpsc::Un
 }
 
 async fn provision(target: &Target, access: RelayAccess, user_id: String) -> Result<RelayCredential> {
-    if access.relay_host_id != target.machine_id {
-        bail!("relay access for another machine");
+    if !valid_relay_access(&access, &target.machine_id) {
+        bail!("relay access is invalid or untrusted");
     }
     let deadline = tokio::time::Instant::now() + RELAY_TIMEOUT;
     let route = RelayRoute { cell_url: &access.cell_url, relay_host_id: &access.relay_host_id, public_key_b64: &target.public_key_b64, client_secret: Some(*target.client_secret) };
@@ -804,6 +826,9 @@ pub struct RelayPairer<'a> {
 /// a resume credential on that same invite connection, as
 /// `machine.relayAccess` provisioning does for a paired computer.
 pub async fn pair_through_relay(invite: &crate::machine_wire::MachineRelay, me: RelayPairer<'_>, approval_wait: Duration) -> RelayPairing {
+    if !super::host::valid_relay_origin(&invite.director_url) || !super::host::valid_relay_origin(&invite.cell_url) {
+        return RelayPairing::Unreachable("relay origin is not trusted".into());
+    }
     let deadline = tokio::time::Instant::now() + RELAY_TIMEOUT;
     let route = RelayRoute { cell_url: &invite.cell_url, relay_host_id: &invite.relay_host_id, public_key_b64: me.public_key_b64, client_secret: Some(me.client_secret) };
     let mut connection = match relay_connect(&route, &Credential::Invite(invite.invite_token.clone()), None, deadline).await {
@@ -1643,3 +1668,90 @@ impl Owners {
 #[cfg(test)]
 #[path = "machine_client_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod agent_pool_tests {
+    use super::*;
+
+    #[test]
+    fn resolve_agent_is_pooled_across_calls() {
+        assert!(std::ptr::eq(resolve_agent(), resolve_agent()));
+    }
+
+    #[test]
+    fn relay_access_validation_pins_trusted_https_origins() {
+        let valid = RelayAccess {
+            director_url: "https://relay.terminalx.ai".into(),
+            cell_url: "https://cell-1.relay.terminalx.ai".into(),
+            assignment_epoch: 1,
+            relay_host_id: "cs1uhCLEB_ttCYaQ".into(),
+            relay_device_id: "computer-1".into(),
+            invite_token: "a".repeat(43),
+            invite_expires_at: 1_900_000_000_000,
+        };
+        assert!(valid_relay_access(&valid, "cs1uhCLEB_ttCYaQ"));
+        assert!(!valid_relay_access(&valid, "other-machine-id"));
+        for (director, cell) in [
+            ("http://relay.terminalx.ai", "https://cell-1.relay.terminalx.ai"),
+            ("https://relay.terminalx.ai", "http://cell-1.relay.terminalx.ai"),
+            ("https://attacker.example", "https://cell-1.relay.terminalx.ai"),
+            ("https://relay.terminalx.ai", "http://169.254.169.254"),
+        ] {
+            let mut bad = valid.clone();
+            bad.director_url = director.into();
+            bad.cell_url = cell.into();
+            assert!(!valid_relay_access(&bad, "cs1uhCLEB_ttCYaQ"), "{director} / {cell}");
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_cell_disables_redirects_and_rejects_untrusted_origins() {
+        use std::io::{BufRead, Write};
+        // 1. Untrusted director_url must never be contacted; falls back to saved.
+        let untrusted = RelayCredential {
+            info: RelayInfo {
+                director_url: "http://169.254.169.254".into(),
+                cell_url: "https://cell-1.relay.terminalx.ai".into(),
+                assignment_epoch: 7,
+                relay_host_id: "cs1uhCLEB_ttCYaQ".into(),
+                relay_device_id: "computer-1".into(),
+                user_id: "u1".into(),
+            },
+            resume_token: Zeroizing::new("r".repeat(43)),
+        };
+        assert_eq!(resolve_cell(&untrusted).await, ("https://cell-1.relay.terminalx.ai".into(), 7));
+
+        // 2. resolve_agent must not follow 3xx redirects with resume_token.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let redirect_target = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let target_addr = redirect_target.local_addr().unwrap();
+        redirect_target.set_nonblocking(true).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            while reader.read_line(&mut line).unwrap_or(0) > 0 && line != "\r\n" {
+                line.clear();
+            }
+            let _ = write!(
+                stream,
+                "HTTP/1.1 307 Temporary Redirect\r\nLocation: http://{target_addr}/steal\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+        });
+        let redirecting = RelayCredential {
+            info: RelayInfo {
+                director_url: format!("http://{addr}"),
+                cell_url: "https://cell-1.relay.terminalx.ai".into(),
+                assignment_epoch: 9,
+                relay_host_id: "cs1uhCLEB_ttCYaQ".into(),
+                relay_device_id: "computer-1".into(),
+                user_id: "u1".into(),
+            },
+            resume_token: Zeroizing::new("secret-resume-token".into()),
+        };
+        assert_eq!(resolve_cell(&redirecting).await, ("https://cell-1.relay.terminalx.ai".into(), 9));
+        assert!(redirect_target.accept().is_err(), "redirect target must never receive resume_token");
+        server.join().unwrap();
+    }
+}

@@ -207,15 +207,25 @@ fn transfer_args(args: &[&str]) -> bool {
     false
 }
 
+/// Reject a dynamic ref, branch, remote, or revision range that could be
+/// interpreted by Git as an option flag.
+fn reject_dash_arg(kind: &str, value: &str) -> Result<()> {
+    if value.is_empty() || value.starts_with('-') || value.contains('\0') {
+        bail!("invalid git {kind}");
+    }
+    Ok(())
+}
+
 /// Refresh this project's comparison branch for landed/cleanup verification.
 /// Submodules are outside that check (and prevent a verified safe deletion).
 /// Never recurse: child repositories are outside this verification contract.
 /// The SSH boundary is shared with ordinary transfers, including its proxy
 /// refusal; agent processes keep their own runners.
 pub(crate) fn fetch_admitted(cwd: &Path, branch: &str, timeout: std::time::Duration) -> Result<()> {
+    reject_dash_arg("branch", branch)?;
     let _request = crate::github_process::scope();
     let mut command = git();
-    command.current_dir(cwd).args(["fetch", "--quiet", "--no-recurse-submodules", "origin", branch]);
+    command.current_dir(cwd).args(["fetch", "--quiet", "--no-recurse-submodules", "--end-of-options", "origin", branch]);
     let output = crate::github_process::git_verification_output(command, timeout)?;
     if !output.status.success() {
         bail!("git fetch: {}", String::from_utf8_lossy(&output.stderr).trim());
@@ -520,7 +530,9 @@ fn run_ok(cwd: &Path, args: &[&str]) -> bool {
 /// (`merge-tree --write-tree`): the tree, and whether it holds conflicts.
 /// No checkout or index is touched; the objects it writes are unreferenced.
 pub fn merge_tree(cwd: &Path, ours: &str, theirs: &str) -> Result<(String, bool)> {
-    let out = git_in(cwd, &["merge-tree"]).args(["merge-tree", "--write-tree", ours, theirs]).output().context("git merge-tree")?;
+    reject_dash_arg("revision", ours)?;
+    reject_dash_arg("revision", theirs)?;
+    let out = git_in(cwd, &["merge-tree"]).args(["merge-tree", "--write-tree", "--end-of-options", ours, theirs]).output().context("git merge-tree")?;
     // Exit 1 is "merged, with conflicts": the tree is still printed first.
     let conflicted = match out.status.code() {
         Some(0) => false,
@@ -755,6 +767,7 @@ pub fn review_range(cwd: &Path, target: Option<&str>, uncommitted: bool) -> Resu
     let target = if uncommitted {
         "HEAD".to_string()
     } else if let Some(target) = target {
+        reject_dash_arg("target ref", target)?;
         target.to_string()
     } else if let Ok(remote) = run(cwd, &["symbolic-ref", "--short", "-q", "refs/remotes/origin/HEAD"]) {
         remote.trim().to_string()
@@ -823,7 +836,7 @@ pub fn changes_between_options(cwd: &Path, base: &str, head: Option<&str>, hide_
             bail!("bad head tree id");
         }
     }
-    let mut args = vec!["diff", "--no-ext-diff", "--no-textconv", "--numstat", "-M", "--raw", "--no-abbrev", "-z", base];
+    let mut args = vec!["diff", "--no-ext-diff", "--no-textconv", "--numstat", "-M", "--raw", "--no-abbrev", "-z", "--end-of-options", base];
     if let Some(h) = head {
         args.push(h);
     }
@@ -993,10 +1006,13 @@ pub(crate) fn comparison_ref(cwd: &Path) -> Option<String> {
 }
 
 pub fn upstream_counts(cwd: &Path) -> (u32, u32) {
-    comparison_ref(cwd).and_then(|reference| {
-        run(cwd, &["rev-list", "--left-right", "--count", &format!("HEAD...{reference}")]).ok()
-            .and_then(|s| parse_upstream_counts(&s))
-    }).unwrap_or((0, 0))
+    comparison_ref(cwd)
+        .filter(|reference| reject_dash_arg("ref", reference).is_ok())
+        .and_then(|reference| {
+            run(cwd, &["rev-list", "--left-right", "--count", "--end-of-options", &format!("HEAD...{reference}"), "--"]).ok()
+                .and_then(|s| parse_upstream_counts(&s))
+        })
+        .unwrap_or((0, 0))
 }
 
 pub(crate) fn parse_upstream_counts(output: &str) -> Option<(u32, u32)> {
@@ -1018,13 +1034,13 @@ pub fn work_status(cwd: &Path) -> WorkStatus {
     let upstream = run(cwd, &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"]).ok().map(|s| s.trim().to_string());
     let (ahead, behind) = upstream_counts(cwd);
     let default = default_branch(cwd);
-    let ahead_of_base = default.as_ref().and_then(|d| {
-        let base = if run_ok(cwd, &["show-ref", "--verify", "--quiet", &format!("refs/remotes/origin/{d}")]) {
+    let ahead_of_base = default.as_ref().filter(|d| reject_dash_arg("branch", d).is_ok()).and_then(|d| {
+        let base = if run_ok(cwd, &["show-ref", "--verify", "--quiet", "--", &format!("refs/remotes/origin/{d}")]) {
             format!("origin/{d}")
         } else {
             d.clone()
         };
-        run(cwd, &["rev-list", "--count", &format!("{base}..HEAD")]).ok().and_then(|s| s.trim().parse().ok())
+        run(cwd, &["rev-list", "--count", "--end-of-options", &format!("{base}..HEAD"), "--"]).ok().and_then(|s| s.trim().parse().ok())
     });
     let operation = operation_in_progress(cwd).ok().flatten().map(String::from);
     WorkStatus { is_repo: true, dirty, branch, upstream, ahead, behind, default_branch: default, ahead_of_base, head: head_commit(cwd), operation, conflicted }
@@ -1082,17 +1098,18 @@ pub fn taken_worktree_names(project: &Path, index_names: &[String]) -> Vec<Strin
 /// local default branch, else HEAD.
 pub fn resolve_base(project: &Path, requested: Option<&str>) -> Result<String> {
     if let Some(r) = requested.filter(|r| !r.is_empty()) {
-        if !run_ok(project, &["rev-parse", "--verify", "--quiet", &format!("{r}^{{commit}}")]) {
+        reject_dash_arg("base ref", r)?;
+        if !run_ok(project, &["rev-parse", "--verify", "--quiet", "--end-of-options", &format!("{r}^{{commit}}")]) {
             bail!("unknown base ref {r}");
         }
         return Ok(r.to_string());
     }
-    if let Some(d) = default_branch(project) {
+    if let Some(d) = default_branch(project).filter(|d| reject_dash_arg("branch", d).is_ok()) {
         let remote = format!("origin/{d}");
-        if run_ok(project, &["rev-parse", "--verify", "--quiet", &format!("{remote}^{{commit}}")]) {
+        if run_ok(project, &["rev-parse", "--verify", "--quiet", "--end-of-options", &format!("{remote}^{{commit}}")]) {
             return Ok(remote);
         }
-        if run_ok(project, &["rev-parse", "--verify", "--quiet", &format!("{d}^{{commit}}")]) {
+        if run_ok(project, &["rev-parse", "--verify", "--quiet", "--end-of-options", &format!("{d}^{{commit}}")]) {
             return Ok(d);
         }
     }
@@ -1124,12 +1141,12 @@ fn fetch_worktree_base(project: &Path, requested: Option<&str>, timeout: std::ti
     if requested.is_some_and(|r| !r.is_empty()) || !run_ok(project, &["remote", "get-url", "origin"]) {
         return (false, None);
     }
-    let result = match default_branch(project) {
+    let result = match default_branch(project).filter(|branch| reject_dash_arg("branch", branch).is_ok()) {
         Some(branch) => run_within(
             project,
             &[
                 "-c", "credential.interactive=false", "fetch", "--no-tags", "--no-recurse-submodules",
-                "--no-write-fetch-head", "--refmap=", "origin", &format!("+refs/heads/{branch}:refs/remotes/origin/{branch}"),
+                "--no-write-fetch-head", "--refmap=", "--end-of-options", "origin", &format!("+refs/heads/{branch}:refs/remotes/origin/{branch}"),
             ],
             timeout,
             &|| false,
@@ -1185,20 +1202,22 @@ fn create_worktree_with_timeout(project: &Path, name: &str, base: Option<&str>, 
 
 fn create_worktree_impl(project: &Path, name: &str, base: Option<&str>, timeout: std::time::Duration, fork: bool) -> Result<(CreatedWorktree, String)> {
     let _request = crate::github_process::scope();
-    if !crate::names::is_worktree_name(name) && name.contains(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_') {
+    if name.is_empty() || name.starts_with('-') || (!crate::names::is_worktree_name(name) && name.contains(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_')) {
         bail!("bad worktree name");
     }
     let branch = worktree_branch_for(project, name)?;
+    reject_dash_arg("branch", &branch)?;
     let (fetched, warning) = fetch_worktree_base(project, base, timeout);
     let base = resolve_base(project, base)?;
-    let base_commit = run(project, &["rev-parse", "--verify", &format!("{base}^{{commit}}")])?.trim().to_string();
+    reject_dash_arg("base ref", &base)?;
+    let base_commit = run(project, &["rev-parse", "--verify", "--end-of-options", &format!("{base}^{{commit}}")])?.trim().to_string();
     let path = worktree_path(project, name);
     let sparse = crate::store::configuration::sparse_checkout(project)?;
     std::fs::create_dir_all(worktree_root(project))?;
     if fork {
         // No checkout hook runs until Git has successfully registered the
         // branch and worktree, at which point both are ours to roll back.
-        if let Err(error) = run(project, &["worktree", "add", "--no-checkout", "--no-track", "-b", &branch, arg(&path)?, &base_commit]) {
+        if let Err(error) = run(project, &["worktree", "add", "--no-checkout", "--no-track", "-b", &branch, "--end-of-options", arg(&path)?, &base_commit]) {
             // Git can fail before we know whether it created either name.
             // Never guess ownership: point out any remaining destination.
             if std::fs::symlink_metadata(&path).is_ok() || branch_exists(project, &branch) {
@@ -1215,7 +1234,7 @@ fn create_worktree_impl(project: &Path, name: &str, base: Option<&str>, timeout:
             return Err(match cleanup { Ok(()) => error, Err(cleanup) => anyhow!("{error:#}; cleanup failed: {cleanup:#}") });
         }
     } else {
-        worktree_add(project, &["--no-track", "-b", &branch, arg(&path)?, &base], &path, sparse.as_deref(), Some(&branch), true)?;
+        worktree_add(project, &["--no-track", "-b", &branch, "--end-of-options", arg(&path)?, &base], &path, sparse.as_deref(), Some(&branch), true)?;
     }
     ensure_worktree_dir_ignored(project);
     let metadata = (|| -> Result<(String, String)> {
@@ -1305,13 +1324,14 @@ pub(crate) fn fork_worktree_snapshot(path: &Path, copied: &[crate::worktree_file
 }
 
 fn rollback_new_worktree(project: &Path, path: &Path, branch: &str, expected: &str, verified: bool) -> Result<()> {
+    reject_dash_arg("branch", branch)?;
     if !verified && !fork_worktree_snapshot(path, &[])?.is_empty() { bail!("worktree contains changes; it was kept"); }
     if !is_worktree_of(project, path) { bail!("{} is no longer this repository's worktree", path.display()); }
     let actual_branch = run(path, &["symbolic-ref", "--quiet", "--short", "HEAD"])?;
     if actual_branch.trim() != branch { bail!("{} no longer has branch {branch}", path.display()); }
-    let current = run(project, &["rev-parse", "--verify", &format!("refs/heads/{branch}")])?;
+    let current = run(project, &["rev-parse", "--verify", "--end-of-options", &format!("refs/heads/{branch}")])?;
     if current.trim() != expected { bail!("branch {branch} moved; it and the worktree were kept"); }
-    run(project, &["worktree", "remove", "--force", arg(path)?])?;
+    run(project, &["worktree", "remove", "--force", "--", arg(path)?])?;
     run(project, &["update-ref", "-d", &format!("refs/heads/{branch}"), expected])?;
     Ok(())
 }
@@ -1321,10 +1341,10 @@ fn rollback_new_worktree(project: &Path, path: &Path, branch: &str, expected: &s
 /// branch (`origin/fix-x`) gets a local branch of its name tracking it.
 pub fn checkout_worktree(project: &Path, name: &str, branch: &str) -> Result<CreatedWorktree> {
     crate::store::configuration::branch_prefix(project)?;
-    if name.contains(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_') {
+    if name.is_empty() || name.starts_with('-') || name.contains(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_') {
         bail!("bad worktree name");
     }
-    if branch.starts_with('-') || branch.contains("..") || branch.trim().is_empty() {
+    if branch.starts_with('-') || branch.contains("..") || branch.contains('\0') || branch.trim().is_empty() {
         bail!("bad branch name");
     }
     let path = worktree_path(project, name);
@@ -1336,14 +1356,17 @@ pub fn checkout_worktree(project: &Path, name: &str, branch: &str) -> Result<Cre
         branch.to_string()
     } else {
         let remote = format!("refs/remotes/{branch}");
-        if run(project, &["rev-parse", "--verify", "--quiet", &remote]).is_err() {
+        if run(project, &["rev-parse", "--verify", "--quiet", "--end-of-options", &remote]).is_err() {
             bail!("no branch named {branch}");
         }
         let local = branch.split_once('/').map(|(_, rest)| rest).unwrap_or(branch).to_string();
+        if local.starts_with('-') || local.trim().is_empty() {
+            bail!("bad branch name");
+        }
         if branch_exists(project, &local) {
             add_checkout(project, &path, &[&local], &local, sparse)?;
         } else {
-            worktree_add(project, &["--track", "-b", &local, arg(&path)?, branch], &path, sparse, Some(&local), true)?;
+            worktree_add(project, &["--track", "-b", &local, "--end-of-options", arg(&path)?, branch], &path, sparse, Some(&local), true)?;
         }
         local
     };
@@ -1366,15 +1389,16 @@ pub fn checkout_pr_worktree(project: &Path, name: &str, number: u64) -> Result<C
 }
 
 pub(crate) fn checkout_pr_worktree_with(project: &Path, name: &str, number: u64, checkout: impl FnOnce(&Path, u64, &str) -> Result<()>) -> Result<CreatedWorktree> {
-    if name.is_empty() || name.contains(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_') || number == 0 { bail!("Invalid pull request worktree"); }
+    if name.is_empty() || name.starts_with('-') || name.contains(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_') || number == 0 { bail!("Invalid pull request worktree"); }
     let branch = worktree_branch_for(project, name)?;
+    reject_dash_arg("branch", &branch)?;
     if branch_exists(project, &branch) { bail!("Branch {branch} already exists"); }
     let path = worktree_path(project, name);
     if path.exists() { bail!("Worktree path already exists: {}", path.display()); }
     let sparse = crate::store::configuration::sparse_checkout(project)?;
     std::fs::create_dir_all(worktree_root(project))?;
     // Narrowed before the PR's branch is checked out, which then keeps to the same folders.
-    worktree_add(project, &["--detach", arg(&path)?, "HEAD"], &path, sparse.as_deref(), None, true)?;
+    worktree_add(project, &["--detach", "--end-of-options", arg(&path)?, "HEAD"], &path, sparse.as_deref(), None, true)?;
     // Before the file copy below: it refuses to stage inside an unignored folder.
     ensure_worktree_dir_ignored(project);
     let result = (|| {
@@ -1389,8 +1413,8 @@ pub(crate) fn checkout_pr_worktree_with(project: &Path, name: &str, number: u64,
     })();
     if result.is_err() {
         // Only the checkout allocated above is removed; it has never hosted a session.
-        if run(project, &["worktree", "remove", "--force", arg(&path)?]).is_ok() && branch_exists(project, &branch) {
-            let _ = run(project, &["branch", "-D", &branch]);
+        if run(project, &["worktree", "remove", "--force", "--", arg(&path)?]).is_ok() && branch_exists(project, &branch) {
+            let _ = run(project, &["branch", "-D", "--", &branch]);
         }
     }
     result
@@ -1412,8 +1436,8 @@ pub(crate) fn worktree_add(project: &Path, args: &[&str], path: &Path, sparse: O
     let Some(folders) = sparse else { return Ok(()) };
     if let Err(error) = crate::sparse_checkout::populate(path, folders, hooks) {
         // Only the checkout made just now, which has never hosted a session.
-        if run(project, &["worktree", "remove", "--force", arg(path)?]).is_ok() {
-            if let Some(branch) = created { let _ = run(project, &["branch", "-D", branch]); }
+        if run(project, &["worktree", "remove", "--force", "--", arg(path)?]).is_ok() {
+            if let Some(branch) = created { let _ = run(project, &["branch", "-D", "--", branch]); }
         }
         bail!("Could not check out only the chosen folders: {error:#}");
     }
@@ -1422,7 +1446,8 @@ pub(crate) fn worktree_add(project: &Path, args: &[&str], path: &Path, sparse: O
 
 /// `git worktree add <path> <branch>`, saying plainly when the branch is already checked out somewhere.
 fn add_checkout(project: &Path, path: &Path, rest: &[&str], branch: &str, sparse: Option<&[String]>) -> Result<()> {
-    let mut args = vec![arg(path)?];
+    reject_dash_arg("branch", branch)?;
+    let mut args = vec!["--end-of-options", arg(path)?];
     args.extend_from_slice(rest);
     worktree_add(project, &args, path, sparse, None, true).map_err(|e| {
         let text = e.to_string();
@@ -1437,7 +1462,7 @@ fn add_checkout(project: &Path, path: &Path, rest: &[&str], branch: &str, sparse
 /// Move a TerminalX-managed worktree and rename its matching branch. The
 /// checkout may be dirty; `git worktree move` preserves its contents.
 pub fn rename_worktree(project: &Path, path: &Path, name: &str) -> Result<CreatedWorktree> {
-    if name.is_empty() || name.contains('/') || name == "." || name == ".." {
+    if name.is_empty() || name.starts_with('-') || name.contains('/') || name == "." || name == ".." {
         bail!("bad worktree name");
     }
     let project = crate::paths::canonicalize(project).unwrap_or_else(|_| project.to_path_buf());
@@ -1464,9 +1489,10 @@ pub fn rename_worktree(project: &Path, path: &Path, name: &str) -> Result<Create
         bail!("workspace {name} already exists");
     }
     let new_branch = worktree_branch_for(&project, name)?;
-    run(&project, &["worktree", "move", arg(&path)?, arg(&destination)?])?;
-    if let Err(rename_error) = run(&destination, &["branch", "-m", &new_branch]) {
-        let rollback = run(&project, &["worktree", "move", arg(&destination)?, arg(&path)?]);
+    reject_dash_arg("branch", &new_branch)?;
+    run(&project, &["worktree", "move", "--", arg(&path)?, arg(&destination)?])?;
+    if let Err(rename_error) = run(&destination, &["branch", "-m", "--", &new_branch]) {
+        let rollback = run(&project, &["worktree", "move", "--", arg(&destination)?, arg(&path)?]);
         if let Err(rollback_error) = rollback {
             bail!("rename branch failed: {rename_error:#}; moving the workspace back also failed: {rollback_error:#}");
         }
@@ -1551,7 +1577,10 @@ pub fn is_worktree_of(project: &Path, path: &Path) -> bool {
 }
 
 pub fn branch_exists(project: &Path, branch: &str) -> bool {
-    run_ok(project, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")])
+    if reject_dash_arg("branch", branch).is_err() {
+        return false;
+    }
+    run_ok(project, &["rev-parse", "--verify", "--quiet", "--end-of-options", &format!("refs/heads/{branch}")])
 }
 
 pub fn worktree_disposition(project: &Path, name: &str) -> WorktreeDisposition {
@@ -1561,7 +1590,7 @@ pub fn worktree_disposition(project: &Path, name: &str) -> WorktreeDisposition {
     }
     let Ok(branch) = worktree_branch_for(project, name) else { return WorktreeDisposition { exists: true, ..Default::default() }; };
     let unchecked = WorktreeDisposition { exists: true, checked: false, uncommitted: 0, unpushed: 0, branch: Some(branch.clone()) };
-    if !is_worktree_of(project, &path) {
+    if reject_dash_arg("branch", &branch).is_err() || !is_worktree_of(project, &path) {
         return unchecked;
     }
     let uncommitted = run(&path, &["status", "--porcelain", "--"]).map(|s| s.lines().count() as u32);
@@ -1569,11 +1598,10 @@ pub fn worktree_disposition(project: &Path, name: &str) -> WorktreeDisposition {
     // worktree's branch holds. They differ when HEAD was moved off the
     // branch (`git checkout --detach`), and the branch is deleted either way.
     let exclude = format!("--exclude={branch}");
-    let mut args = vec!["rev-list", "--count", "HEAD"];
+    let mut args = vec!["rev-list", "--count", "--not", exclude.as_str(), "--branches", "--remotes", "--tags", "--not", "--end-of-options", "HEAD"];
     if branch_exists(project, &branch) {
         args.push(&branch);
     }
-    args.extend(["--not", exclude.as_str(), "--branches", "--remotes", "--tags"]);
     let unpushed = run(&path, &args).ok().and_then(|s| s.trim().parse::<u32>().ok());
     match (uncommitted, unpushed) {
         (Ok(uncommitted), Some(unpushed)) => WorktreeDisposition { exists: true, checked: true, uncommitted, unpushed, branch: Some(branch) },
@@ -1712,7 +1740,8 @@ fn belongs_to_project(project: &Path, dir: &Path) -> Result<()> {
 /// Commits on `branch` that no other branch, remote or tag holds. `None`
 /// when git cannot say.
 pub fn unique_commits(project: &Path, branch: &str) -> Option<u32> {
-    run(project, &["rev-list", "--count", branch, "--not", &format!("--exclude={branch}"), "--branches", "--remotes", "--tags"])
+    reject_dash_arg("branch", branch).ok()?;
+    run(project, &["rev-list", "--count", "--not", &format!("--exclude={branch}"), "--branches", "--remotes", "--tags", "--not", "--end-of-options", branch])
         .ok()
         .and_then(|s| s.trim().parse().ok())
 }
@@ -1740,11 +1769,15 @@ pub fn detached_head(project: &Path, path: &Path) -> Option<String> {
 /// a branch `raccoon/rescued/<name>-<short sha>` is made for it. Returns the
 /// branch made.
 pub fn rescue_detached(project: &Path, name: &str, commit: &str) -> Option<String> {
-    let unheld: u32 = run(project, &["rev-list", "--count", commit, "--not", "--branches", "--remotes", "--tags"]).ok()?.trim().parse().ok()?;
+    if reject_dash_arg("commit", commit).is_err() || !is_tree_id(commit) {
+        return None;
+    }
+    let unheld: u32 = run(project, &["rev-list", "--count", "--not", "--branches", "--remotes", "--tags", "--not", "--end-of-options", commit]).ok()?.trim().parse().ok()?;
     if unheld == 0 {
         return None;
     }
     let branch = format!("{}rescued/{name}-{}", crate::store::configuration::branch_prefix(project).ok()?, &commit[..8]);
+    reject_dash_arg("branch", &branch).ok()?;
     run(project, &["branch", "--", &branch, commit]).ok().map(|_| branch)
 }
 
@@ -1795,8 +1828,8 @@ pub fn remove_worktree(project: &Path, name: &str, direct: DirectDelete) -> Resu
         // worktree before it fails on the directory.
         let detached = detached_head(project, &path);
         let target = arg(&path)?;
-        let _ = run(project, &["worktree", "unlock", target]);
-        match run(project, &["worktree", "remove", "--force", target]) {
+        let _ = run(project, &["worktree", "unlock", "--", target]);
+        match run(project, &["worktree", "remove", "--force", "--", target]) {
             Ok(_) => removed_by_git = true,
             Err(git_error) if direct == DirectDelete::Never => {
                 bail!("Could not remove the worktree at {}: {git_error:#}. {}", path.display(), leftover_state(&path));
@@ -1821,7 +1854,7 @@ pub fn remove_worktree(project: &Path, name: &str, direct: DirectDelete) -> Resu
         removal.kept_branch = Some(branch);
         return Ok(removal);
     }
-    let _ = run(project, &["branch", "-D", &branch]);
+    let _ = run(project, &["branch", "-D", "--", &branch]);
     Ok(removal)
 }
 
@@ -1868,6 +1901,8 @@ pub fn log_commits(cwd: &Path, range: Option<&str>, limit: u32) -> Result<Vec<Co
     let limit = format!("-n{limit}");
     let mut args = vec!["log", fmt, &limit];
     if let Some(r) = range {
+        reject_dash_arg("revision range", r)?;
+        args.push("--end-of-options");
         args.push(r);
     }
     args.push("--");
@@ -2179,11 +2214,12 @@ pub fn staged_diff(cwd: &Path, limit: usize) -> Result<String> {
 pub fn push(cwd: &Path) -> Result<String> {
     let _request = crate::github_process::scope();
     let branch = current_branch(cwd).ok_or_else(|| anyhow!("detached HEAD"))?;
+    reject_dash_arg("branch", &branch)?;
     let has_upstream = run_ok(cwd, &["rev-parse", "--abbrev-ref", "@{upstream}"]);
     if has_upstream {
         transfer(cwd, &["push"])
     } else {
-        transfer(cwd, &["push", "-u", "origin", &branch])
+        transfer(cwd, &["push", "-u", "--", "origin", &branch])
     }
 }
 
@@ -2198,7 +2234,7 @@ pub fn add_remote(cwd: &Path, url: &str) -> Result<()> {
     }
     // Arguments, never a shell command. Git refuses an existing origin rather
     // than silently replacing a destination another window just configured.
-    run(cwd, &["remote", "add", "origin", url]).map(|_| ())
+    run(cwd, &["remote", "add", "--", "origin", url]).map(|_| ())
 }
 
 pub fn pull(cwd: &Path) -> Result<String> {
@@ -2207,7 +2243,7 @@ pub fn pull(cwd: &Path) -> Result<String> {
     // Pull the published branch explicitly without changing its configuration.
     if run(cwd, &["rev-parse", "--symbolic-full-name", "@{upstream}"]).is_err()
         && comparison_ref(cwd).is_some() {
-        if let Some(branch) = current_branch(cwd) {
+        if let Some(branch) = current_branch(cwd).filter(|b| reject_dash_arg("branch", b).is_ok()) {
             return run(cwd, &["pull", "--ff-only", "--", "origin", &branch]);
         }
     }
@@ -2225,13 +2261,13 @@ fn transfer(cwd: &Path, args: &[&str]) -> Result<String> {
 }
 
 pub fn checkout_branch(cwd: &Path, name: &str, create: bool) -> Result<()> {
-    if name.starts_with('-') {
+    if reject_dash_arg("branch", name).is_err() {
         bail!("bad branch name");
     }
     if create {
         run(cwd, &["checkout", "-b", name])?;
     } else {
-        run(cwd, &["checkout", name])?;
+        run(cwd, &["checkout", "--end-of-options", name])?;
     }
     Ok(())
 }
@@ -2279,7 +2315,8 @@ pub fn remote_url(cwd: &Path) -> Option<String> {
 /// a fork when the work goes to someone else's repository by pull request.
 pub fn push_remote_url(cwd: &Path, branch: &str) -> Option<String> {
     let remote = push_remote(cwd, branch)?;
-    run(cwd, &["remote", "get-url", &remote]).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+    reject_dash_arg("remote", &remote).ok()?;
+    run(cwd, &["remote", "get-url", "--", &remote]).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
 }
 
 pub(crate) fn push_remote(cwd: &Path, branch: &str) -> Option<String> {
@@ -3371,5 +3408,30 @@ mod tests {
         assert_eq!(log[0].subject, "second");
         assert_eq!(log[0].body, "body here");
         assert!(log[1].parent.is_none());
+    }
+
+    #[test]
+    fn dash_prefixed_refs_and_ranges_are_rejected_without_option_injection() {
+        let _home = crate::store::temp_home();
+        let dir = repo();
+        let p = dir.path();
+        let injected = p.join("injected-output.txt");
+        let output_flag = format!("--output={}", injected.display());
+        assert!(log_commits(p, Some(&output_flag), 10).is_err());
+        assert!(!injected.exists(), "git log must never interpret range as --output=<file>");
+        assert!(log_commits(p, Some("--all"), 10).is_err());
+        assert!(log_commits(p, Some("-p"), 10).is_err());
+        assert!(log_commits(p, Some("HEAD"), 10).is_ok());
+        assert!(resolve_base(p, Some("--all")).is_err());
+        assert!(resolve_base(p, Some("-q")).is_err());
+        assert!(review_range(p, Some("--all"), false).is_err());
+        assert!(merge_tree(p, "--allow-unrelated-histories", "HEAD").is_err());
+        assert!(merge_tree(p, "HEAD", "--name-only").is_err());
+        assert!(fetch_admitted(p, "--upload-pack=sh", std::time::Duration::from_secs(1)).is_err());
+        assert!(create_worktree(p, "-evil", None).is_err());
+        assert!(checkout_worktree(p, "-evil", "main").is_err());
+        assert!(checkout_branch(p, "-b", false).is_err());
+        assert!(!branch_exists(p, "--all"));
+        assert_eq!(unique_commits(p, "--all"), None);
     }
 }

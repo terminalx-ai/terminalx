@@ -672,6 +672,44 @@ impl TurnMark {
 /// parse. A tail that marks runs this in the decoder's place.
 pub type Marker = fn(&str, &HashSet<String>, &mut Vec<Payload>) -> Option<TurnMark>;
 
+/// A decoder that consumes an already-parsed JSON [`serde_json::Value`] so a
+/// JSONL line is deserialized once and shared across decoding, usage metrics,
+/// lineage extraction, and background-task ledgers.
+pub type ValueDecoder = fn(&serde_json::Value, &HashSet<String>, &mut Vec<Payload>) -> Option<TurnMark>;
+
+/// One complete line passed to an attached transcript observer:
+/// `(line_start_offset, line_end_offset, parsed_json_if_valid)`.
+pub(crate) type ObservedLine = (u64, u64, Option<serde_json::Value>);
+
+/// Observer notified after `Tail::drain_records` releases the stream lock,
+/// receiving already-parsed JSON values so downstream consumers (such as
+/// `claude::background::Watch`) avoid re-reading and re-parsing the file.
+pub(crate) type RecordObserver = std::sync::Arc<dyn Fn(&Path, u64, &HashSet<String>, &[ObservedLine]) + Send + Sync>;
+
+fn known_value_decoder(decode: Decoder, marker: Option<Marker>) -> Option<ValueDecoder> {
+    if let Some(m) = marker {
+        if std::ptr::eq(m as *const (), crate::harness::claude::transcript::decode_marked as *const ()) {
+            return Some(crate::harness::claude::transcript::decode_value);
+        }
+        if std::ptr::eq(m as *const (), crate::harness::codex::rollout::decode_marked as *const ()) {
+            return Some(crate::harness::codex::rollout::decode_value);
+        }
+    } else {
+        if std::ptr::eq(decode as *const (), crate::harness::claude::transcript::decode_line as *const ()) {
+            return Some(crate::harness::claude::transcript::decode_value);
+        }
+        if std::ptr::eq(decode as *const (), crate::harness::codex::rollout::decode_line as *const ()) {
+            return Some(crate::harness::codex::rollout::decode_value);
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+thread_local! {
+    static STREAMER_JSON_PARSES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 /// A cursor into one transcript file: how far it has been read, and the bytes
 /// after the last newline, which are a record still being written.
 ///
@@ -691,6 +729,7 @@ pub struct Streamer {
     /// copies keep their original uuids.
     skip: HashSet<String>,
     marker: Option<Marker>,
+    value_decoder: Option<ValueDecoder>,
     /// The last mark read and not yet taken.
     #[cfg(test)]
     mark: Option<TurnMark>,
@@ -710,6 +749,7 @@ impl Streamer {
             decode,
             skip,
             marker: None,
+            value_decoder: known_value_decoder(decode, None),
             #[cfg(test)]
             mark: None,
         }
@@ -718,6 +758,7 @@ impl Streamer {
     /// Also read each record for what it says about the turn.
     pub fn marking(mut self, marker: Option<Marker>) -> Self {
         self.marker = marker;
+        self.value_decoder = known_value_decoder(self.decode, marker);
         self
     }
 
@@ -763,40 +804,87 @@ impl Streamer {
     /// and what it said about the turn. A conversation read from its start
     /// (#437) needs each turn's end where it happened, not only the last.
     pub fn push_records(&mut self, chunk: &[u8]) -> Vec<Record> {
+        self.push_records_with_observer(chunk, None)
+    }
+
+    fn push_records_with_observer(&mut self, chunk: &[u8], mut observed: Option<&mut Vec<ObservedLine>>) -> Vec<Record> {
         self.offset += chunk.len() as u64;
         self.partial.extend_from_slice(chunk);
+        let base_offset = self.offset.saturating_sub(self.partial.len() as u64);
         let mut records = Vec::new();
-        while let Some(nl) = self.partial.iter().position(|b| *b == b'\n') {
-            let line: Vec<u8> = self.partial.drain(..=nl).collect();
-            if let Ok(text) = std::str::from_utf8(&line) {
-                let line = text.trim_end_matches(['\n', '\r']);
-                if !line.trim().is_empty() {
-                    let mut out = Vec::new();
-                    let mark = match self.marker {
-                        Some(decode_marked) => decode_marked(line, &self.skip, &mut out),
-                        None => {
-                            (self.decode)(line, &self.skip, &mut out);
-                            None
-                        }
-                    };
-                    // Account only for records the mapper accepted, excluding
-                    // sidechains and skipped fork history. A future content
-                    // type that maps to nothing must emit usage here or have
-                    // a mapped sibling of the same message carrying its totals.
-                    if !out.is_empty() || mark.is_some() {
-                        let record = serde_json::from_str::<serde_json::Value>(line).ok();
-                        if let (Some(record), Some(_)) = (&record, self.marker) { self.usage.record(record, mark, &mut out); }
-                        // Both supported transcript formats use an RFC3339 timestamp.
-                        // Missing historical time stays unknown, never the import time.
-                        let ts = record
-                            .as_ref()
-                            .and_then(|record| record["timestamp"].as_str().map(str::to_owned))
-                            .filter(|ts| chrono::DateTime::parse_from_rfc3339(ts).is_ok())
-                            .unwrap_or_default();
-                        records.push((out, mark, ts, record.as_ref().and_then(Lineage::of)));
-                    }
+        let mut start = 0;
+        while let Some(rel) = self.partial[start..].iter().position(|&b| b == b'\n') {
+            let end = start + rel;
+            let line_start = base_offset + start as u64;
+            let line_end = base_offset + (end + 1) as u64;
+            let slice = &self.partial[start..end];
+            start = end + 1;
+            let Ok(text) = std::str::from_utf8(slice) else {
+                if let Some(obs) = observed.as_deref_mut() {
+                    obs.push((line_start, line_end, None));
                 }
+                continue;
+            };
+            let line = text.trim_end_matches('\r');
+            if line.trim().is_empty() {
+                if let Some(obs) = observed.as_deref_mut() {
+                    obs.push((line_start, line_end, None));
+                }
+                continue;
             }
+            let mut out = Vec::new();
+            let (mark, record) = if let Some(decode_value) = self.value_decoder {
+                #[cfg(test)]
+                STREAMER_JSON_PARSES.with(|count| count.set(count.get() + 1));
+                match serde_json::from_str::<serde_json::Value>(line) {
+                    Ok(value) => {
+                        let raw_mark = decode_value(&value, &self.skip, &mut out);
+                        let mark = if self.marker.is_some() { raw_mark } else { None };
+                        (mark, Some(value))
+                    }
+                    Err(_) => (None, None),
+                }
+            } else {
+                let mark = match self.marker {
+                    Some(decode_marked) => decode_marked(line, &self.skip, &mut out),
+                    None => {
+                        (self.decode)(line, &self.skip, &mut out);
+                        None
+                    }
+                };
+                let record = if !out.is_empty() || mark.is_some() || observed.is_some() {
+                    #[cfg(test)]
+                    STREAMER_JSON_PARSES.with(|count| count.set(count.get() + 1));
+                    serde_json::from_str::<serde_json::Value>(line).ok()
+                } else {
+                    None
+                };
+                (mark, record)
+            };
+            // Account only for records the mapper accepted, excluding
+            // sidechains and skipped fork history. A future content
+            // type that maps to nothing must emit usage here or have
+            // a mapped sibling of the same message carrying its totals.
+            if !out.is_empty() || mark.is_some() {
+                if let (Some(record), Some(_)) = (&record, self.marker) {
+                    self.usage.record(record, mark, &mut out);
+                }
+                // Both supported transcript formats use an RFC3339 timestamp.
+                // Missing historical time stays unknown, never the import time.
+                let ts = record
+                    .as_ref()
+                    .and_then(|record| record["timestamp"].as_str().map(str::to_owned))
+                    .filter(|ts| chrono::DateTime::parse_from_rfc3339(ts).is_ok())
+                    .unwrap_or_default();
+                let lineage = record.as_ref().and_then(Lineage::of);
+                records.push((out, mark, ts, lineage));
+            }
+            if let Some(obs) = observed.as_deref_mut() {
+                obs.push((line_start, line_end, record));
+            }
+        }
+        if start > 0 {
+            self.partial.drain(..start);
         }
         records
     }
@@ -847,6 +935,7 @@ pub struct Tail {
     /// The cursor, held across polls. This serializes reads, not publication;
     /// the application gate keeps a later read from being published first.
     stream: Mutex<Streamer>,
+    observer: Mutex<Option<RecordObserver>>,
     decode: Decoder,
     marker: Option<Marker>,
 }
@@ -856,19 +945,23 @@ impl Tail {
         self.path.lock().unwrap().clone()
     }
 
+    pub(crate) fn set_observer(&self, observer: RecordObserver) {
+        *self.observer.lock().unwrap() = Some(observer);
+    }
+
     /// Follow from the file's length now: whatever it already holds is either
     /// history the app has logged or a conversation it is resuming. `carried`
     /// names records a fork will copy in later, which are history too.
     pub fn opening(path: PathBuf, decode: Decoder, carried: HashSet<String>) -> Self {
         let len = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-        Self { application: Mutex::new(()), path: Mutex::new(path), stream: Mutex::new(Streamer::skipping(len, decode, carried)), decode, marker: None }
+        Self { application: Mutex::new(()), path: Mutex::new(path), stream: Mutex::new(Streamer::skipping(len, decode, carried)), observer: Mutex::new(None), decode, marker: None }
     }
 
     /// Follow a file whose name is not known yet. A Codex tab is like this
     /// until its first `SessionStart` hook: Codex mints the conversation id
     /// itself, so there is nothing to derive the path from beforehand.
     pub fn unknown(decode: Decoder) -> Self {
-        Self { application: Mutex::new(()), path: Mutex::new(PathBuf::new()), stream: Mutex::new(Streamer::at(0, decode)), decode, marker: None }
+        Self { application: Mutex::new(()), path: Mutex::new(PathBuf::new()), stream: Mutex::new(Streamer::at(0, decode)), observer: Mutex::new(None), decode, marker: None }
     }
 
     /// Follow a conversation the app did not start (#437), from `offset`:
@@ -876,7 +969,7 @@ impl Tail {
     /// the turns exchanged before the app noticed, or wherever the tab had
     /// read to when it last followed this file.
     pub fn from_offset(path: PathBuf, offset: u64, decode: Decoder) -> Self {
-        Self { application: Mutex::new(()), path: Mutex::new(path), stream: Mutex::new(Streamer::at(offset, decode)), decode, marker: None }
+        Self { application: Mutex::new(()), path: Mutex::new(path), stream: Mutex::new(Streamer::at(offset, decode)), observer: Mutex::new(None), decode, marker: None }
     }
 
     /// Where a handover leaves this tail (#765): the file, how far into it
@@ -905,13 +998,15 @@ impl Tail {
     pub(crate) fn resumed(path: PathBuf, offset: u64, began: u64, decode: Decoder, skip: HashSet<String>) -> Self {
         let mut stream = Streamer::skipping(offset, decode, skip);
         stream.began = began;
-        Self { application: Mutex::new(()), path: Mutex::new(path), stream: Mutex::new(stream), decode, marker: None }
+        Self { application: Mutex::new(()), path: Mutex::new(path), stream: Mutex::new(stream), observer: Mutex::new(None), decode, marker: None }
     }
 
     /// Also report what the records say about the turn; see [`Self::drain_records`].
     pub fn marking(mut self, marker: Marker) -> Self {
         self.marker = Some(marker);
-        self.stream.get_mut().unwrap().marker = self.marker;
+        let stream = self.stream.get_mut().unwrap();
+        stream.marker = self.marker;
+        stream.value_decoder = known_value_decoder(self.decode, self.marker);
         self
     }
 
@@ -987,11 +1082,30 @@ impl Tail {
     /// Read appended payloads, turn marks and source timestamps, record by record.
     pub fn drain_records(&self) -> Vec<Record> {
         let path = self.following();
-        let mut stream = self.stream.lock().unwrap();
-        match self.appended(&path, &mut stream) {
-            Some(appended) => stream.push_records(&appended),
-            None => Vec::new(),
+        let observer = self.observer.lock().unwrap().clone();
+        let (records, observed_batch) = {
+            let mut stream = self.stream.lock().unwrap();
+            match self.appended(&path, &mut stream) {
+                Some(appended) => {
+                    if observer.is_some() {
+                        let mut observed = Vec::new();
+                        let records = stream.push_records_with_observer(&appended, Some(&mut observed));
+                        let began = stream.began();
+                        let skip = stream.carried().clone();
+                        (records, Some((began, skip, observed)))
+                    } else {
+                        (stream.push_records(&appended), None)
+                    }
+                }
+                None => (Vec::new(), None),
+            }
+        };
+        if let (Some(observer), Some((began, skip, observed))) = (observer, observed_batch) {
+            if !observed.is_empty() {
+                observer(&path, began, &skip, &observed);
+            }
         }
+        records
     }
 
     /// The file being followed, read and let go of before the cursor is
@@ -1592,5 +1706,41 @@ mod tests {
         assert!(s.push(&text[..4]).is_empty());
         let out = s.push(&text[4..]);
         assert!(matches!(&out[0], Payload::Status { text, .. } if text == "café"));
+    }
+
+    #[test]
+    fn streamer_parses_each_claude_and_codex_record_only_once_with_linear_cursor() {
+        let claude_line = r#"{"type":"user","uuid":"u1","timestamp":"2026-11-01T14:00:00Z","message":{"role":"user","content":"hello"}}"#;
+        let codex_line = r#"{"type":"event_msg","timestamp":"2026-11-01T14:00:01Z","payload":{"type":"task_started"}}"#;
+
+        let mut claude = Streamer::at(0, crate::harness::claude::transcript::decode_line)
+            .marking(Some(crate::harness::claude::transcript::decode_marked));
+        let mut batch = String::new();
+        for _ in 0..500 {
+            batch.push_str(claude_line);
+            batch.push('\n');
+        }
+        // Append an incomplete trailing fragment to verify single trailing drain preserves it.
+        batch.push_str(&claude_line[..20]);
+        STREAMER_JSON_PARSES.with(|c| c.set(0));
+        let records = claude.push_records(batch.as_bytes());
+        assert_eq!(records.len(), 500);
+        assert_eq!(STREAMER_JSON_PARSES.with(|c| c.get()), 500, "each JSONL line must be parsed exactly once");
+        assert_eq!(records[0].1, Some(TurnMark::Opened));
+        assert_eq!(records[0].2, "2026-11-01T14:00:00Z");
+        // Finish the partial line.
+        let mut rest = claude_line.as_bytes()[20..].to_vec();
+        rest.push(b'\n');
+        let tail_records = claude.push_records(&rest);
+        assert_eq!(tail_records.len(), 1);
+        assert_eq!(STREAMER_JSON_PARSES.with(|c| c.get()), 501);
+
+        let mut codex = Streamer::at(0, crate::harness::codex::rollout::decode_line)
+            .marking(Some(crate::harness::codex::rollout::decode_marked));
+        STREAMER_JSON_PARSES.with(|c| c.set(0));
+        let codex_records = codex.push_records(format!("{codex_line}\n").as_bytes());
+        assert_eq!(codex_records.len(), 1);
+        assert_eq!(codex_records[0].1, Some(TurnMark::Opened));
+        assert_eq!(STREAMER_JSON_PARSES.with(|c| c.get()), 1);
     }
 }

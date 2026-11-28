@@ -17,6 +17,7 @@ import { deferredTerminalFit, fitTerminal } from "@/lib/terminalFit";
 import { acknowledgeTerminalResize, coordinateTerminalResize, isOutputResize, reassertTerminalResize, requestTerminalResize, requestedTerminalSize, stopTerminalOutput } from "@/lib/terminalOutput";
 import { TerminalBufferCleanup } from "@/lib/terminalBufferCleanup";
 import { terminalColorHex } from "@/lib/terminalColor";
+import { createTerminalLinkHandler } from "@/lib/terminalLinks";
 import { hideWebgl, recoverWebgl, showWebgl } from "@/lib/terminalWebgl";
 import { onAppResume } from "@/lib/appResume";
 import { useTheme } from "@/lib/theme";
@@ -130,6 +131,7 @@ export function createTerminal(mode: "dark" | "light"): TerminalInstance {
     scrollback: 10_000,
     theme: themeFor(mode),
     macOptionIsMeta: getPrefs().optionAsMeta,
+    linkHandler: createTerminalLinkHandler(),
   });
   followOptionKey(term);
   const fit = new FitAddon();
@@ -322,8 +324,7 @@ export function TerminalView({
 
   useEffect(() => {
     const el = host.current;
-    if (!el) return;
-    getInstance(id, make);
+    if (!shown || !el) return;
     const refit = () => {
       if (!fitting.current) return;
       // A hidden instance may have left the idle cache since this view mounted.
@@ -346,7 +347,7 @@ export function TerminalView({
       deferred.cancel();
       trimTerminalInstances();
     };
-  }, [id]);
+  }, [id, shown]);
 
   useEffect(() => {
     const inst = peekInstance(id);

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { memo, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { RefreshCw } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
@@ -42,7 +42,7 @@ const TABS: { id: PanelTab; label: string; shortcut?: ShortcutId }[] = [
  * unmount so scroll position and picked files survive the flip, and the
  * `active` prop keeps a hidden body from refetching.
  */
-export function RightPanel({
+export const RightPanel = memo(function RightPanel({
   cwd,
   isGit = true,
   gitNote,
@@ -393,4 +393,4 @@ export function RightPanel({
       {dock}
     </aside>
   );
-}
+});

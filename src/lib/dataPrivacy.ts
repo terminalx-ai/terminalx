@@ -59,9 +59,16 @@ export async function setDataPrivacy(enabled: boolean) {
 let booted: Promise<void> | null = null;
 export function bootDataPrivacy() {
   return (booted ??= refreshDataPrivacy().then(() => {
-    // Profiles can change while the app is running, including while unfocused.
+    // Profiles can change while the app is running; skip background IPC polling while hidden and catch up on show/focus.
     window.addEventListener("focus", () => void refreshDataPrivacy());
-    window.setInterval(() => void refreshDataPrivacy(), 2_000);
+    if (typeof document !== "undefined") {
+      document.addEventListener("visibilitychange", () => {
+        if (document.visibilityState === "visible") void refreshDataPrivacy();
+      });
+    }
+    window.setInterval(() => {
+      if (typeof document === "undefined" || document.visibilityState === "visible") void refreshDataPrivacy();
+    }, 2_000);
   }));
 }
 

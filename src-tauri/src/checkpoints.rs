@@ -18,7 +18,7 @@ static SEND_LOCKS: std::sync::LazyLock<SendLocks> = std::sync::LazyLock::new(Mut
 pub fn send_lock(session: &str, tab: &str) -> std::sync::Arc<Mutex<()>> {
     SEND_LOCKS.lock().unwrap().entry(format!("{session}/{tab}")).or_default().clone()
 }
-fn workspace_locked<T>(cwd: &str, f: impl FnOnce() -> Result<T>) -> Result<T> {
+pub(crate) fn workspace_locked<T>(cwd: &str, f: impl FnOnce() -> Result<T>) -> Result<T> {
     use sha2::{Digest, Sha256};
     // The desktop and runtime must share a lock, including different sessions
     // in one checkout, without making unrelated workspaces wait for a snapshot.
@@ -98,6 +98,21 @@ pub struct Checkpoint {
 
 /// Within how many turns of expiring an unreviewed turn's card says so.
 const EXPIRY_WARNING_TURNS: usize = 5;
+/// Upper bound on completed turns retained in a tab's `checkpoints-<tab>.json`
+/// so long-lived tabs do not grow state files unboundedly (retention keeps 50 groups).
+const MAX_STORED_TURNS: usize = 200;
+
+fn prune_turns(state: &mut State) {
+    while state.turns.len() > MAX_STORED_TURNS {
+        let Some(oldest_completed) = state.turns.iter().position(|t| t.end.is_some()) else {
+            break;
+        };
+        state.turns.remove(oldest_completed);
+    }
+    while state.sent_notes.len() > MAX_STORED_TURNS {
+        state.sent_notes.pop_first();
+    }
+}
 
 impl Checkpoint {
     fn start_snapshot(&self) -> Snapshot {
@@ -151,6 +166,13 @@ fn save(session: &str, tab: &str, state: &State) -> Result<()> {
 }
 fn root(cwd: &str) -> Result<String> {
     Ok(crate::git::path_line(&git::run(Path::new(cwd), &["rev-parse", "--show-toplevel"])?).into())
+}
+fn root_and_common_dir(cwd: &str) -> Result<(String, String)> {
+    let raw = git::run(Path::new(cwd), &["rev-parse", "--path-format=absolute", "--show-toplevel", "--git-common-dir"])?;
+    let mut lines = raw.split('\n');
+    let top = crate::git::path_line(lines.next().context("missing checkout root")?).into();
+    let common = crate::git::path_line(lines.next().context("missing git common dir")?).into();
+    Ok((top, common))
 }
 fn index_tree(cwd: &Path) -> Result<String> {
     Ok(git::run(cwd, &["write-tree"])?.trim().into())
@@ -364,11 +386,9 @@ pub fn observe(session: &str, tab: &str, seq: u64, payload: &mut Payload) -> Res
         if !git::is_repo(Path::new(&entry.cwd)) {
             return Ok(None);
         }
-        let cwd = root(&entry.cwd)?;
+        let (cwd, common_dir) = root_and_common_dir(&entry.cwd)?;
         let mut state = load(session, tab)?;
-        state.repository = Some(
-            crate::git::path_line(&git::run(Path::new(&cwd), &["rev-parse", "--path-format=absolute", "--git-common-dir"])?).into(),
-        );
+        state.repository = Some(common_dir);
         let mut completed = None;
         let active = state.turns.last().filter(|t| t.end.is_none());
         let begin = match payload {
@@ -394,7 +414,7 @@ pub fn observe(session: &str, tab: &str, seq: u64, payload: &mut Payload) -> Res
             }
             state.turns.push(Checkpoint {
                 seq,
-                number: state.turns.len() + 1,
+                number: state.turns.last().map_or(1, |t| t.number + 1),
                 cwd,
                 start,
                 index,
@@ -431,6 +451,7 @@ pub fn observe(session: &str, tab: &str, seq: u64, payload: &mut Payload) -> Res
         } else {
             return Ok(None);
         }
+        prune_turns(&mut state);
         save(session, tab, &state)?;
         Ok(completed)
     })
@@ -1768,5 +1789,70 @@ mod tests {
         let work = dir.path().join("work ");
         crate::git::run(dir.path(), &["init", "-q", work.to_str().unwrap()]).unwrap();
         assert_eq!(crate::paths::canonicalize(root(work.to_str().unwrap()).unwrap()).unwrap(), crate::paths::canonicalize(&work).unwrap());
+    }
+
+    #[test]
+    fn prune_turns_caps_completed_turns_and_preserves_active_turn_and_numbering() {
+        let mut state = State::default();
+        for i in 1..=(MAX_STORED_TURNS + 25) {
+            state.turns.push(Checkpoint {
+                seq: i as u64,
+                number: i,
+                cwd: "/repo".into(),
+                start: "0".repeat(40),
+                index: None,
+                end: Some("1".repeat(40)),
+                end_index: None,
+                reviewed: false,
+                undone: false,
+                files: Vec::new(),
+                started_at: Some(i as i64),
+                ended_at: Some(i as i64 + 1),
+                concurrent_paths: BTreeSet::new(),
+                concurrent_unknown: false,
+                backup: None,
+                restored: false,
+                backup_ref: None,
+                unavailable_reason: None,
+                abandoned: false,
+                start_kept: None,
+                end_kept: None,
+                expires_in: None,
+            });
+            state.sent_notes.insert(i as u64, vec![Note { id: format!("n{i}"), text: "note".into() }]);
+        }
+        // Append an active unfinished turn at the end.
+        let active_number = state.turns.last().unwrap().number + 1;
+        state.turns.push(Checkpoint {
+            seq: 9999,
+            number: active_number,
+            cwd: "/repo".into(),
+            start: "2".repeat(40),
+            index: None,
+            end: None,
+            end_index: None,
+            reviewed: false,
+            undone: false,
+            files: Vec::new(),
+            started_at: Some(9999),
+            ended_at: None,
+            concurrent_paths: BTreeSet::new(),
+            concurrent_unknown: false,
+            backup: None,
+            restored: false,
+            backup_ref: None,
+            unavailable_reason: None,
+            abandoned: false,
+            start_kept: None,
+            end_kept: None,
+            expires_in: None,
+        });
+
+        prune_turns(&mut state);
+        assert_eq!(state.turns.len(), MAX_STORED_TURNS);
+        assert_eq!(state.sent_notes.len(), MAX_STORED_TURNS);
+        assert!(state.turns.last().unwrap().end.is_none(), "active turn must be preserved");
+        assert_eq!(state.turns.last().unwrap().number, active_number);
+        assert_eq!(state.turns.last().map_or(1, |t| t.number + 1), active_number + 1);
     }
 }

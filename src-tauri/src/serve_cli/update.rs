@@ -37,8 +37,10 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
+use base64::Engine as _;
 use serde::Deserialize;
-use sha2::{Digest, Sha256};
+use sha2::{Digest, Sha256, Sha512};
+use subtle::ConstantTimeEq;
 
 use super::{RUNTIME_SIGNING_KEY, SIGNATURE_NAMESPACE, SIGNER_PRINCIPAL};
 use crate::remote::machine_update::{self as record, Progress, Record};
@@ -189,6 +191,7 @@ fn apply_requested(root: &Path, data: &Path, version: &semver::Version, status: 
     }
     let source = Source::from_env();
     let found = (|| -> Result<(Release, &'static str)> {
+        ensure_monotonic_upgrade(root, Some(data), version)?;
         let asset = asset_name()?;
         let agent = crate::data_privacy::http_agent().timeout(std::time::Duration::from_secs(300)).build();
         let releases = download(&agent, &source.api_url).with_context(|| format!("list releases from {}", source.api_url))?;
@@ -318,6 +321,10 @@ struct Update<'a> {
 impl Update<'_> {
     fn run(&self, reporter: &mut Reporter) -> Ended {
         let version = self.release.version.to_string();
+        if let Err(error) = ensure_monotonic_upgrade(self.root, Some(self.data), &self.release.version) {
+            reporter.failed(&version, format!("{error:#}"), false);
+            return Ended::Failed { rolled_back: false };
+        }
         // Each phase says when it began.
         let phase = |name: fn(String, i64) -> Progress| name(version.clone(), record::now_ms());
         reporter.phase(phase(|version, since| Progress::Downloading { version, since }), &format!("Downloading terminalx-serve {version} ({})...", self.release.tag));
@@ -616,8 +623,29 @@ struct Source {
 }
 
 impl Source {
+    /// Release builds always use the compiled-in GitHub release endpoints and
+    /// compiled-in TerminalX signing key. Test/dev overrides are honored ONLY
+    /// in debug or test builds.
     fn from_env() -> Self {
-        let env = |name: &str| std::env::var(name).ok().filter(|value| !value.is_empty());
+        #[cfg(any(debug_assertions, test))]
+        {
+            Self::from_env_with(true, |name| std::env::var(name).ok())
+        }
+        #[cfg(not(any(debug_assertions, test)))]
+        {
+            Self::from_env_with(false, |_| None)
+        }
+    }
+
+    fn from_env_with(allow_overrides: bool, get_env: impl Fn(&str) -> Option<String>) -> Self {
+        if !allow_overrides {
+            return Self {
+                api_url: DEFAULT_API_URL.into(),
+                base_url: DEFAULT_BASE_URL.trim_end_matches('/').into(),
+                signers: Self::release_signers(),
+            };
+        }
+        let env = |name: &str| get_env(name).filter(|value| !value.is_empty());
         let api_url = env("TERMINALX_INSTALL_API_URL");
         let base_url = env("TERMINALX_INSTALL_BASE_URL");
         if api_url.is_some() || base_url.is_some() {
@@ -731,31 +759,241 @@ fn listed_hash(sums: &str, name: &str) -> Option<String> {
     })
 }
 
-/// Check `signature` over `sums` with `ssh-keygen -Y verify`, trusting only
-/// `signers`.
-fn verify_signature(sums: &[u8], signature: &[u8], signers: &str, scratch: &Path) -> Result<()> {
-    let signers_path = scratch.join("allowed_signers");
-    let signature_path = scratch.join(SIGNATURE);
-    std::fs::write(&signers_path, signers)?;
-    std::fs::write(&signature_path, signature)?;
-    let mut child = Command::new("ssh-keygen")
-        .args(["-Y", "verify", "-f"])
-        .arg(&signers_path)
-        .args(["-I", SIGNER_PRINCIPAL, "-n", SIGNATURE_NAMESPACE, "-s"])
-        .arg(&signature_path)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .context("run ssh-keygen to check the release signature (install OpenSSH 8.1 or later)")?;
-    std::io::Write::write_all(child.stdin.as_mut().expect("piped stdin"), sums)?;
-    drop(child.stdin.take());
-    let output = child.wait_with_output()?;
-    if !output.status.success() {
-        let said = String::from_utf8_lossy(&output.stderr);
-        bail!("the signature does not verify against the TerminalX release key ({}); the release was refused and nothing was changed", said.trim());
+/// Enforce strict monotonic version upgrades: refuse same-version reinstalls
+/// and any downgrade below the installed or currently running runtime version.
+fn ensure_monotonic_upgrade(root: &Path, data: Option<&Path>, target: &semver::Version) -> Result<()> {
+    if let Ok(installed) = installed_version(root) {
+        if *target == installed {
+            bail!("terminalx-serve {target} is the installed version already; nothing was changed");
+        }
+        if *target < installed {
+            bail!("refusing to downgrade terminalx-serve from {installed} to {target}; nothing was changed");
+        }
+    }
+    if let Some(running) = data.and_then(running_version) {
+        if *target <= running {
+            bail!("refusing to downgrade running terminalx-serve from {running} to {target}; nothing was changed");
+        }
     }
     Ok(())
+}
+
+/// Check OpenSSH `SSHSIG` Ed25519 `signature` over `sums` in-process via
+/// `ring`, trusting only keys authorized for [`SIGNER_PRINCIPAL`] and
+/// [`SIGNATURE_NAMESPACE`] in `signers`. Never invokes `ssh-keygen` from `PATH`.
+fn verify_signature(sums: &[u8], signature: &[u8], signers: &str, _scratch: &Path) -> Result<()> {
+    verify_sshsig_ed25519(sums, signature, signers, SIGNER_PRINCIPAL, SIGNATURE_NAMESPACE).map_err(|reason| {
+        anyhow!("the signature does not verify against the TerminalX release key ({reason:#}); the release was refused and nothing was changed")
+    })
+}
+
+fn read_ssh_u32(cursor: &mut &[u8]) -> Result<u32> {
+    if cursor.len() < 4 {
+        bail!("truncated SSHSIG u32");
+    }
+    let (head, rest) = cursor.split_at(4);
+    *cursor = rest;
+    Ok(u32::from_be_bytes([head[0], head[1], head[2], head[3]]))
+}
+
+fn read_ssh_bytes<'a>(cursor: &mut &'a [u8]) -> Result<&'a [u8]> {
+    let len = read_ssh_u32(cursor)? as usize;
+    if cursor.len() < len {
+        bail!("truncated SSHSIG field");
+    }
+    let (head, rest) = cursor.split_at(len);
+    *cursor = rest;
+    Ok(head)
+}
+
+fn push_ssh_bytes(out: &mut Vec<u8>, bytes: &[u8]) -> Result<()> {
+    let len = u32::try_from(bytes.len()).context("SSHSIG field too large")?;
+    out.extend_from_slice(&len.to_be_bytes());
+    out.extend_from_slice(bytes);
+    Ok(())
+}
+
+fn decode_sshsig_armor(signature: &[u8]) -> Result<Vec<u8>> {
+    let text = std::str::from_utf8(signature).context("signature is not UTF-8")?;
+    let mut in_body = false;
+    let mut b64 = String::new();
+    for line in text.lines().map(str::trim) {
+        if line == "-----BEGIN SSH SIGNATURE-----" {
+            if in_body || !b64.is_empty() {
+                bail!("duplicate SSHSIG header");
+            }
+            in_body = true;
+            continue;
+        }
+        if line == "-----END SSH SIGNATURE-----" {
+            if !in_body {
+                bail!("SSHSIG footer without header");
+            }
+            return base64::engine::general_purpose::STANDARD.decode(&b64).context("invalid base64 in SSHSIG");
+        }
+        if in_body {
+            b64.push_str(line);
+        }
+    }
+    bail!("missing SSHSIG armor")
+}
+
+/// Extract every Ed25519 SSH public-key wire blob from `signers` (`allowed_signers`
+/// format) authorized for `principal` and `namespace`.
+fn allowed_ed25519_key_blobs(signers: &str, principal: &str, namespace: &str) -> Vec<Vec<u8>> {
+    let mut keys = Vec::new();
+    for raw_line in signers.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut tokens = split_allowed_signers_tokens(line);
+        let Some(principals) = tokens.next() else { continue };
+        if !principals.split(',').any(|p| p == principal) {
+            continue;
+        }
+        let Some(next) = tokens.next() else { continue };
+        let (key_type, key_b64) = if next == "ssh-ed25519" {
+            let Some(b64) = tokens.next() else { continue };
+            (next, b64)
+        } else {
+            // Optional options field (e.g. `namespaces="terminalx-runtime"`).
+            if !options_allow_namespace(&next, namespace) {
+                continue;
+            }
+            let (Some(kt), Some(b64)) = (tokens.next(), tokens.next()) else { continue };
+            (kt, b64)
+        };
+        if key_type != "ssh-ed25519" {
+            continue;
+        }
+        if let Ok(blob) = base64::engine::general_purpose::STANDARD.decode(&key_b64) {
+            keys.push(blob);
+        }
+    }
+    keys
+}
+
+/// Split an `allowed_signers` line on ASCII whitespace while keeping quoted
+/// values (such as `namespaces="a,b"`) intact.
+fn split_allowed_signers_tokens(line: &str) -> impl Iterator<Item = String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut in_quotes = false;
+    for ch in line.chars() {
+        match ch {
+            '"' => {
+                in_quotes = !in_quotes;
+                cur.push(ch);
+            }
+            c if c.is_ascii_whitespace() && !in_quotes => {
+                if !cur.is_empty() {
+                    out.push(std::mem::take(&mut cur));
+                }
+            }
+            c => cur.push(c),
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out.into_iter()
+}
+
+fn options_allow_namespace(options: &str, namespace: &str) -> bool {
+    let mut saw_namespaces = false;
+    let mut cur = String::new();
+    let mut in_quotes = false;
+    let mut parts = Vec::new();
+    for ch in options.chars() {
+        match ch {
+            '"' => {
+                in_quotes = !in_quotes;
+                cur.push(ch);
+            }
+            ',' if !in_quotes => {
+                if !cur.is_empty() {
+                    parts.push(std::mem::take(&mut cur));
+                }
+            }
+            c => cur.push(c),
+        }
+    }
+    if !cur.is_empty() {
+        parts.push(cur);
+    }
+    for part in parts {
+        if let Some(value) = part.strip_prefix("namespaces=") {
+            saw_namespaces = true;
+            let unquoted = value.strip_prefix('"').and_then(|v| v.strip_suffix('"')).unwrap_or(value);
+            if !unquoted.split(',').any(|ns| ns == namespace) {
+                return false;
+            }
+        }
+    }
+    // If namespaces option is present it matched above; if absent, OpenSSH permits any namespace.
+    let _ = saw_namespaces;
+    true
+}
+
+fn verify_sshsig_ed25519(sums: &[u8], signature: &[u8], signers: &str, principal: &str, namespace: &str) -> Result<()> {
+    let blob = decode_sshsig_armor(signature)?;
+    let mut cursor = blob.as_slice();
+    if cursor.len() < 6 || &cursor[..6] != b"SSHSIG" {
+        bail!("invalid SSHSIG magic");
+    }
+    cursor = &cursor[6..];
+    let version = read_ssh_u32(&mut cursor)?;
+    if version != 1 {
+        bail!("unsupported SSHSIG version {version}");
+    }
+    let pubkey_blob = read_ssh_bytes(&mut cursor)?;
+    let sig_namespace = read_ssh_bytes(&mut cursor)?;
+    let reserved = read_ssh_bytes(&mut cursor)?;
+    let hash_algorithm = read_ssh_bytes(&mut cursor)?;
+    let sig_blob = read_ssh_bytes(&mut cursor)?;
+    if !cursor.is_empty() {
+        bail!("unexpected trailing bytes in SSHSIG");
+    }
+    if sig_namespace != namespace.as_bytes() {
+        bail!("signature namespace mismatch");
+    }
+
+    let allowed = allowed_ed25519_key_blobs(signers, principal, namespace);
+    if !allowed.iter().any(|candidate| candidate.len() == pubkey_blob.len() && bool::from(candidate.as_slice().ct_eq(pubkey_blob))) {
+        bail!("signing key is not in allowed_signers");
+    }
+
+    let mut pk_cursor = pubkey_blob;
+    let pk_type = read_ssh_bytes(&mut pk_cursor)?;
+    let raw_pubkey = read_ssh_bytes(&mut pk_cursor)?;
+    if pk_type != b"ssh-ed25519" || raw_pubkey.len() != 32 || !pk_cursor.is_empty() {
+        bail!("unsupported SSHSIG public key");
+    }
+
+    let mut sig_cursor = sig_blob;
+    let sig_type = read_ssh_bytes(&mut sig_cursor)?;
+    let raw_sig = read_ssh_bytes(&mut sig_cursor)?;
+    if sig_type != b"ssh-ed25519" || raw_sig.len() != 64 || !sig_cursor.is_empty() {
+        bail!("unsupported SSHSIG signature");
+    }
+
+    let digest: Vec<u8> = match hash_algorithm {
+        b"sha512" => Sha512::digest(sums).to_vec(),
+        b"sha256" => Sha256::digest(sums).to_vec(),
+        _ => bail!("unsupported SSHSIG hash algorithm"),
+    };
+
+    let mut preimage = Vec::with_capacity(6 + 16 + sig_namespace.len() + reserved.len() + hash_algorithm.len() + digest.len());
+    preimage.extend_from_slice(b"SSHSIG");
+    push_ssh_bytes(&mut preimage, sig_namespace)?;
+    push_ssh_bytes(&mut preimage, reserved)?;
+    push_ssh_bytes(&mut preimage, hash_algorithm)?;
+    push_ssh_bytes(&mut preimage, &digest)?;
+
+    ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, raw_pubkey)
+        .verify(&preimage, raw_sig)
+        .map_err(|_| anyhow!("Ed25519 signature verification failed"))
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -785,9 +1023,7 @@ fn install(root: &Path, source: &Source, release: &Release, asset: &str, fetch: 
     let versions = root.join("versions");
     std::fs::create_dir_all(&versions).with_context(|| format!("create {}", versions.display()))?;
     let dest = versions.join(release.version.to_string());
-    if installed_version(root).is_ok_and(|installed| installed == release.version) {
-        bail!("terminalx-serve {} is the installed version already; nothing was changed", release.version);
-    }
+    ensure_monotonic_upgrade(root, None, &release.version)?;
     let scratch = tempfile::Builder::new().prefix(".update.").tempdir_in(&versions).context("make a staging folder")?;
 
     let sums = fetch(&source.url(tag, SUMS)).with_context(|| format!("download {SUMS} of {tag}"))?;
@@ -1252,5 +1488,71 @@ mod tests {
         assert_eq!(parse(&args(&["--apply", "0.2.40"])), None, "the status file is required");
         assert_eq!(parse(&args(&["--apply", "latest", "--status", "f"])), None);
         assert_eq!(parse(&args(&["--frobnicate"])), None);
+    }
+
+    #[test]
+    fn release_builds_ignore_all_install_and_signer_env_overrides() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake_signers = dir.path().join("evil_signers");
+        std::fs::write(&fake_signers, "release@terminalx ssh-ed25519 AAAA\n").unwrap();
+        let env = |name: &str| match name {
+            "TERMINALX_INSTALL_API_URL" => Some("https://evil.invalid/releases".into()),
+            "TERMINALX_INSTALL_BASE_URL" => Some("https://evil.invalid/download".into()),
+            "TERMINALX_INSTALL_ALLOWED_SIGNERS" => Some(fake_signers.to_string_lossy().into_owned()),
+            _ => None,
+        };
+        let release_source = Source::from_env_with(false, env);
+        assert_eq!(release_source.api_url, DEFAULT_API_URL);
+        assert_eq!(release_source.base_url, DEFAULT_BASE_URL);
+        assert_eq!(release_source.signers, Source::release_signers());
+
+        let debug_source = Source::from_env_with(true, env);
+        assert_eq!(debug_source.api_url, "https://evil.invalid/releases");
+        assert_eq!(debug_source.base_url, "https://evil.invalid/download");
+        assert!(debug_source.signers.contains("AAAA"));
+    }
+
+    #[test]
+    fn downgrades_and_same_version_reinstalls_are_rejected_before_fetch() {
+        let mut fixture = Fixture::new();
+        // Replace installed version with 2.0.0, then try installing 1.9.9 and 2.0.0.
+        std::fs::create_dir_all(fixture.root.join("versions/2.0.0")).unwrap();
+        std::fs::write(fixture.root.join("versions/2.0.0/terminalx-serve"), "current").unwrap();
+        swap_link(&fixture.root.join("current"), Path::new("versions/2.0.0")).unwrap();
+        let downgrade = parse_tag("runtime-v1.9.9-20261116120000-abcdef1").unwrap();
+        let same = parse_tag("runtime-v2.0.0-20261116120000-abcdef1").unwrap();
+        let never_fetch = |_url: &str| -> Result<Vec<u8>> { panic!("must reject downgrade before downloading") };
+        let err = install(&fixture.root, &fixture.source, &downgrade, ASSET, &never_fetch, &mut || {}).unwrap_err();
+        assert!(format!("{err:#}").contains("downgrade"), "{err:#}");
+        let err = install(&fixture.root, &fixture.source, &same, ASSET, &never_fetch, &mut || {}).unwrap_err();
+        assert!(format!("{err:#}").contains("installed version already"), "{err:#}");
+        // Also verify Update::run refuses downgrades cleanly.
+        let data = fixture._dir.path().join("data");
+        std::fs::create_dir_all(data.join("run")).unwrap();
+        let path = record::status_path(&data);
+        let mut reporter = Reporter::open(&path, &data, &fixture.root);
+        let ended = Update { root: &fixture.root, data: &data, source: &fixture.source, asset: ASSET, fetch: &never_fetch, release: &downgrade, stop: &[], steps: &STEPS }.run(&mut reporter);
+        assert_eq!(ended, Ended::Failed { rolled_back: false });
+        let _ = &mut fixture;
+    }
+
+    #[test]
+    fn in_process_sshsig_verification_rejects_wrong_namespace_and_tampered_payload() {
+        let fixture = Fixture::new();
+        let sums = &fixture.files[&fixture.source.url(TAG, SUMS)];
+        let sig = &fixture.files[&fixture.source.url(TAG, SIGNATURE)];
+        let scratch = tempfile::tempdir().unwrap();
+        // Valid signature passes in-process without needing ssh-keygen at all.
+        verify_signature(sums, sig, &fixture.source.signers, scratch.path()).unwrap();
+        // Tampered sums rejected.
+        let mut tampered = sums.clone();
+        tampered.push(b'x');
+        assert!(verify_signature(&tampered, sig, &fixture.source.signers, scratch.path()).is_err());
+        // Wrong namespace in allowed_signers rejected.
+        let wrong_ns = fixture.source.signers.replace(SIGNATURE_NAMESPACE, "other-namespace");
+        assert!(verify_signature(sums, sig, &wrong_ns, scratch.path()).is_err());
+        // Wrong principal in allowed_signers rejected.
+        let wrong_principal = fixture.source.signers.replace(SIGNER_PRINCIPAL, "other@terminalx");
+        assert!(verify_signature(sums, sig, &wrong_principal, scratch.path()).is_err());
     }
 }

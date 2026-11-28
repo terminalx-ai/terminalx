@@ -240,14 +240,21 @@ struct Pane {
     /// The screen the pane's program has drawn, kept as it draws. Its raw
     /// output is no use for this: a TUI redraws only the cells that changed,
     /// so what one row shows now can have been drawn long before the
-    /// scrollback's window (#722). Every pane keeps one: an agent's CLI runs
-    /// in a shell tab too, when the reader starts it there by hand (#437),
-    /// and the app types into it all the same.
+    /// scrollback's window (#722). Agent panes (`tab:*`) keep it updated
+    /// eagerly; plain shell panes defer VT100 parsing until a caller inspects
+    /// [`Terminals::screen`] (e.g., an agent started by hand in a shell, #437).
     screen: Arc<Mutex<vt100::Parser>>,
+    screen_active: Arc<AtomicBool>,
     output_size: Arc<Mutex<OutputSize>>,
     output: Arc<OutputQueue>,
     #[cfg(unix)]
     reader: Arc<Mutex<Box<dyn Read + Send>>>,
+    /// Duplicate of the master fd so `resize` and `fronts` can run kernel
+    /// ioctls after dropping the global `panes` lock.
+    #[cfg(unix)]
+    master_fd: Arc<std::os::fd::OwnedFd>,
+    #[cfg(unix)]
+    tty: Option<std::path::PathBuf>,
     cwd: String,
     /// When the pane was opened: where its tab stands among the session's.
     created: String,
@@ -421,6 +428,54 @@ impl OwnedGroup {
         });
     }
 }
+/// Shared lazy reaper for orphaned process groups that outlive their PTY
+/// leader. Avoids keeping a dedicated 50 Hz `pty-wait` thread alive per
+/// exited pane: parks on a condvar (0 Hz) whenever no orphaned groups exist,
+/// and retires pending groups with bounded backoff (50 ms -> 1 s).
+fn reap_group_async(group: Arc<OwnedGroup>) {
+    use std::sync::{Condvar, OnceLock};
+    static REAPER: OnceLock<(Mutex<Vec<Arc<OwnedGroup>>>, Condvar)> = OnceLock::new();
+    let state = REAPER.get_or_init(|| (Mutex::new(Vec::<Arc<OwnedGroup>>::new()), Condvar::new()));
+    static STARTED: std::sync::Once = std::sync::Once::new();
+    STARTED.call_once(|| {
+        let _ = std::thread::Builder::new().name("pty-group-reaper".into()).spawn(move || {
+            let (lock, wake) = REAPER.get().expect("reaper initialized");
+            let mut backoff = Duration::from_millis(50);
+            loop {
+                let (pending, snap_len) = {
+                    let mut groups = lock.lock().unwrap_or_else(|e| e.into_inner());
+                    while groups.is_empty() {
+                        backoff = Duration::from_millis(50);
+                        groups = wake.wait(groups).unwrap_or_else(|e| e.into_inner());
+                    }
+                    (groups.clone(), groups.len())
+                };
+                let dead: Vec<Arc<OwnedGroup>> = pending.into_iter().filter(|group| group.pid().is_none()).collect();
+                let mut groups = lock.lock().unwrap_or_else(|e| e.into_inner());
+                let had_new = groups.len() > snap_len;
+                if !dead.is_empty() {
+                    groups.retain(|g| !dead.iter().any(|d| Arc::ptr_eq(g, d)));
+                }
+                if groups.is_empty() {
+                    backoff = Duration::from_millis(50);
+                    continue;
+                }
+                if had_new {
+                    backoff = Duration::from_millis(50);
+                }
+                let wait = backoff;
+                backoff = (backoff * 2).min(Duration::from_secs(1));
+                let _ = wake.wait_timeout(groups, wait).unwrap_or_else(|e| e.into_inner());
+            }
+        });
+    });
+    let mut groups = state.0.lock().unwrap_or_else(|e| e.into_inner());
+    if !groups.iter().any(|existing| Arc::ptr_eq(existing, &group)) {
+        groups.push(group);
+        state.1.notify_all();
+    }
+}
+
 fn group_alive(pid: u32) -> bool {
     #[cfg(unix)]
     // SAFETY: signal zero observes a known PTY process group.
@@ -773,18 +828,53 @@ fn unread_output(fd: std::os::fd::RawFd) -> std::io::Result<usize> {
     Ok(count.max(0) as usize)
 }
 
+#[cfg(unix)]
+struct ResizeHandles {
+    hold: Arc<Hold>,
+    master_fd: Arc<std::os::fd::OwnedFd>,
+    output: Arc<OutputQueue>,
+    output_size: Arc<Mutex<OutputSize>>,
+    screen: Arc<Mutex<vt100::Parser>>,
+    reader: Arc<Mutex<Box<dyn Read + Send>>>,
+}
+
+#[cfg(unix)]
+impl ResizeHandles {
+    fn from_pane(pane: &Pane) -> Self {
+        Self {
+            hold: pane.hold.clone(),
+            master_fd: pane.master_fd.clone(),
+            output: pane.output.clone(),
+            output_size: pane.output_size.clone(),
+            screen: pane.screen.clone(),
+            reader: pane.reader.clone(),
+        }
+    }
+}
+
+#[cfg(unix)]
+fn resize_fd(fd: std::os::fd::RawFd, next: OutputSize) -> Result<()> {
+    let ws = libc::winsize { ws_row: next.rows, ws_col: next.cols, ws_xpixel: 0, ws_ypixel: 0 };
+    // SAFETY: `fd` is kept open by `Arc<OwnedFd>` and `ws` is a valid winsize.
+    if unsafe { libc::ioctl(fd, libc::TIOCSWINSZ, &ws) } < 0 {
+        return Err(anyhow!("resize: {}", std::io::Error::last_os_error()));
+    }
+    Ok(())
+}
+
 /// The caller owns the read lock, so nobody can read bytes at the old size
 /// and enqueue them after the resize completion. Drain the kernel snapshot
 /// before ioctl; a continuous producer cannot keep a resize waiting forever.
 #[cfg(unix)]
-fn resize_with_reader(pane: &Pane, reader: &mut dyn Read, next: OutputSize) -> Result<()> {
-    let mut held = pane.hold.try_running().context("The terminal is being handed over. Retry resizing.")?;
-    let fd = pane.master.as_raw_fd().context("the PTY has no descriptor")?;
+fn resize_with_reader(handles: &ResizeHandles, reader: &mut dyn Read, next: OutputSize) -> Result<()> {
+    use std::os::fd::AsRawFd;
+    let mut held = handles.hold.try_running().context("The terminal is being handed over. Retry resizing.")?;
+    let fd = handles.master_fd.as_raw_fd();
     let remaining = unread_output(fd).context("inspect unread terminal output")?;
-    if !pane.output.can_resize(remaining) {
+    if !handles.output.can_resize(remaining) {
         bail!("Terminal output is catching up. Retry resizing.");
     }
-    let mut size = pane.output_size.lock().unwrap();
+    let mut size = handles.output_size.lock().unwrap();
     let mut buf = vec![0u8; remaining];
     let mut read = 0;
     let mut failure = None;
@@ -800,15 +890,15 @@ fn resize_with_reader(pane: &Pane, reader: &mut dyn Read, next: OutputSize) -> R
     // Short kernel reads must not use more batches than the capacity reserved
     // above. Publish consumed bytes even if a later read failed.
     for chunk in buf[..read].chunks(READ_BYTES) {
-        if !pane.output.send((chunk.to_vec(), *size)) { bail!("Terminal output closed."); }
+        if !handles.output.send((chunk.to_vec(), *size)) { bail!("Terminal output closed."); }
         held.read += 1;
     }
     if let Some(error) = failure { return Err(error).context("drain terminal output before resizing"); }
-    pane.master.resize(PtySize { rows: next.rows, cols: next.cols, pixel_width: 0, pixel_height: 0 }).map_err(|e| anyhow!("resize: {e}"))?;
+    resize_fd(fd, next)?;
     *size = next;
-    pane.screen.lock().unwrap_or_else(|e| e.into_inner()).set_size(screen_size(next.rows), screen_size(next.cols));
+    set_screen_size(&mut handles.screen.lock().unwrap_or_else(|e| e.into_inner()), next);
     // A zero-byte batch is an ordered completion, even for `sleep`/`tail -f`.
-    if !pane.output.send((Vec::new(), next)) { bail!("Terminal output closed."); }
+    if !handles.output.send((Vec::new(), next)) { bail!("Terminal output closed."); }
     held.read += 1;
     Ok(())
 }
@@ -817,7 +907,7 @@ fn resize_with_reader(pane: &Pane, reader: &mut dyn Read, next: OutputSize) -> R
 /// window and the floating one can show the same terminal at once, and each
 /// is sent, counted and held back for on its own.
 struct Tapped {
-    tap: SizedTap,
+    tap: Arc<Mutex<SizedTap>>,
     /// The window this view is in. A later view from the same window replaces it.
     window: String,
     /// Which attachment this is. A view names its own when it reports or
@@ -1157,12 +1247,87 @@ fn npm_launcher_target(launcher: &std::path::Path) -> Option<Vec<String>> {
     Some(vec![node.to_string_lossy().into_owned(), script.to_string_lossy().into_owned()])
 }
 
+/// Single-quote a word for POSIX shells (`sh`, `bash`, `zsh`, `dash`, `ksh`).
+/// Do NOT pass POSIX-quoted strings directly to `fish -c` (in `fish`, `\`
+/// escapes `'` inside single quotes); use [`fish_quote`] or pass direct argv.
+pub(crate) fn posix_quote(text: &str) -> String {
+    format!("'{}'", text.replace('\'', "'\\''"))
+}
+
+/// Single-quote a word for `fish`, escaping both `\` and `'` inside `'...'`
+/// so `\'` sequences can never break out of single quotes.
+pub(crate) fn fish_quote(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push('\'');
+    for ch in text.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '\'' => out.push_str("\\'"),
+            _ => out.push(ch),
+        }
+    }
+    out.push('\'');
+    out
+}
+
+/// True when `shell` refers to the `fish` shell (by executable file name).
+pub(crate) fn is_fish_shell(shell: &str) -> bool {
+    std::path::Path::new(shell)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name == "fish" || name.eq_ignore_ascii_case("fish.exe"))
+}
+
+/// Build the argv passed to a Unix shell `sh` when launching an optional
+/// POSIX-quoted `command` in `cwd`.
+///
+/// - For structured commands (`posix_words` succeeds):
+///   - Applies untrusted Claude Code launch hardening (`--setting-sources user`).
+///   - For `fish`: re-quotes every argument with [`fish_quote`] so `\'` can never
+///     break out of single quotes.
+///   - For POSIX shells (`sh`, `bash`, `zsh`, `dash`, `ksh`): passes the exact
+///     argv via `-l -c 'exec "$@"' _ <argv...>` so the shell never re-parses
+///     untrusted argument text.
+/// - For complex shell scripts (`posix_words` returns `None`):
+///   - For `fish`: runs `exec /bin/sh -c <fish_quote(c)>` so POSIX script syntax
+///     and quotes are never misinterpreted by `fish`.
+///   - For POSIX shells: runs `-l -c "exec {c}"`.
+#[cfg(unix)]
+fn unix_shell_args(sh: &str, command: Option<&str>, cwd: &str) -> Vec<String> {
+    let known_shell = sh.ends_with("zsh") || sh.ends_with("bash") || sh.ends_with("fish") || (sh.ends_with("sh") && !sh.ends_with("pwsh"));
+    match command {
+        Some(c) if known_shell => {
+            if let Some(mut argv) = posix_words(c).filter(|w| !w.is_empty()) {
+                crate::harness::claude::pty::harden_untrusted_launch_argv(&mut argv, cwd);
+                if is_fish_shell(sh) {
+                    let quoted: Vec<String> = argv.iter().map(|w| fish_quote(w)).collect();
+                    vec!["-l".into(), "-c".into(), format!("exec {}", quoted.join(" "))]
+                } else {
+                    let mut args = Vec::with_capacity(argv.len() + 4);
+                    args.push("-l".into());
+                    args.push("-c".into());
+                    args.push("exec \"$@\"".into());
+                    args.push("_".into());
+                    args.extend(argv);
+                    args
+                }
+            } else if is_fish_shell(sh) {
+                vec!["-l".into(), "-c".into(), format!("exec /bin/sh -c {}", fish_quote(c))]
+            } else {
+                vec!["-l".into(), "-c".into(), format!("exec {c}")]
+            }
+        }
+        Some(c) => vec!["-c".into(), c.into()],
+        None if known_shell => vec!["-l".into()],
+        None => Vec::new(),
+    }
+}
+
 /// Split `command` into words as a POSIX shell would, for quoting only:
 /// `'...'`, `"..."` with `\` escapes, and `\` outside quotes. None when it
 /// uses anything a shell would expand or run (`$`, `` ` ``, `;`, `|`, `&`,
 /// `<`, `>`, `(`, `)`, `*`, `?`, `~` at a word's start) outside single quotes,
 /// or a quote is left open.
-#[cfg(windows)]
 pub(crate) fn posix_words(command: &str) -> Option<Vec<String>> {
     let mut words = Vec::new();
     let mut word = String::new();
@@ -1323,16 +1488,31 @@ fn screen_size(n: u16) -> std::num::NonZeroU16 {
 }
 
 #[cfg(test)]
-fn append_scrollback(scrollback: &Mutex<VecDeque<u8>>, bytes: &[u8]) {
-    push_scrollback(&mut scrollback.lock().unwrap(), bytes);
+thread_local! {
+    static SCREEN_SET_SIZE_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
-/// Output of the pane's own program, counted under the scrollback's lock so
-/// that `program_output` never sees the one without the other.
-fn append_own_output(scrollback: &Mutex<VecDeque<u8>>, printed: &AtomicU64, bytes: &[u8]) {
-    let mut scrollback = scrollback.lock().unwrap();
-    push_scrollback(&mut scrollback, bytes);
-    printed.fetch_add(bytes.len() as u64, Ordering::Relaxed);
+/// Only invoke `vt100::Parser::set_size` when the grid dimensions actually changed.
+fn set_screen_size(parser: &mut vt100::Parser, size: OutputSize) -> bool {
+    let target = (screen_size(size.rows), screen_size(size.cols));
+    if parser.screen().size() == target {
+        return false;
+    }
+    #[cfg(test)]
+    SCREEN_SET_SIZE_CALLS.with(|count| count.set(count.get() + 1));
+    parser.set_size(target.0, target.1);
+    true
+}
+
+/// Agent panes (`tab:*`) inspect the VT100 screen continuously; plain shell
+/// panes skip eager VT100 parsing unless a caller inspects [`Terminals::screen`].
+fn eager_screen_tracking(id: &str) -> bool {
+    id.starts_with("tab:")
+}
+
+#[cfg(test)]
+fn append_scrollback(scrollback: &Mutex<VecDeque<u8>>, bytes: &[u8]) {
+    push_scrollback(&mut scrollback.lock().unwrap(), bytes);
 }
 
 fn push_scrollback(scrollback: &mut VecDeque<u8>, bytes: &[u8]) {
@@ -1454,8 +1634,6 @@ impl Terminals {
         let pair = pty.openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 }).map_err(|e| anyhow!("openpty: {e}"))?;
         let sh = shell();
         let mut cmd = CommandBuilder::new(executable.map_or(std::ffi::OsStr::new(&sh), |program| program.executable));
-        // A login shell so PATH and prompts match the reader's own terminal.
-        let known_shell = sh.ends_with("zsh") || sh.ends_with("bash") || sh.ends_with("fish") || sh.ends_with("sh") && !sh.ends_with("pwsh");
         if let Some(program) = executable {
             for arg in program.args { cmd.arg(arg); }
             // A lifecycle hook is not a provider/CLI call on behalf of an agent.
@@ -1463,30 +1641,54 @@ impl Terminals {
                 if name.to_string_lossy().starts_with("RACCOON_") { cmd.env_remove(name); }
             }
             cmd.env_remove("TERMINALX_SESSION_ID");
-        } else { match command {
-            Some(c) if known_shell => {
-                cmd.arg("-l");
-                cmd.arg("-c");
-                cmd.arg(format!("exec {c}"));
+        } else {
+            #[cfg(unix)]
+            for arg in unix_shell_args(&sh, command, cwd) {
+                cmd.arg(arg);
             }
             #[cfg(windows)]
-            Some(c) => match direct_program(c) {
-                // An agent's launch line names its CLI by absolute path in
-                // POSIX quoting, which PowerShell and cmd do not read: the CLI
-                // is started itself, with those words as its arguments.
-                Some(argv) => cmd = CommandBuilder::from_argv(argv.into_iter().map(std::ffi::OsString::from).collect()),
-                None => for arg in windows_command_args(&sh, c) { cmd.arg(arg); },
-            },
-            #[cfg(unix)]
-            Some(c) => {
-                cmd.arg("-c");
-                cmd.arg(c);
+            {
+                let known_shell = sh.ends_with("zsh") || sh.ends_with("bash") || sh.ends_with("fish") || (sh.ends_with("sh") && !sh.ends_with("pwsh"));
+                match command {
+                    Some(c) if known_shell => {
+                        if let Some(mut argv) = posix_words(c).filter(|w| !w.is_empty()) {
+                            crate::harness::claude::pty::harden_untrusted_launch_argv(&mut argv, cwd);
+                            if is_fish_shell(&sh) {
+                                let quoted: Vec<String> = argv.iter().map(|w| fish_quote(w)).collect();
+                                cmd.arg("-l");
+                                cmd.arg("-c");
+                                cmd.arg(format!("exec {}", quoted.join(" ")));
+                            } else {
+                                cmd.arg("-l");
+                                cmd.arg("-c");
+                                cmd.arg("exec \"$@\"");
+                                cmd.arg("_");
+                                for arg in argv { cmd.arg(arg); }
+                            }
+                        } else if is_fish_shell(&sh) {
+                            cmd.arg("-l");
+                            cmd.arg("-c");
+                            cmd.arg(format!("exec /bin/sh -c {}", fish_quote(c)));
+                        } else {
+                            cmd.arg("-l");
+                            cmd.arg("-c");
+                            cmd.arg(format!("exec {c}"));
+                        }
+                    }
+                    Some(c) => match direct_program(c) {
+                        Some(mut argv) => {
+                            crate::harness::claude::pty::harden_untrusted_launch_argv(&mut argv, cwd);
+                            cmd = CommandBuilder::from_argv(argv.into_iter().map(std::ffi::OsString::from).collect());
+                        }
+                        None => for arg in windows_command_args(&sh, c) { cmd.arg(arg); },
+                    },
+                    None if known_shell => {
+                        cmd.arg("-l");
+                    }
+                    None => {}
+                }
             }
-            None if known_shell => {
-                cmd.arg("-l");
-            }
-            None => {}
-        } }
+        }
         cmd.cwd(cwd);
         let (session_env, uninherited) = session_environment(&environment.values);
         for (name, value) in &session_env {
@@ -1540,7 +1742,9 @@ impl Terminals {
         let pid = child.process_id();
         if let Some(startup) = &startup { startup.spawned(pid); }
         let mut screen = vt100::Parser::new(screen_size(rows), screen_size(cols), 0);
-        screen.process(&printed);
+        if eager_screen_tracking(id) {
+            screen.process(&printed);
+        }
         let mut scrollback = VecDeque::with_capacity(SCROLLBACK_BYTES);
         push_scrollback(&mut scrollback, &printed);
         self.start(sink, id, Parts {
@@ -1614,9 +1818,12 @@ impl Terminals {
         #[cfg(not(unix))]
         let mut reader = reader;
         #[cfg(unix)]
-        let (readable, room) = {
+        let (readable, room, master_fd, tty) = {
             let room = non_blocking(master.as_ref())?;
-            (room.try_clone()?, room)
+            let readable = room.try_clone()?;
+            let master_fd = Arc::new(room.try_clone()?);
+            let tty = master.tty_name();
+            (readable, room, master_fd, tty)
         };
         *self.sink.lock().unwrap() = Some(sink.clone());
         let alive = Arc::new(Mutex::new(true));
@@ -1637,6 +1844,7 @@ impl Terminals {
         let (rows, cols) = screen.screen().size();
         let output_size = Arc::new(Mutex::new(OutputSize { cols: cols.get(), rows: rows.get() }));
         let screen = Arc::new(Mutex::new(screen));
+        let screen_active = Arc::new(AtomicBool::new(eager_screen_tracking(id)));
         let hold = Arc::new(Hold::default());
         let output = Arc::new(OutputQueue::default());
         let tap = self.tap_slot(id);
@@ -1658,6 +1866,7 @@ impl Terminals {
             let scrollback = scrollback.clone();
             let own = own.clone();
             let screen = screen.clone();
+            let screen_active = screen_active.clone();
             let emitted = self.emitted.clone();
             let tap = tap.clone();
             let exited = exited.clone();
@@ -1737,25 +1946,50 @@ impl Terminals {
             std::thread::Builder::new().name(format!("pty-emit-{id}")).spawn(move || {
                 let _emit_end = emit_end;
                 let flush = |acc: &mut Vec<u8>, size: OutputSize| {
-                    {
-                        // Held across both, so a view attaching now gets these
-                        // bytes exactly once: in the scrollback it is handed,
-                        // or from its tap.
+                    type TapDelivery = (String, Arc<Mutex<SizedTap>>);
+                    let (track_screen, deliveries): (bool, Vec<TapDelivery>) = {
+                        // Held across scrollback update and view snapshotting, so a view
+                        // attaching now gets these bytes exactly once: in the scrollback
+                        // it is handed, or from its tap. Dropped before VT100 processing
+                        // and before invoking synchronous tap callbacks so ack/attach/detach
+                        // are never blocked on rendering or IPC delivery.
                         let mut views = tap.0.lock().unwrap();
-                        append_own_output(&scrollback, &own, acc);
+                        let track_screen = {
+                            let mut sb = scrollback.lock().unwrap();
+                            push_scrollback(&mut sb, acc);
+                            own.fetch_add(acc.len() as u64, Ordering::Relaxed);
+                            screen_active.load(Ordering::Acquire)
+                        };
+                        let deliveries = views
+                            .0
+                            .iter_mut()
+                            .map(|view| {
+                                view.sent += acc.len() as u64;
+                                (view.token.clone(), view.tap.clone())
+                            })
+                            .collect();
+                        (track_screen, deliveries)
+                    };
+                    if track_screen {
                         let latest = *latest_size.lock().unwrap();
                         let mut screen = screen.lock().unwrap_or_else(|e| e.into_inner());
-                        screen.set_size(screen_size(size.rows), screen_size(size.cols));
-                        screen.process(acc);
-                        screen.set_size(screen_size(latest.rows), screen_size(latest.cols));
-                        drop(screen);
-                        views.0.retain_mut(|view| {
-                            let received = (view.tap)(acc, Some(size));
-                            if received {
-                                view.sent += acc.len() as u64;
-                            }
-                            received
-                        });
+                        set_screen_size(&mut screen, size);
+                        if !acc.is_empty() {
+                            screen.process(acc);
+                        }
+                        set_screen_size(&mut screen, latest);
+                    }
+                    let mut dead = Vec::new();
+                    for (token, view_tap) in deliveries {
+                        let received = (view_tap.lock().unwrap())(acc, Some(size));
+                        if !received {
+                            dead.push(token);
+                        }
+                    }
+                    if !dead.is_empty() {
+                        let mut views = tap.0.lock().unwrap();
+                        views.0.retain(|view| !dead.contains(&view.token));
+                        tap.1.notify_all();
                     }
                     if !acc.is_empty() {
                         emitted.events.fetch_add(1, Ordering::Relaxed);
@@ -1839,11 +2073,13 @@ impl Terminals {
                     sink.emit(crate::status::resources::CHANGED_EVENT, &());
                 }
                 sink.emit("pty_exit", &PtyExit { id, code });
-                while group.pid().is_some() { std::thread::sleep(Duration::from_millis(20)); }
+                if group.pid().is_some() {
+                    reap_group_async(group);
+                }
             })?;
         }
-        self.panes.lock().unwrap().insert(id.to_string(), Pane { master, input, pid, explicit_command, environment, alive, group, last_output, scrollback, printed: own, screen, output_size, output, cwd, created, hold,
-            #[cfg(unix)] reader });
+        self.panes.lock().unwrap().insert(id.to_string(), Pane { master, input, pid, explicit_command, environment, alive, group, last_output, scrollback, printed: own, screen, screen_active, output_size, output, cwd, created, hold,
+            #[cfg(unix)] reader, #[cfg(unix)] master_fd, #[cfg(unix)] tty });
         self.keep_slot(id, &tap);
         self.changed();
         Ok(())
@@ -1905,7 +2141,7 @@ impl Terminals {
             }
             sent = printed.len() - start;
         }
-        views.put(Tapped { tap, window: window.to_string(), token: token.to_string(), sent: sent as u64, drawn: 0, forgiven: 0, stalled: false });
+        views.put(Tapped { tap: Arc::new(Mutex::new(tap)), window: window.to_string(), token: token.to_string(), sent: sent as u64, drawn: 0, forgiven: 0, stalled: false });
         slot.1.notify_all();
         drop(views);
         // The pane was closed, or closed and opened again, while this was
@@ -2175,27 +2411,51 @@ impl Terminals {
     }
 
     pub fn resize(&self, id: &str, cols: u16, rows: u16) -> Result<()> {
-        let panes = self.panes.lock().unwrap();
-        let pane = panes.get(id).context("no such terminal")?;
         #[cfg(unix)]
-        return resize_with_reader(pane, pane.reader.lock().unwrap().as_mut(), OutputSize { cols, rows });
+        {
+            let handles = {
+                let panes = self.panes.lock().unwrap();
+                let pane = panes.get(id).context("no such terminal")?;
+                ResizeHandles::from_pane(pane)
+            };
+            let mut reader = handles.reader.lock().unwrap();
+            resize_with_reader(&handles, reader.as_mut(), OutputSize { cols, rows })
+        }
         #[cfg(not(unix))]
         {
-        if !pane.output.can_resize(0) { bail!("Terminal output is catching up. Retry resizing."); }
-        let mut size = pane.output_size.lock().unwrap();
-        pane.master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 }).map_err(|e| anyhow!("resize: {e}"))?;
-        *size = OutputSize { cols, rows };
-        pane.screen.lock().unwrap_or_else(|e| e.into_inner()).set_size(screen_size(rows), screen_size(cols));
-        pane.output.send((Vec::new(), *size));
-        Ok(())
+            let panes = self.panes.lock().unwrap();
+            let pane = panes.get(id).context("no such terminal")?;
+            if !pane.output.can_resize(0) { bail!("Terminal output is catching up. Retry resizing."); }
+            let mut size = pane.output_size.lock().unwrap();
+            let next = OutputSize { cols, rows };
+            pane.master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 }).map_err(|e| anyhow!("resize: {e}"))?;
+            *size = next;
+            set_screen_size(&mut pane.screen.lock().unwrap_or_else(|e| e.into_inner()), next);
+            pane.output.send((Vec::new(), *size));
+            Ok(())
         }
     }
 
     /// Read the screen pane `id`'s program has drawn, as it stands now.
     /// `None` when there is no such pane.
     pub fn screen<R>(&self, id: &str, read: impl FnOnce(&vt100::Screen) -> R) -> Option<R> {
-        let screen = self.panes.lock().unwrap().get(id)?.screen.clone();
-        let parser = screen.lock().unwrap_or_else(|e| e.into_inner());
+        let (screen, screen_active, scrollback, output_size) = {
+            let panes = self.panes.lock().unwrap();
+            let pane = panes.get(id)?;
+            (pane.screen.clone(), pane.screen_active.clone(), pane.scrollback.clone(), pane.output_size.clone())
+        };
+        let mut parser = screen.lock().unwrap_or_else(|e| e.into_inner());
+        if !screen_active.load(Ordering::Acquire) {
+            let current = *output_size.lock().unwrap();
+            let mut fresh = vt100::Parser::new(screen_size(current.rows), screen_size(current.cols), 0);
+            let bytes: Vec<u8> = {
+                let sb = scrollback.lock().unwrap();
+                screen_active.store(true, Ordering::Release);
+                sb.iter().copied().collect()
+            };
+            fresh.process(&bytes);
+            *parser = fresh;
+        }
         Some(read(parser.screen()))
     }
 
@@ -2381,18 +2641,27 @@ impl Terminals {
     pub fn fronts(&self) -> Vec<PaneFront> {
         #[cfg(unix)]
         {
-            let panes = self.panes.lock().unwrap();
-            panes
-                .iter()
-                .filter(|(_, pane)| *pane.alive.lock().unwrap())
-                .filter_map(|(id, pane)| {
-                    let foreground = pane.master.process_group_leader().and_then(|pgid| u32::try_from(pgid).ok())?;
-                    // SAFETY: tcgetattr fills the struct it is given; the fd is the pane's, which the lock keeps open.
-                    let raw = pane.master.as_raw_fd().is_some_and(|fd| unsafe {
+            use std::os::fd::AsRawFd;
+            let snapshot: Vec<_> = {
+                let panes = self.panes.lock().unwrap();
+                panes
+                    .iter()
+                    .filter(|(_, pane)| *pane.alive.lock().unwrap())
+                    .filter_map(|(id, pane)| Some((id.clone(), pane.pid?, pane.master_fd.clone(), pane.tty.clone())))
+                    .collect()
+            };
+            snapshot
+                .into_iter()
+                .filter_map(|(id, pid, master_fd, tty)| {
+                    let fd = master_fd.as_raw_fd();
+                    // SAFETY: `master_fd` keeps the descriptor open across these tty queries.
+                    let pgid = unsafe { libc::tcgetpgrp(fd) };
+                    let foreground = u32::try_from(pgid).ok()?;
+                    let raw = unsafe {
                         let mut mode: libc::termios = std::mem::zeroed();
                         libc::tcgetattr(fd, &mut mode) == 0 && mode.c_lflag & (libc::ICANON | libc::ECHO) == 0
-                    });
-                    Some(PaneFront { id: id.clone(), pid: pane.pid?, foreground, raw, tty: pane.master.tty_name() })
+                    };
+                    Some(PaneFront { id, pid, foreground, raw, tty })
                 })
                 .collect()
         }
@@ -3282,8 +3551,8 @@ time.sleep(60)
             std::thread::sleep(Duration::from_millis(1));
         }
         {
-            let panes = terminals.panes.lock().unwrap();
-            resize_with_reader(&panes["unread"], gate.as_mut(), OutputSize { cols: 18, rows: 8 }).unwrap();
+            let handles = ResizeHandles::from_pane(&terminals.panes.lock().unwrap()["unread"]);
+            resize_with_reader(&handles, gate.as_mut(), OutputSize { cols: 18, rows: 8 }).unwrap();
         }
         drop(gate);
         let mut drained = Vec::new();
@@ -4020,5 +4289,161 @@ time.sleep(60)
         assert_eq!(fallback_locale(|name| (name == "LANG").then(|| "C".to_string()), &none), None, "even C, when chosen");
         let overrides = std::collections::BTreeMap::from([("LC_ALL".to_string(), "fr_FR.UTF-8".to_string())]);
         assert_eq!(fallback_locale(|_| None, &overrides), None);
+    }
+
+    #[test]
+    fn set_screen_size_skips_unchanged_dimensions() {
+        let mut parser = vt100::Parser::new(screen_size(24), screen_size(80), 0);
+        SCREEN_SET_SIZE_CALLS.with(|count| count.set(0));
+        assert!(!set_screen_size(&mut parser, OutputSize { cols: 80, rows: 24 }));
+        assert_eq!(SCREEN_SET_SIZE_CALLS.with(|count| count.get()), 0);
+        assert!(set_screen_size(&mut parser, OutputSize { cols: 100, rows: 30 }));
+        assert_eq!(SCREEN_SET_SIZE_CALLS.with(|count| count.get()), 1);
+        assert!(!set_screen_size(&mut parser, OutputSize { cols: 100, rows: 30 }));
+        assert_eq!(SCREEN_SET_SIZE_CALLS.with(|count| count.get()), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn plain_shell_skips_eager_vt100_and_tap_callback_does_not_hold_tap_lock() {
+        let terminals = Arc::new(Terminals::new());
+        let sink: Arc<dyn EventSink> = Arc::new(crate::sink::BroadcastSink::new(64));
+        let dir = tempfile::tempdir().unwrap();
+        let acked = Arc::new(AtomicBool::new(false));
+        let acked_cb = acked.clone();
+        let terminals_cb = terminals.clone();
+        let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        terminals.attach(
+            "main",
+            "sess:1",
+            "tok-1",
+            Box::new(move |bytes| {
+                // Calling `ack` inside the synchronous tap callback would deadlock
+                // if `pty-emit` still held `tap.0`.
+                terminals_cb.ack("sess:1", "tok-1", bytes.len() as u64);
+                acked_cb.store(true, Ordering::SeqCst);
+                let _ = tx.send(bytes.to_vec());
+                true
+            }),
+        );
+        let spec = PaneSpec { cwd: dir.path().to_str().unwrap(), cols: 80, rows: 24, command: Some("sh -c 'printf SHELL-READY; exec sleep 60'"), env: &[] };
+        terminals.spawn(sink.clone(), "sess:1", spec).unwrap();
+        read_until(&rx, "SHELL-READY");
+        assert!(acked.load(Ordering::SeqCst), "ack inside tap callback completed without deadlocking");
+        // Plain shell pane has not activated VT100 until `screen()` is requested.
+        let active_before = terminals.panes.lock().unwrap()["sess:1"].screen_active.load(Ordering::Acquire);
+        assert!(!active_before, "plain shell pane must skip eager VT100 parsing");
+        // Calling `screen()` lazily replays scrollback and activates VT100.
+        assert!(terminals.screen("sess:1", |s| s.contents()).unwrap().contains("SHELL-READY"));
+        let active_after = terminals.panes.lock().unwrap()["sess:1"].screen_active.load(Ordering::Acquire);
+        assert!(active_after);
+        // Agent pane (`tab:*`) tracks VT100 eagerly from spawn.
+        let agent_spec = PaneSpec { cwd: dir.path().to_str().unwrap(), cols: 80, rows: 24, command: Some("sleep 60"), env: &[] };
+        terminals.spawn(sink, "tab:agent-1", agent_spec).unwrap();
+        assert!(terminals.panes.lock().unwrap()["tab:agent-1"].screen_active.load(Ordering::Acquire));
+        terminals.kill_all();
+    }
+
+    // ---- S-06 security regression tests ----
+
+    /// Minimal faithful parser for fish single-quoted strings (`\` escapes `\` and `'`).
+    fn parse_fish_single_quoted(s: &str) -> Result<String, String> {
+        let mut chars = s.chars();
+        if chars.next() != Some('\'') {
+            return Err("missing opening quote".into());
+        }
+        let mut out = String::new();
+        while let Some(c) = chars.next() {
+            match c {
+                '\\' => match chars.next() {
+                    Some(esc @ ('\\' | '\'')) => out.push(esc),
+                    Some(other) => {
+                        out.push('\\');
+                        out.push(other);
+                    }
+                    None => return Err("dangling backslash".into()),
+                },
+                '\'' => {
+                    if chars.next().is_some() {
+                        return Err(format!("broke out of fish single quotes in: {s}"));
+                    }
+                    return Ok(out);
+                }
+                other => out.push(other),
+            }
+        }
+        Err("unterminated single quote".into())
+    }
+
+    #[test]
+    fn fish_quote_neutralizes_backslash_quote_breakout_payloads() {
+        let payloads = [
+            r"foo\' ; touch /tmp/pwned ; echo '",
+            r"branch\'$(id)`id`",
+            r"a\\\'b'\''c",
+            r"/tmp/repo\'/worktree",
+            "title with 'single' and \\' and \\\\ and $HOME and (cmd)",
+        ];
+        for payload in payloads {
+            // Confirm why POSIX quoting breaks fish:
+            let posix = posix_quote(payload);
+            if payload.contains(r"\'") {
+                assert!(
+                    parse_fish_single_quoted(&posix).is_err(),
+                    "POSIX quote must fail fish parser on \\' payload: {posix}"
+                );
+            }
+            // Confirm fish_quote round-trips cleanly with zero breakout:
+            let fished = fish_quote(payload);
+            assert_eq!(
+                parse_fish_single_quoted(&fished).unwrap(),
+                payload,
+                "fish_quote failed round-trip for {payload:?}: {fished}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_shell_args_prevents_fish_injection_and_passes_direct_argv_on_posix() {
+        let _home = crate::store::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().to_str().unwrap();
+        let evil_title = r"PR #1 \' ; touch /tmp/pwned ; echo '";
+        let posix_cmd = format!(
+            "{} --session-id {} --name {} --settings {}",
+            posix_quote("/opt/claude"),
+            posix_quote("sid-1"),
+            posix_quote(evil_title),
+            posix_quote("{}")
+        );
+
+        // On POSIX shells (zsh/bash/sh), structured commands pass direct argv via `exec "$@"`.
+        let zsh_args = unix_shell_args("/bin/zsh", Some(&posix_cmd), cwd);
+        assert_eq!(zsh_args[0], "-l");
+        assert_eq!(zsh_args[1], "-c");
+        assert_eq!(zsh_args[2], "exec \"$@\"");
+        assert_eq!(zsh_args[3], "_");
+        assert_eq!(zsh_args[4], "/opt/claude");
+        assert!(zsh_args.contains(&evil_title.to_string()), "exact literal title passed as argv: {zsh_args:?}");
+        // Untrusted cwd also automatically receives `--setting-sources user` (S-04).
+        assert!(
+            zsh_args.windows(2).any(|w| w == ["--setting-sources", "user"]),
+            "untrusted claude launch must enforce --setting-sources user: {zsh_args:?}"
+        );
+
+        // On fish, structured commands are re-quoted with fish_quote (escaping both `\` and `'`).
+        let fish_args = unix_shell_args("/opt/homebrew/bin/fish", Some(&posix_cmd), cwd);
+        assert_eq!(fish_args[0], "-l");
+        assert_eq!(fish_args[1], "-c");
+        let exec_line = &fish_args[2];
+        assert!(exec_line.starts_with("exec "), "{exec_line}");
+        assert!(exec_line.contains(&fish_quote(evil_title)), "title must be fish-quoted: {exec_line}");
+        assert!(!exec_line.contains(&posix_quote(evil_title)), "must not leave raw POSIX quote in fish command: {exec_line}");
+
+        // Complex POSIX scripts on fish are wrapped in `/bin/sh -c <fish_quote>` instead of raw fish parsing.
+        let complex = r"echo 'a\' && exit 0";
+        let fish_complex = unix_shell_args("/usr/bin/fish", Some(complex), cwd);
+        assert_eq!(fish_complex[2], format!("exec /bin/sh -c {}", fish_quote(complex)));
     }
 }

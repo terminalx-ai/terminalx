@@ -105,6 +105,10 @@ impl Fixture {
             if let Ok(args) = std::fs::read_to_string(&marker) {
                 let args: Vec<_> = args.lines().collect();
                 if args.windows(2).any(|pair| pair == ["--session-id", provider_id]) {
+                    assert!(
+                        args.windows(2).any(|pair| pair == ["--setting-sources", "user"]),
+                        "S-04: unapproved checkout must launch Claude with --setting-sources user: {args:?}"
+                    );
                     std::fs::remove_file(&marker).unwrap();
                     break;
                 }
@@ -114,7 +118,8 @@ impl Fixture {
         }
         let home = PathBuf::from(crate::store::state_home_env().unwrap());
         let config: Value = serde_json::from_slice(&std::fs::read(home.join("test-user-home/.claude.json")).unwrap()).unwrap();
-        assert_eq!(config["projects"][&session.cwd]["hasTrustDialogAccepted"], true);
+        assert_eq!(config["hasCompletedOnboarding"], true);
+        assert!(config["projects"][&session.cwd].is_null(), "S-04: unapproved checkout must not be silently auto-trusted");
     }
 }
 

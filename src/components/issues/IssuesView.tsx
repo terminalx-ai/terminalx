@@ -1137,7 +1137,7 @@ export function IssuesView({
                 )}
                 {detailText != null && (
                   <IssueDescription key={issueKey} edits={edits}>
-                    {detailText.trim() ? <Markdown text={detailText} /> : <div className="text-sm text-faint">No description.</div>}
+                    {detailText.trim() ? <Markdown text={detailText} webLinksOnly remoteImages={false} /> : <div className="text-sm text-faint">No description.</div>}
                   </IssueDescription>
                 )}
               </div>

@@ -10,6 +10,7 @@ import { signIn, useAccount } from "@/lib/account";
 import { SessionGuestClient } from "@/lib/sessionGuest";
 import type { SharePerson, ShareRole, ShareState } from "@/lib/localSharing";
 import { errorMessage } from "@/lib/api";
+import { createTerminalLinkHandler } from "@/lib/terminalLinks";
 import { usePromptTextProps } from "@/lib/autocorrect";
 import { NoticeForeground } from "@/lib/noticeDeferral";
 import { WindowControls } from "@/components/layout/WindowControls";
@@ -39,7 +40,13 @@ function GuestTerminal({
   const node = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (!node.current) return;
-    const terminal = new Xterm({ disableStdin: true, cursorBlink: false, fontSize: 13, scrollback: 10_000 });
+    const terminal = new Xterm({
+      disableStdin: true,
+      cursorBlink: false,
+      fontSize: 13,
+      scrollback: 10_000,
+      linkHandler: createTerminalLinkHandler(),
+    });
     terminal.open(node.current);
     let cancelled = false;
     let previous = "";
@@ -338,6 +345,7 @@ function GuestSession({ link, leave }: { link: string; leave: () => void }) {
                   answering={sending}
                   answerBlockedReason={status.you?.canApprove ? null : "Permission decisions stay with the host."}
                   askDetail
+                  webLinksOnly
                   footer={null}
                 />
               )}

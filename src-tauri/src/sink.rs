@@ -49,9 +49,16 @@ pub trait EventSink: Send + Sync {
     fn unlisten(&self, id: ListenerId);
 }
 
+#[cfg(test)]
+thread_local! {
+    static PTY_PAYLOAD_ENCODES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 /// A `pty_data` event's payload: the pane and its bytes as base64.
 fn pty_payload(id: &str, bytes: &[u8], size: Option<crate::pty::OutputSize>) -> Option<Box<RawValue>> {
     use base64::Engine as _;
+    #[cfg(test)]
+    PTY_PAYLOAD_ENCODES.with(|count| count.set(count.get() + 1));
     let payload = crate::pty::PtyData {
         id: id.to_string(),
         data: base64::engine::general_purpose::STANDARD.encode(bytes),
@@ -267,7 +274,10 @@ impl EventSink for BroadcastSink {
     fn emit_pty_sized(&self, id: &str, bytes: &[u8], size: Option<crate::pty::OutputSize>) {
         let heard = self.tx.receiver_count() > 0
             || self.listeners.lock().unwrap().get("pty_data").is_some_and(|registered| !registered.is_empty());
-        if let Some(raw) = pty_payload(id, bytes, size).filter(|_| heard) {
+        if !heard {
+            return;
+        }
+        if let Some(raw) = pty_payload(id, bytes, size) {
             self.emit_raw("pty_data", raw);
         }
     }
@@ -375,12 +385,15 @@ mod tests {
     fn terminal_output_nobody_reads_is_never_encoded() {
         let sink = BroadcastSink::new(4);
         let mut app = sink.subscribe_app();
+        PTY_PAYLOAD_ENCODES.with(|count| count.set(0));
         sink.emit_pty("pane", b"unread");
+        assert_eq!(PTY_PAYLOAD_ENCODES.with(|count| count.get()), 0, "zero subscribers must skip base64/JSON encoding");
         assert!(app.try_recv().is_err());
         let heard = Arc::new(Mutex::new(Vec::new()));
         let seen = heard.clone();
         sink.listen("pty_data", Box::new(move |payload| seen.lock().unwrap().push(payload.to_string())));
         sink.emit_pty("pane", b"read");
+        assert_eq!(PTY_PAYLOAD_ENCODES.with(|count| count.get()), 1, "active listener encodes once");
         assert_eq!(*heard.lock().unwrap(), vec![r#"{"id":"pane","data":"cmVhZA=="}"#.to_string()]);
     }
 

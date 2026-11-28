@@ -43,6 +43,8 @@ pub enum Limit {
     Deploy,
     /// Starting sessions of its own: a run's pieces are the lead's to hand out.
     Delegate,
+    /// Unparseable or opaque shell construct that cannot be safely verified (S-20).
+    Opaque,
 }
 
 impl Limit {
@@ -52,9 +54,13 @@ impl Limit {
             Limit::Merge => "merging",
             Limit::Deploy => "deploying or publishing",
             Limit::Delegate => "starting sessions of its own",
+            Limit::Opaque => "running opaque or uninspectable shell commands",
         }
     }
 }
+
+/// Static rule returned by [`refused`] when a shell command fails closed as opaque (S-20).
+static OPAQUE_RULE: Rule = Rule { programs: &[], words: &[], limit: Limit::Opaque };
 
 /// A command a worker may not run: one of `programs`, with `words` as its
 /// first arguments.
@@ -438,8 +444,22 @@ pub fn refusal_output(reason: &str) -> Value {
 }
 
 /// The first rule a shell command breaks, with the command that breaks it.
+/// Fails closed with [`OPAQUE_RULE`] when `command` uses unparseable or opaque
+/// shell constructs (S-20).
 pub fn refused(command: &str) -> Option<(&'static Rule, String)> {
-    find_command(command, &rule_broken)
+    match scan_command(command, &rule_broken) {
+        CommandScan::Clear => None,
+        CommandScan::Matched(hit) => Some(hit),
+        CommandScan::Opaque(why) => Some((&OPAQUE_RULE, why.to_string())),
+    }
+}
+
+/// Fail-closed verdict of inspecting a shell command line (S-20).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CommandScan<T> {
+    Clear,
+    Matched(T),
+    Opaque(&'static str),
 }
 
 /// The rule a program (by its base name) and its arguments break. git's
@@ -456,55 +476,237 @@ const WRAPPERS: &[&str] = &["env", "command", "exec", "sudo", "nohup", "time", "
 /// git's options that take a value of their own, before the subcommand.
 const GIT_VALUE_OPTIONS: &[&str] = &["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--super-prefix", "--config-env"];
 
-/// What `matches` says of the first command a shell would run from
-/// `command` that it says anything of. Each simple command is read through
-/// its wrappers (`env A=b`, `sudo`, `timeout 30`), `sh -c '…'` and `eval`;
-/// `matches` is given the program's base name and its arguments (git's from
-/// its subcommand on).
+/// Fail-closed shell scanner used by `orchestration::guard::refused`,
+/// `bots::access::unsigned_post`, and `bots::access::own_settings` (S-20).
+///
+/// Returns `CommandScan::Opaque` rather than `Clear` when encountering:
+/// - shell nesting `depth > 4`
+/// - unterminated quotes / backticks
+/// - heredocs (`<<`) or here-strings (`<<<`) or process substitutions (`<(`/ `>(`)
+/// - uninspectable shell invocations (e.g., `sh -s`, `sh` reading stdin, `sh -c` with no script)
+/// - dynamic command names or dynamic subcommands (`$cmd`, `${cmd}`, `$(...)`, backticks)
+///
+/// Properly parses combined flags and `--` on shell `-c` (`sh -xc '...'`, `sh -c -- '...'`).
+pub(crate) fn scan_command<T>(command: &str, matches: &dyn Fn(&str, &[&str]) -> Option<T>) -> CommandScan<T> {
+    scan_at(command, 0, matches)
+}
+
+/// Compatibility wrapper returning `Some` only on an explicit match; security
+/// gates should prefer [`scan_command`] so opaque constructs fail closed.
+#[allow(dead_code)]
 pub(crate) fn find_command<T>(command: &str, matches: &dyn Fn(&str, &[&str]) -> Option<T>) -> Option<T> {
-    find_at(command, 0, matches)
-}
-
-fn find_at<T>(command: &str, depth: usize, matches: &dyn Fn(&str, &[&str]) -> Option<T>) -> Option<T> {
-    // A command nested this deep is not one a person or an agent writes.
-    if depth > 4 {
-        return None;
+    match scan_command(command, matches) {
+        CommandScan::Matched(value) => Some(value),
+        CommandScan::Clear | CommandScan::Opaque(_) => None,
     }
-    simple_commands(command).iter().find_map(|words| find_in_words(words, depth, matches))
 }
 
-/// What `matches` says of one simple command, as its words.
-fn find_in_words<T>(mut words: &[String], depth: usize, matches: &dyn Fn(&str, &[&str]) -> Option<T>) -> Option<T> {
+fn scan_at<T>(command: &str, depth: usize, matches: &dyn Fn(&str, &[&str]) -> Option<T>) -> CommandScan<T> {
+    if depth > 4 {
+        return CommandScan::Opaque("shell nesting exceeds maximum inspectable depth");
+    }
+    let parsed = match parse_simple_commands(command) {
+        Ok(commands) => commands,
+        Err(why) => return CommandScan::Opaque(why),
+    };
+    let mut opaque: Option<&'static str> = None;
+    for words in &parsed {
+        match scan_in_words(words, depth, matches) {
+            CommandScan::Matched(found) => return CommandScan::Matched(found),
+            CommandScan::Opaque(why) => {
+                opaque.get_or_insert(why);
+            }
+            CommandScan::Clear => {}
+        }
+    }
+    match opaque {
+        Some(why) => CommandScan::Opaque(why),
+        None => CommandScan::Clear,
+    }
+}
+
+/// One parsed shell word with whether it contained unescaped dynamic expansion
+/// (`$var`, `${var}`, `$(...)`, backticks) outside single quotes.
+#[derive(Debug, Clone)]
+struct Word {
+    text: String,
+    dynamic: bool,
+}
+
+/// Inspect one simple command as its parsed words.
+fn scan_in_words<T>(mut words: &[Word], depth: usize, matches: &dyn Fn(&str, &[&str]) -> Option<T>) -> CommandScan<T> {
     // `A=b git push`.
-    while words.first().is_some_and(|word| is_assignment(word)) {
+    while words.first().is_some_and(|word| is_assignment(&word.text)) {
         words = &words[1..];
     }
-    let (program, args) = words.split_first()?;
-    let program = base(program);
-    if WRAPPERS.contains(&program) {
-        // `env A=b git push`, `sudo -u root git merge x`, `timeout -s KILL 30 npm publish`: which
-        // of a wrapper's words are its own options, and which of those take a value, differs by
-        // wrapper and by system. So every word after it that names a command a rule is about is
-        // read as the start of that command. `sudo echo git push` is refused too: the price of
-        // not guessing. One pass over the words: a wrapper inside a wrapper starts no pass of
-        // its own, since this one reads what follows it too.
-        return (0..args.len()).find_map(|at| find_in_command(&args[at..], depth, matches));
+    let Some((program, args)) = words.split_first() else { return CommandScan::Clear };
+    if program.dynamic || contains_dynamic_syntax(&program.text) {
+        return CommandScan::Opaque("dynamic command name cannot be safely inspected");
     }
-    find_in_command(words, depth, matches)
+    let base_prog = base(&program.text);
+    if WRAPPERS.contains(&base_prog) {
+        // `xargs` feeds extra arguments from stdin to its target command; if the
+        // target is a shell, `eval`, `git`, `gh`, or `terminalx`/`tnx`, the
+        // subcommand could arrive via stdin and bypass static inspection.
+        if base_prog == "xargs" {
+            for word in args {
+                if word.dynamic || contains_dynamic_syntax(&word.text) {
+                    return CommandScan::Opaque("dynamic command under xargs cannot be safely inspected");
+                }
+            }
+        }
+        let mut opaque: Option<&'static str> = None;
+        for at in 0..args.len() {
+            match scan_in_command(&args[at..], depth, matches) {
+                CommandScan::Matched(found) => return CommandScan::Matched(found),
+                CommandScan::Opaque(why) => {
+                opaque.get_or_insert(why);
+            }
+                CommandScan::Clear => {}
+            }
+        }
+        return match opaque {
+            Some(why) => CommandScan::Opaque(why),
+            None => CommandScan::Clear,
+        };
+    }
+    scan_in_command(words, depth, matches)
 }
 
-/// What `matches` says of a program and its arguments: a shell or `eval` by what it is given
-/// to run, any other program by itself.
-fn find_in_command<T>(words: &[String], depth: usize, matches: &dyn Fn(&str, &[&str]) -> Option<T>) -> Option<T> {
-    let (program, args) = words.split_first()?;
-    let program = base(program);
-    if SHELLS.contains(&program) || program == "eval" {
-        // `sh -c 'git push'`, `bash -lc "…"`, `eval "git push"`.
-        let script = if program == "eval" { Some(args.join(" ")) } else { args.iter().position(|arg| arg.starts_with('-') && !arg.starts_with("--") && arg.contains('c')).and_then(|at| args.get(at + 1)).cloned() };
-        return script.and_then(|script| find_at(&script, depth + 1, matches));
+/// Extract the inline script argument from a POSIX/fish shell invocation,
+/// handling combined short flags (`-xc`, `-lc`, `-euxc`), `-o <opt>`, and `--`
+/// (`sh -c -- 'git push'`, `sh -xc -- 'git push'`).
+enum ShellScript<'a> {
+    Inline(&'a Word),
+    Opaque(&'static str),
+}
+
+fn extract_shell_script<'a>(args: &'a [Word]) -> ShellScript<'a> {
+    let mut saw_c = false;
+    let mut at = 0;
+    while let Some(arg) = args.get(at) {
+        let text = arg.text.as_str();
+        if text == "--" {
+            at += 1;
+            break;
+        }
+        if text == "-" {
+            at += 1;
+            break;
+        }
+        if text == "-o" || text == "+o" {
+            // `-o errexit` takes an option name as the next word.
+            at += 2;
+            continue;
+        }
+        if text == "-s" || text == "--stdin" {
+            return ShellScript::Opaque("shell reads commands from stdin");
+        }
+        if text.starts_with("--") {
+            if text == "--command" {
+                saw_c = true;
+                at += 1;
+                break;
+            }
+            if text.starts_with("--command=") {
+                return ShellScript::Opaque("inline --command= shell flag cannot be split safely");
+            }
+            at += 1;
+            continue;
+        }
+        if text.starts_with('-') || text.starts_with('+') {
+            let flags = &text[1..];
+            if text.starts_with('-') && flags.contains('s') {
+                return ShellScript::Opaque("shell reads commands from stdin");
+            }
+            if text.starts_with('-') && flags.contains('c') {
+                saw_c = true;
+                // Keep scanning subsequent option flags and optional `--` before
+                // the command_string (e.g., `sh -xc -- 'git push'` or `sh -c -x '...'`).
+            }
+            at += 1;
+            continue;
+        }
+        break;
     }
-    let args: Vec<&str> = if program == "git" { git_arguments(args) } else { args.iter().map(String::as_str).collect() };
-    matches(program, &args)
+    if saw_c {
+        match args.get(at) {
+            Some(script) => {
+                if script.dynamic {
+                    ShellScript::Opaque("shell -c script contains dynamic expansion")
+                } else {
+                    ShellScript::Inline(script)
+                }
+            }
+            None => ShellScript::Opaque("shell -c missing inline command string"),
+        }
+    } else {
+        // Invoking `sh`, `bash`, `sh script.sh`, or `echo ... | sh` executes
+        // commands from stdin or a script file that static inspection cannot see.
+        ShellScript::Opaque("shell invocation executes uninspectable stdin or script")
+    }
+}
+
+/// Inspect a program and its arguments: a shell or `eval` by what it runs,
+/// any other program by itself.
+fn scan_in_command<T>(words: &[Word], depth: usize, matches: &dyn Fn(&str, &[&str]) -> Option<T>) -> CommandScan<T> {
+    let Some((program, args)) = words.split_first() else { return CommandScan::Clear };
+    if program.dynamic || contains_dynamic_syntax(&program.text) {
+        return CommandScan::Opaque("dynamic command name cannot be safely inspected");
+    }
+    let base_prog = base(&program.text);
+    if base_prog == "eval" {
+        if args.is_empty() || args.iter().any(|w| w.dynamic) {
+            return CommandScan::Opaque("eval with dynamic arguments cannot be safely inspected");
+        }
+        let script = args.iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join(" ");
+        return scan_at(&script, depth + 1, matches);
+    }
+    if SHELLS.contains(&base_prog) {
+        return match extract_shell_script(args) {
+            ShellScript::Inline(script) => scan_at(&script.text, depth + 1, matches),
+            ShellScript::Opaque(why) => CommandScan::Opaque(why),
+        };
+    }
+    // Check for dynamic subcommand on guarded CLI programs (`git $sub`, `gh $sub`, `terminalx $sub`).
+    if matches!(base_prog, "git" | "gh" | "terminalx" | "tnx") {
+        let sub_words: Vec<&Word> = if base_prog == "git" {
+            git_word_arguments(args)
+        } else {
+            args.iter().filter(|w| !w.text.starts_with('-')).collect()
+        };
+        if sub_words.first().is_some_and(|w| w.dynamic) {
+            return CommandScan::Opaque("dynamic subcommand cannot be safely inspected");
+        }
+    }
+    let arg_texts: Vec<String> = args.iter().map(|w| w.text.clone()).collect();
+    let arg_refs: Vec<&str> = if base_prog == "git" {
+        git_arguments(&arg_texts)
+    } else {
+        arg_texts.iter().map(String::as_str).collect()
+    };
+    match matches(base_prog, &arg_refs) {
+        Some(found) => CommandScan::Matched(found),
+        None => CommandScan::Clear,
+    }
+}
+
+fn contains_dynamic_syntax(word: &str) -> bool {
+    word.contains("$(") || word.contains("${") || word.contains('`') || (word.starts_with('$') && word.len() > 1)
+}
+
+fn git_word_arguments(args: &[Word]) -> Vec<&Word> {
+    let mut at = 0;
+    while let Some(arg) = args.get(at) {
+        if GIT_VALUE_OPTIONS.contains(&arg.text.as_str()) {
+            at += 2;
+        } else if arg.text.starts_with('-') {
+            at += 1;
+        } else {
+            break;
+        }
+    }
+    args.get(at..).unwrap_or_default().iter().collect()
 }
 
 fn is_assignment(word: &str) -> bool {
@@ -534,29 +736,36 @@ fn git_arguments(args: &[String]) -> Vec<&str> {
 /// The words of `command` when it is one plain command, as a shell would
 /// run it: no list, pipe, substitution, redirection or expansion.
 pub(crate) fn single_command(command: &str) -> Option<Vec<String>> {
-    let mut commands = simple_commands(command);
+    let mut commands = parse_simple_commands(command).ok()?;
     if commands.len() != 1 || command.contains("$(") || command.contains('`') {
         return None;
     }
     let words = commands.pop()?;
-    words.iter().all(|word| !word.contains(['>', '<', '$'])).then_some(words)
+    if words.iter().any(|word| word.dynamic || word.text.contains(['>', '<', '$'])) {
+        return None;
+    }
+    Some(words.into_iter().map(|w| w.text).collect())
 }
 
-/// A command line as the simple commands a shell would run from it, each as
-/// its words with quotes removed. Text inside quotes stays one word, so a
-/// commit message that mentions `git push` is not a push; a command
-/// substitution inside double quotes or backticks is a command of its own.
-fn simple_commands(command: &str) -> Vec<Vec<String>> {
+/// Parse a command line into simple commands, failing closed (`Err`) on
+/// unparseable or opaque constructs: heredocs (`<<`), here-strings (`<<<`),
+/// process substitutions (`<(` / `>(`), and unterminated quotes/backticks (S-20).
+fn parse_simple_commands(command: &str) -> Result<Vec<Vec<Word>>, &'static str> {
     let mut commands = Vec::new();
-    let mut words: Vec<String> = Vec::new();
-    let mut word: Option<String> = None;
+    let mut words: Vec<Word> = Vec::new();
+    let mut word: Option<Word> = None;
     let mut chars = command.chars().peekable();
-    let end_word = |word: &mut Option<String>, words: &mut Vec<String>| {
+    let push_char = |word: &mut Option<Word>, c: char, dynamic: bool| {
+        let entry = word.get_or_insert_with(|| Word { text: String::new(), dynamic: false });
+        entry.text.push(c);
+        entry.dynamic |= dynamic;
+    };
+    let end_word = |word: &mut Option<Word>, words: &mut Vec<Word>| {
         if let Some(done) = word.take() {
             words.push(done);
         }
     };
-    let end_command = |word: &mut Option<String>, words: &mut Vec<String>, commands: &mut Vec<Vec<String>>| {
+    let end_command = |word: &mut Option<Word>, words: &mut Vec<Word>, commands: &mut Vec<Vec<Word>>| {
         if let Some(done) = word.take() {
             words.push(done);
         }
@@ -568,39 +777,123 @@ fn simple_commands(command: &str) -> Vec<Vec<String>> {
         match c {
             '\\' => {
                 if let Some(next) = chars.next().filter(|next| *next != '\n') {
-                    word.get_or_insert_with(String::new).push(next);
+                    push_char(&mut word, next, false);
                 }
             }
             '\'' => {
-                let quoted = word.get_or_insert_with(String::new);
+                let entry = word.get_or_insert_with(|| Word { text: String::new(), dynamic: false });
+                let mut closed = false;
                 for inner in chars.by_ref() {
                     if inner == '\'' {
+                        closed = true;
                         break;
                     }
-                    quoted.push(inner);
+                    entry.text.push(inner);
+                }
+                if !closed {
+                    return Err("unterminated single quote cannot be safely inspected");
                 }
             }
             '"' => {
                 let mut text = String::new();
+                let mut closed = false;
+                let mut has_unescaped_dollar = false;
+                let mut has_unescaped_backtick = false;
                 while let Some(inner) = chars.next() {
                     match inner {
-                        '"' => break,
-                        '\\' => text.extend(chars.next()),
+                        '"' => {
+                            closed = true;
+                            break;
+                        }
+                        '\\' => {
+                            if let Some(escaped) = chars.next() {
+                                text.push(escaped);
+                            }
+                        }
+                        '$' => {
+                            has_unescaped_dollar = true;
+                            text.push('$');
+                        }
+                        '`' => {
+                            has_unescaped_backtick = true;
+                            text.push('`');
+                        }
                         inner => text.push(inner),
                     }
                 }
+                if !closed {
+                    return Err("unterminated double quote cannot be safely inspected");
+                }
                 // `"$(git push)"` runs it: what is substituted is read as commands too.
-                commands.extend(substitutions(&text).iter().flat_map(|inner| simple_commands(inner)));
-                word.get_or_insert_with(String::new).push_str(&text);
+                if has_unescaped_dollar || has_unescaped_backtick {
+                    for inner in substitutions(&text)? {
+                        commands.extend(parse_simple_commands(&inner)?);
+                    }
+                }
+                let entry = word.get_or_insert_with(|| Word { text: String::new(), dynamic: false });
+                entry.text.push_str(&text);
+                if has_unescaped_dollar || has_unescaped_backtick {
+                    entry.dynamic = true;
+                }
             }
             '`' => {
-                let inner: String = chars.by_ref().take_while(|inner| *inner != '`').collect();
-                commands.extend(simple_commands(&inner));
-                word.get_or_insert_with(String::new);
+                let mut inner = String::new();
+                let mut closed = false;
+                for ch in chars.by_ref() {
+                    if ch == '`' {
+                        closed = true;
+                        break;
+                    }
+                    inner.push(ch);
+                }
+                if !closed {
+                    return Err("unterminated backtick substitution cannot be safely inspected");
+                }
+                commands.extend(parse_simple_commands(&inner)?);
+                let entry = word.get_or_insert_with(|| Word { text: String::new(), dynamic: false });
+                entry.dynamic = true;
             }
             '$' if chars.peek() == Some(&'(') => {
                 chars.next();
-                end_command(&mut word, &mut words, &mut commands);
+                // Unquoted command substitution `$(...)`: if it is part of the
+                // current word (e.g. `$(echo git)` in command position), mark
+                // the word dynamic AND parse the inner command separately.
+                let mut depth = 1usize;
+                let mut inner = String::new();
+                for ch in chars.by_ref() {
+                    match ch {
+                        '(' => {
+                            depth += 1;
+                            inner.push(ch);
+                        }
+                        ')' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                            inner.push(ch);
+                        }
+                        other => inner.push(other),
+                    }
+                }
+                if depth != 0 {
+                    return Err("unterminated command substitution cannot be safely inspected");
+                }
+                commands.extend(parse_simple_commands(&inner)?);
+                let entry = word.get_or_insert_with(|| Word { text: String::new(), dynamic: false });
+                entry.text.push_str("$(");
+                entry.text.push_str(&inner);
+                entry.text.push(')');
+                entry.dynamic = true;
+            }
+            '$' => {
+                push_char(&mut word, '$', true);
+            }
+            '<' if chars.peek() == Some(&'<') => {
+                return Err("heredoc or here-string cannot be safely inspected");
+            }
+            '<' | '>' if chars.peek() == Some(&'(') => {
+                return Err("process substitution cannot be safely inspected");
             }
             ';' | '\n' | '|' | '&' | '(' | ')' | '{' | '}' => end_command(&mut word, &mut words, &mut commands),
             '#' if word.is_none() => {
@@ -610,27 +903,27 @@ fn simple_commands(command: &str) -> Vec<Vec<String>> {
                 }
             }
             c if c.is_whitespace() => end_word(&mut word, &mut words),
-            c => word.get_or_insert_with(String::new).push(c),
+            c => push_char(&mut word, c, false),
         }
     }
     end_command(&mut word, &mut words, &mut commands);
     // `if`, `then`, `do` and the like introduce a command; they are not one.
     for words in &mut commands {
-        while words.first().is_some_and(|first| matches!(first.as_str(), "if" | "then" | "else" | "elif" | "do" | "while" | "until" | "!")) {
+        while words.first().is_some_and(|first| matches!(first.text.as_str(), "if" | "then" | "else" | "elif" | "do" | "while" | "until" | "!")) {
             words.remove(0);
         }
     }
     commands.retain(|words| !words.is_empty());
-    commands
+    Ok(commands)
 }
 
 /// The bodies of the `$(…)` and backtick substitutions in a double-quoted text.
-fn substitutions(text: &str) -> Vec<String> {
+fn substitutions(text: &str) -> Result<Vec<String>, &'static str> {
     let mut found = Vec::new();
     let mut rest = text;
     while let Some(at) = rest.find("$(") {
         let body = &rest[at + 2..];
-        let (mut depth, mut end) = (1, body.len());
+        let (mut depth, mut end) = (1, None);
         for (index, c) in body.char_indices() {
             match c {
                 '(' => depth += 1,
@@ -638,19 +931,26 @@ fn substitutions(text: &str) -> Vec<String> {
                 _ => {}
             }
             if depth == 0 {
-                end = index;
+                end = Some(index);
                 break;
             }
         }
+        let Some(end) = end else {
+            return Err("unterminated command substitution in double quotes");
+        };
         found.push(body[..end].to_string());
-        rest = &body[end..];
+        rest = &body[end + 1..];
+    }
+    let backticks = text.chars().filter(|&c| c == '`').count();
+    if backticks % 2 != 0 {
+        return Err("unterminated backtick substitution in double quotes");
     }
     let mut parts = text.split('`');
     parts.next();
     while let (Some(body), Some(_)) = (parts.next(), parts.next()) {
         found.push(body.to_string());
     }
-    found
+    Ok(found)
 }
 
 #[cfg(test)]
@@ -1104,5 +1404,52 @@ mod tests {
         let exclude = std::fs::read_to_string(git_dir.join("info/exclude")).unwrap();
         assert!(exclude.lines().any(|line| line == format!("/{}", super::CODEX_RULES_FILE)), "{exclude}");
         assert!(!dir.path().join("git dir").exists());
+    }
+
+    /// S-20: `find_command` / `scan_command` / `refused` must fail closed on
+    /// depth > 4, combined flags/`--` on shell `-c`, heredocs/here-strings,
+    /// stdin shells, dynamic command names/substitutions, and unterminated quotes.
+    #[test]
+    fn fail_closed_on_nested_flags_heredocs_and_dynamic_commands_s20() {
+        // Combined flags and `--` on shell `-c` must be parsed and caught as Push/Merge.
+        assert_eq!(limit_of("sh -xc 'git push'"), Some(Limit::Push));
+        assert_eq!(limit_of("sh -c -- 'git push'"), Some(Limit::Push));
+        assert_eq!(limit_of("bash -euxc -- 'git merge main'"), Some(Limit::Merge));
+        assert_eq!(limit_of("sh -o errexit -xc -- 'gh pr merge 1'"), Some(Limit::Merge));
+        // Legitimate safe `-xc` / `-c --` commands remain allowed.
+        assert_eq!(limit_of("sh -xc 'cargo test'"), None);
+        assert_eq!(limit_of("sh -c -- 'git status'"), None);
+
+        // Fail-closed (Opaque) on depth > 4, heredocs, here-strings, stdin shells, dynamic commands, unclosed quotes.
+        for opaque in [
+            "sh -c \"sh -c 'sh -c \\\"sh -c \\\\\\\"sh -c \\\\\\\\\\\\\\\"sh -c echo\\\\\\\\\\\\\\\"\\\\\\\"\\\"'\"",
+            "sh -c 'sh -c \"sh -c '\''sh -c \"sh -c '\''sh -c echo'\''\"'\''\"'",
+            "sh <<EOF\ngit push\nEOF",
+            "bash <<'EOF'\ngit push\nEOF",
+            "sh <<< 'git push'",
+            "echo 'git push' | sh",
+            "bash -s",
+            "sh script.sh",
+            "CMD=git; $CMD push",
+            "${CMD} push",
+            "$(echo git) push",
+            "`echo git` push",
+            "git $SUB",
+            "gh $SUB",
+            "eval \"$CMD\"",
+            "sh -c \"$SCRIPT\"",
+            "git push 'unterminated",
+            "diff <(git status) <(git diff)",
+        ] {
+            assert!(refused(opaque).is_some(), "expected fail-closed refusal for: {opaque}");
+        }
+        // Depth 5 nested eval must fail closed as Opaque (not None/allow!).
+        let deep = "eval 'eval \"eval \\\"eval \\\\\\\"eval \\\\\\\\\\\\\\\"echo hi\\\\\\\\\\\\\\\"\\\\\\\"\\\"\"'";
+        assert_eq!(limit_of(deep), Some(Limit::Opaque), "depth > 4 must fail closed");
+
+        // Ordinary variable expansion in non-command arguments remains allowed.
+        assert_eq!(limit_of("echo \"$HOME\""), None);
+        assert_eq!(limit_of("cargo test \"$TEST_NAME\""), None);
+        assert_eq!(limit_of("git commit -m \"fix $issue\""), None);
     }
 }

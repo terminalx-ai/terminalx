@@ -83,7 +83,14 @@ fn probe(program: &Path, cwd: &Path, extra: &[&str]) -> Result<Value> {
     let mut command = Command::new(program);
     command
         .args(["-p", "--output-format", "stream-json", "--input-format", "stream-json", "--verbose"])
-        .args(extra)
+        .args(extra);
+    // Never load untrusted repository `.claude/settings.json` or `.mcp.json`
+    // during background probes unless the caller explicitly specified sources.
+    let sets_sources = extra.iter().any(|arg| *arg == "--setting-sources" || arg.starts_with("--setting-sources="));
+    if !sets_sources {
+        command.args(["--setting-sources", "user"]);
+    }
+    command
         .current_dir(cwd)
         .env("PATH", crate::binpath::login_path())
         .stdin(Stdio::piped())
@@ -223,5 +230,32 @@ mod tests {
         assert_eq!(v["type"], "control_request");
         assert_eq!(v["request_id"], "r1");
         assert_eq!(v["request"]["subtype"], "initialize");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn background_probe_enforces_user_setting_sources_for_untrusted_repos() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let cli = dir.path().join("claude");
+        let args_log = dir.path().join("args.txt");
+        let reply = r#"{"type":"control_response","response":{"subtype":"success","request_id":"raccoon-init","response":{"commands":[]}}}"#;
+        std::fs::write(
+            &cli,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nread line\nprintf '%s\\n' '{reply}'\nexec cat\n",
+                args_log.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let _ = probe(&cli, dir.path(), &[]).unwrap();
+        let recorded = std::fs::read_to_string(&args_log).unwrap();
+        let argv: Vec<&str> = recorded.lines().collect();
+        assert!(
+            argv.windows(2).any(|pair| pair == ["--setting-sources", "user"]),
+            "background probe must pass --setting-sources user: {argv:?}"
+        );
     }
 }

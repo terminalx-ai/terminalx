@@ -317,3 +317,38 @@ fn run_after_setup_starts_once_per_workspace() {
     assert_eq!(std::fs::read_to_string(cwd.join("runs")).unwrap(), "w", "a second call starts nothing, even for an action that may run several at once");
     assert_eq!(rig.states(&entry.id).len(), 1);
 }
+
+#[test]
+fn windows_sh_command_line_preserves_env_quotes_and_exit_code() {
+    #[cfg(unix)]
+    let sh = std::path::PathBuf::from("/bin/sh");
+    #[cfg(windows)]
+    let sh = crate::binpath::posix_sh().expect("Git for Windows sh");
+    let env = vec![
+        ("TERMINALX_WORKSPACE_PATH".into(), r"C:\Users\ada\work tree 'env' $literal".into()),
+        ("TERMINALX_ACTION_ID".into(), "dev".into()),
+        ("TERMINALX_EMPTY".into(), String::new()),
+    ];
+    let cmd = "printf 'ws=%s|id=%s|empty=%s|argc=%s' \"$TERMINALX_WORKSPACE_PATH\" \"$TERMINALX_ACTION_ID\" \"$TERMINALX_EMPTY\" \"$#\" && exit 7";
+    let line = windows_sh_command_line(&sh, cmd, &env);
+    #[cfg(windows)]
+    {
+        let argv = crate::pty::direct_program(&line).expect("windows_sh_command_line must launch via direct_program");
+        assert_eq!(argv[0], sh.to_string_lossy());
+        let output = std::process::Command::new(&argv[0]).args(&argv[1..]).output().unwrap();
+        assert_eq!(output.status.code(), Some(7));
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            r"ws=C:\Users\ada\work tree 'env' $literal|id=dev|empty=|argc=0"
+        );
+    }
+    #[cfg(unix)]
+    {
+        let output = std::process::Command::new(sh).args(["-c", &line]).output().unwrap();
+        assert_eq!(output.status.code(), Some(7));
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            r"ws=C:\Users\ada\work tree 'env' $literal|id=dev|empty=|argc=0"
+        );
+    }
+}

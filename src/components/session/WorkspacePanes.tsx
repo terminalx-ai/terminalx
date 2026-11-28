@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { lazy, memo, Suspense, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { joinKeycaps } from "@/lib/shortcuts";
 import { cn } from "@/lib/cn";
 import { useShortcut } from "@/lib/hotkeys";
@@ -16,15 +16,16 @@ import { localRemovableWorkspace } from "@/lib/workspaceRemoval";
 import type { SelectedSessionTab } from "@/lib/terminal";
 import type { SessionEntry } from "@/types/session";
 import type { CloudSessionModel } from "@/lib/cloudSession";
-import { BrowserView } from "@/components/browser/BrowserView";
-import { CloudTerminalPane } from "@/components/cloud/CloudTerminalPane";
-import { ReviewTab } from "@/components/editor/EditorSplit";
 import { EnvironmentNotice } from "@/components/terminal/EnvironmentNotice";
 import { TerminalView } from "@/components/terminal/TerminalView";
+import { CloudTerminalPane } from "@/components/cloud/CloudTerminalPane";
 import { EmptySession } from "./EmptySession";
 import { TabView } from "./TabView";
 import { TabActions } from "./TabStrip";
 import { WorkspaceTabStrip, stripTabId } from "./WorkspaceTabStrip";
+
+const BrowserView = lazy(() => import("@/components/browser/BrowserView").then((m) => ({ default: m.BrowserView })));
+const ReviewTab = lazy(() => import("@/components/editor/EditorSplit").then((m) => ({ default: m.ReviewTab })));
 
 /** Stable, keyed tab bodies share a grid: moving a tab never remounts its chat,
  * composer or xterm. Both visible terminals observe their own changing boxes. */
@@ -78,7 +79,17 @@ export interface RemotePaneParts {
   empty: ReactNode;
 }
 
-export function WorkspacePanes({ session, selected, strip, layout, selectionRequested, continuationOpen, remote }: {
+/** Defer mounting a hidden tab's body until it becomes active for the first time, then keep it alive across tab switches. */
+export function LazyTabBody({ active, children }: { active: boolean; children: ReactNode }) {
+  const [everActive, setEverActive] = useState(active);
+  useEffect(() => {
+    if (active) setEverActive(true);
+  }, [active]);
+  if (!everActive && !active) return null;
+  return <>{children}</>;
+}
+
+export const WorkspacePanes = memo(function WorkspacePanes({ session, selected, strip, layout, selectionRequested, continuationOpen, remote }: {
   session: SessionEntry;
   selected: SelectedSessionTab | null;
   strip: boolean;
@@ -190,18 +201,22 @@ export function WorkspacePanes({ session, selected, strip, layout, selectionRequ
           style={{ gridColumn: index * 2 + 1, gridRow: showStrip ? 2 : 1 }}
           onPointerDownCapture={() => { if (active) focusPane(pane.id); }} onFocusCapture={() => { if (active) focusPane(pane.id); }}>
           {tab.kind === "agent" && remote ? (
-            <TabView session={owner} tab={tab.tab} active={active} focused={active && pane.id === focused.id} continuationOpen={continuationOpen}
-              backend={remote.cloud.backend} gitSource={remote.cloud.gitSource} workspace={remote.cloud.removableWorkspace} />
-          ) : tab.kind === "agent" ? <>
-            <EnvironmentNotice id={tab.tab.pane ?? `tab:${tab.id}`} active={active && tabViewIn(views.views, tab.tab) !== "terminal"} />
-            <TabView session={owner} tab={tab.tab} active={active} focused={active && pane.id === focused.id} continuationOpen={continuationOpen} workspace={localRemovableWorkspace(owner)} />
-          </> : tab.kind === "terminal" && remote ? (
+            <LazyTabBody active={active}>
+              <TabView session={owner} tab={tab.tab} active={active} focused={active && pane.id === focused.id} continuationOpen={continuationOpen}
+                backend={remote.cloud.backend} gitSource={remote.cloud.gitSource} workspace={remote.cloud.removableWorkspace} />
+            </LazyTabBody>
+          ) : tab.kind === "agent" ? (
+            <LazyTabBody active={active}>
+              <EnvironmentNotice id={tab.tab.pane ?? `tab:${tab.id}`} active={active && tabViewIn(views.views, tab.tab) !== "terminal"} />
+              <TabView session={owner} tab={tab.tab} active={active} focused={active && pane.id === focused.id} continuationOpen={continuationOpen} workspace={localRemovableWorkspace(owner)} />
+            </LazyTabBody>
+          ) : tab.kind === "terminal" && remote ? (
             <RemoteTerminal cloud={remote.cloud} id={tab.id} active={active} />
           ) : tab.kind === "terminal" ? <>
             <TerminalView id={tab.id} visible={active} focused={active && pane.id === focused.id} moveToDock />
             {tab.pane.exited && <div className="absolute bottom-2 left-3 rounded-md bg-popover px-2 py-1 text-[11px] text-muted-foreground hairline">Process exited{tab.pane.exitCode != null ? ` (${tab.pane.exitCode})` : ""}.</div>}
-          </> : tab.kind === "review" ? <ReviewTab entry={peerEditor(tab)} visible={active} focused={active && pane.id === focused.id} embedded />
-          : <BrowserView session={session} page={tab.page} active={active} />}
+          </> : tab.kind === "review" ? <Suspense fallback={null}><ReviewTab entry={peerEditor(tab)} visible={active} focused={active && pane.id === focused.id} embedded /></Suspense>
+          : active ? <Suspense fallback={null}><BrowserView session={session} page={tab.page} active={active} /></Suspense> : null}
         </div>;
       })}
       {!selected && !split && <div className="flex min-h-0 flex-col" style={{ gridColumn: 1, gridRow: showStrip ? 2 : 1 }}>{remote ? remote.empty : <EmptySession session={session} />}</div>}
@@ -209,7 +224,7 @@ export function WorkspacePanes({ session, selected, strip, layout, selectionRequ
         style={dragTarget === "right" ? { right: 0, width: split ? `${(1 - ratio) * 100}%` : "50%" } : { left: 0, width: `${ratio * 100}%` }}>{split ? "Move to pane" : "Split right"}</div>}
     </div>
   );
-}
+});
 
 /** A runtime's shell in a pane: attached while it is on screen, as the cloud view always has (a hidden one streams nothing). */
 function RemoteTerminal({ cloud, id, active }: { cloud: CloudSessionModel; id: string; active: boolean }) {

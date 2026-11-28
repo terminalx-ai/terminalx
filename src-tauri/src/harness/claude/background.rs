@@ -54,6 +54,12 @@ const CRON_LIFETIME: Duration = Duration::days(7);
 /// Statuses a task notification ends its task with. A Monitor's events in
 /// between carry none of these.
 const FINAL: &[&str] = &["completed", "failed", "killed", "stopped", "error", "errored", "cancelled", "canceled", "timeout", "timed_out", "expired"];
+/// Upper bound on pending automation notifications kept in memory per tab.
+const MAX_AUTOMATION_NOTIFICATIONS: usize = 64;
+
+fn default_track_automation() -> bool {
+    true
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct Task {
@@ -106,19 +112,41 @@ fn same_notification(prompt: &str, rendered: &str) -> bool {
 
 /// What one CLI started and has not heard back from, by the tool use that
 /// started each.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Ledger {
     tasks: BTreeMap<String, Task>,
     crons: BTreeMap<String, Cron>,
     stopping: BTreeMap<String, Stopping>,
     /// When the wakeup it scheduled last is due.
     wakeup: Option<DateTime<Utc>>,
+    /// Whether this tab tracks automation notifications. Interactive tabs leave
+    /// this off so completed background tasks never accumulate unboundedly.
+    #[serde(default = "default_track_automation")]
+    track_automation: bool,
     /// A task ended, but the agent has yet to finish a turn that took its notification.
     automation_notifications: Vec<Notification>,
     last_assistant_id: Option<String>,
 }
 
+impl Default for Ledger {
+    fn default() -> Self {
+        Self::for_tab(true)
+    }
+}
+
 impl Ledger {
+    pub fn for_tab(track_automation: bool) -> Self {
+        Self {
+            tasks: BTreeMap::new(),
+            crons: BTreeMap::new(),
+            stopping: BTreeMap::new(),
+            wakeup: None,
+            track_automation,
+            automation_notifications: Vec::new(),
+            last_assistant_id: None,
+        }
+    }
+
     /// Take in one transcript record.
     #[cfg(test)]
     pub fn read(&mut self, line: &str) {
@@ -128,6 +156,11 @@ impl Ledger {
     /// Take in one transcript record, unless its uuid is in `skip`.
     pub fn read_skipping(&mut self, line: &str, skip: &HashSet<String>) {
         let Ok(record) = serde_json::from_str::<Value>(line) else { return };
+        self.read_value_skipping(&record, skip);
+    }
+
+    /// Take in one already-parsed transcript record, unless its uuid is in `skip`.
+    pub fn read_value_skipping(&mut self, record: &Value, skip: &HashSet<String>) {
         if record["isSidechain"].as_bool() == Some(true) || record["uuid"].as_str().is_some_and(|uuid| skip.contains(uuid)) {
             return;
         }
@@ -136,13 +169,21 @@ impl Ledger {
         match record["type"].as_str() {
             Some("assistant") => {
                 let id = record["message"]["id"].as_str();
-                for notice in &mut self.automation_notifications {
-                    let text = text_of(&record["message"]["content"]);
-                    if id.is_some() && notice.previous_message.as_deref().is_some_and(|old| Some(old) != id) && !text.is_empty() {
-                        notice.response = Some((at, text));
+                if let Some(id) = id {
+                    if !self.automation_notifications.is_empty()
+                        && self.automation_notifications.iter().any(|notice| notice.previous_message.as_deref().is_some_and(|old| old != id))
+                    {
+                        let text = text_of(&record["message"]["content"]);
+                        if !text.is_empty() {
+                            for notice in &mut self.automation_notifications {
+                                if notice.previous_message.as_deref().is_some_and(|old| old != id) {
+                                    notice.response = Some((at, text.clone()));
+                                }
+                            }
+                        }
                     }
+                    self.last_assistant_id = Some(id.to_string());
                 }
-                if let Some(id) = id { self.last_assistant_id = Some(id.to_string()); }
                 for part in parts.iter().filter(|part| part["type"] == "tool_use") {
                     self.tool_use(part, at);
                 }
@@ -178,6 +219,13 @@ impl Ledger {
     }
 
     fn note_notification(&mut self, at: DateTime<Utc>, content: &str, delivered_in_turn: bool) {
+        if !self.track_automation {
+            return;
+        }
+        if self.automation_notifications.len() >= MAX_AUTOMATION_NOTIFICATIONS {
+            let drop_count = self.automation_notifications.len() - MAX_AUTOMATION_NOTIFICATIONS + 1;
+            self.automation_notifications.drain(..drop_count);
+        }
         self.automation_notifications.push(Notification { at, task_id: tagged(content, "task-id").map(str::to_owned), tool_use_id: tagged(content, "tool-use-id").map(str::to_owned), previous_message: self.last_assistant_id.clone(), delivered_at: delivered_in_turn.then_some(at), response: None });
     }
 
@@ -314,8 +362,16 @@ fn tagged<'a>(block: &'a str, tag: &str) -> Option<&'a str> {
     Some(block[start..end].trim())
 }
 
+#[cfg(test)]
+thread_local! {
+    static TEXT_OF_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static WATCH_DISK_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 /// A message's text: a string, or its text parts joined.
 fn text_of(content: &Value) -> String {
+    #[cfg(test)]
+    TEXT_OF_CALLS.with(|count| count.set(count.get() + 1));
     match content {
         Value::String(text) => text.clone(),
         Value::Array(parts) => parts.iter().filter_map(|part| part["text"].as_str().or_else(|| part.as_str())).collect::<Vec<_>>().join("\n"),
@@ -353,9 +409,50 @@ pub(crate) struct WatchRecord {
 impl Watch {
     /// Keep up with `tail` from where it stands: where its CLI was started.
     pub fn new(tail: Arc<Tail>) -> Self {
+        Self::for_tab(tail, true)
+    }
+
+    /// Keep up with `tail`, tracking automation notifications only when
+    /// `track_automation` is set.
+    pub fn for_tab(tail: Arc<Tail>, track_automation: bool) -> Self {
         let aimed = tail.reading();
         let skip = tail.carried();
-        Self { offset: aimed.1, aimed, tail, partial: Vec::new(), skip, ledger: Ledger::default() }
+        Self { offset: aimed.1, aimed, tail, partial: Vec::new(), skip, ledger: Ledger::for_tab(track_automation) }
+    }
+
+    /// Wire `watch` onto `tail` so parsed JSON records from `Tail::drain_records`
+    /// feed the ledger directly without re-reading or re-parsing the transcript.
+    pub(crate) fn attach_to_tail(watch: &Arc<std::sync::Mutex<Self>>, tail: &Arc<Tail>) {
+        let weak = Arc::downgrade(watch);
+        tail.set_observer(Arc::new(move |path, began, skip, lines| {
+            if let Some(watch) = weak.upgrade() {
+                if let Ok(mut guard) = watch.lock() {
+                    guard.ingest_from_tail(path, began, skip, lines);
+                }
+            }
+        }));
+    }
+
+    pub fn enable_automation_tracking(&mut self) {
+        self.ledger.track_automation = true;
+    }
+
+    pub fn ingest_from_tail(&mut self, path: &std::path::Path, began: u64, skip: &HashSet<String>, lines: &[crate::harness::tui::ObservedLine]) {
+        if self.aimed.0 != path || self.aimed.1 != began || !self.partial.is_empty() {
+            return;
+        }
+        for (line_start, line_end, record) in lines {
+            if *line_end <= self.offset {
+                continue;
+            }
+            if *line_start != self.offset {
+                break;
+            }
+            if let Some(value) = record {
+                self.ledger.read_value_skipping(value, skip);
+            }
+            self.offset = *line_end;
+        }
     }
 
     #[cfg_attr(not(unix), allow(dead_code))]
@@ -379,6 +476,7 @@ impl Watch {
     }
 
     pub fn automation_outstanding(&mut self, now: DateTime<Utc>) -> Option<String> {
+        self.ledger.track_automation = true;
         if let Err(error) = self.catch_up() {
             log::debug!("read {} for automation work: {error}", self.aimed.0.display());
             return Some("background state could not be read".into());
@@ -390,6 +488,9 @@ impl Watch {
     /// notification, proves that the queued report was taken. The reply must
     /// belong to this completed turn, not a transcript written later.
     pub fn automation_turn_completed(&mut self, started: Option<DateTime<Utc>>, finished: DateTime<Utc>, final_message: Option<&str>) {
+        if !self.ledger.track_automation {
+            return;
+        }
         if self.catch_up().is_err() { return; }
         self.ledger.automation_notifications.retain(|notice| {
             !(notice.delivered_at.is_some_and(|delivered| delivered + chrono::TimeDelta::milliseconds(1) < finished) && (started.is_some_and(|start| notice.at < start)
@@ -427,15 +528,24 @@ impl Watch {
         if file.metadata()?.len() <= self.offset {
             return Ok(());
         }
+        #[cfg(test)]
+        WATCH_DISK_READS.with(|count| count.set(count.get() + 1));
         file.seek(SeekFrom::Start(self.offset))?;
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes)?;
         self.offset += bytes.len() as u64;
         self.partial.extend_from_slice(&bytes);
-        let Some(end) = self.partial.iter().rposition(|byte| *byte == b'\n') else { return Ok(()) };
-        let complete: Vec<u8> = self.partial.drain(..=end).collect();
-        for line in complete.split(|byte| *byte == b'\n').filter(|line| !line.is_empty()) {
-            self.ledger.read_skipping(&String::from_utf8_lossy(line), &self.skip);
+        let mut start = 0;
+        while let Some(rel) = self.partial[start..].iter().position(|&byte| byte == b'\n') {
+            let end = start + rel;
+            let line = &self.partial[start..end];
+            start = end + 1;
+            if !line.is_empty() {
+                self.ledger.read_skipping(&String::from_utf8_lossy(line), &self.skip);
+            }
+        }
+        if start > 0 {
+            self.partial.drain(..start);
         }
         Ok(())
     }
@@ -811,5 +921,52 @@ mod tests {
         assert_eq!(watch.outstanding(at(1)), None);
         append(&path, &[uuid(background("toolu_own"), "f-1")]);
         assert_eq!(watch.outstanding(at(1)).as_deref(), Some("a background command it has not heard back from"));
+    }
+
+    #[test]
+    fn interactive_tab_skips_automation_notifications_and_automation_tab_caps_and_hoists_text() {
+        // Interactive tab (`track_automation = false`): never retains notifications.
+        let mut interactive = Ledger::for_tab(false);
+        for i in 0..10 {
+            let tool = format!("t_{i}");
+            let task = format!("b_{i}");
+            interactive.read(&tool_use(&tool, "Bash", serde_json::json!({ "run_in_background": true })));
+            interactive.read(&tool_result(&tool, "running", serde_json::json!({ "backgroundTaskId": task }), false));
+            interactive.read(&queued(&notification(&task, &tool, "completed")));
+        }
+        assert!(interactive.automation_notifications.is_empty());
+
+        // Automation tab (`track_automation = true`): capped at MAX_AUTOMATION_NOTIFICATIONS,
+        // and assistant message `text_of` is extracted at most once across all notifications.
+        let mut auto = Ledger::for_tab(true);
+        auto.read(&serde_json::json!({ "type": "assistant", "timestamp": AT, "message": { "id": "msg_0", "content": [{ "type": "text", "text": "start" }] } }).to_string());
+        for i in 0..(MAX_AUTOMATION_NOTIFICATIONS + 20) {
+            let tool = format!("t_{i}");
+            let task = format!("b_{i}");
+            auto.read(&tool_use(&tool, "Bash", serde_json::json!({ "run_in_background": true })));
+            auto.read(&tool_result(&tool, "running", serde_json::json!({ "backgroundTaskId": task }), false));
+            auto.read(&queued(&notification(&task, &tool, "completed")));
+        }
+        assert_eq!(auto.automation_notifications.len(), MAX_AUTOMATION_NOTIFICATIONS);
+        TEXT_OF_CALLS.with(|c| c.set(0));
+        auto.read(&serde_json::json!({ "type": "assistant", "timestamp": AT, "message": { "id": "msg_1", "content": [{ "type": "text", "text": "reply" }] } }).to_string());
+        assert_eq!(TEXT_OF_CALLS.with(|c| c.get()), 1, "text_of must be hoisted outside the notification loop");
+    }
+
+    #[test]
+    fn tail_observer_feeds_watch_without_duplicate_disk_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("conversation.jsonl");
+        let t = tail(&path, HashSet::new());
+        let watch = Arc::new(std::sync::Mutex::new(Watch::for_tab(t.clone(), false)));
+        Watch::attach_to_tail(&watch, &t);
+        append(&path, &[
+            tool_use("toolu_ci", "Bash", serde_json::json!({ "run_in_background": true })),
+            tool_result("toolu_ci", "running", serde_json::json!({ "backgroundTaskId": "b1" }), false),
+        ]);
+        let _ = t.drain_records();
+        WATCH_DISK_READS.with(|c| c.set(0));
+        assert_eq!(watch.lock().unwrap().outstanding(at(1)).as_deref(), Some("a background command it has not heard back from"));
+        assert_eq!(WATCH_DISK_READS.with(|c| c.get()), 0, "Watch should reuse parsed values from Tail without re-reading disk");
     }
 }

@@ -257,8 +257,15 @@ impl Host {
         for name in spec.unset {
             cmd.env_remove(name);
         }
+        let opencode_auth = crate::harness::opencode::bind_spawn_auth(spec.program, spec.args);
+        let opencode_port = opencode_auth.as_ref().map(|(port, _)| *port);
         for (k, v) in spec.env {
             cmd.env(k, v);
+        }
+        if let Some((_, auth_env)) = &opencode_auth {
+            for (k, v) in auth_env {
+                cmd.env(k, v);
+            }
         }
         #[cfg(unix)]
         {
@@ -267,6 +274,9 @@ impl Host {
         }
         let child = cmd.spawn().with_context(|| format!("spawn {}", spec.program.display()))?;
         let pid = child.id();
+        if let Some(port) = opencode_port {
+            crate::harness::opencode::attach_spawn_pid(port, pid);
+        }
         let mut start = StartingChild { child: Some(child), readers: Vec::new() };
         let terminal = Arc::new(Mutex::new(None));
         let setup = (|| -> Result<Arc<LiveChild>> {
@@ -308,6 +318,9 @@ impl Host {
                     // On wait failure still attempt owned cleanup, without
                     // manufacturing a successful exit status.
                     let reaped = status.is_ok() || stop_and_reap(&mut child).is_ok();
+                    if let Some(port) = opencode_port {
+                        crate::harness::opencode::clear_port_auth(port, Some(pid));
+                    }
                     let mut map = children.lock().unwrap();
                     if map.get(&owned_key).map(|c| (c.pid, c.epoch)) == Some((pid, epoch)) {
                         map.remove(&owned_key);
@@ -348,6 +361,9 @@ impl Host {
         match setup {
             Ok(live) => Ok(live),
             Err(error) => {
+                if let Some(port) = opencode_port {
+                    crate::harness::opencode::clear_port_auth(port, Some(pid));
+                }
                 // Independent of tab callbacks and Host registry membership.
                 // Attempt every cleanup step even if an earlier one fails.
                 let cleanup = start.rollback();

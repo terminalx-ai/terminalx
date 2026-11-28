@@ -44,6 +44,21 @@ pub const MAX_FILES: usize = 5000;
 /// The person a bot on a shared runtime (a cloud workspace) belongs to, as the
 /// workspace's API names them: only their connection reads or answers it.
 pub const OWNER_USER_KEY: &str = "ownerUser";
+/// Marker set on imported duties whose shell precheck or `WatchTarget::Command`
+/// was quarantined pending explicit local owner approval (S-17).
+pub const QUARANTINED_SHELL_KEY: &str = "quarantinedShellApproval";
+/// Non-executable snapshot of a quarantined imported shell precheck.
+pub const QUARANTINED_PRECHECK_KEY: &str = "quarantinedPrecheck";
+/// Non-executable snapshot of a quarantined imported `WatchTarget::Command`.
+pub const QUARANTINED_WATCH_COMMAND_KEY: &str = "quarantinedWatchCommand";
+
+fn access_rank(access: &super::BotAccess) -> u8 {
+    match access.effective() {
+        super::BotAccess::ReadReport | super::BotAccess::Other(_) => 0,
+        super::BotAccess::AskOutward => 1,
+        super::BotAccess::Full => 2,
+    }
+}
 
 /// The folders and files of one bot under the store's root, by the name the bundle gives them.
 const TREES: [(&str, &str); 3] = [("home", "bots"), ("items", "bot-items"), ("changes", "bot-changes")];
@@ -302,17 +317,67 @@ fn restore_aside(id: &str, aside: &Path) {
 
 /// A duty as it runs here: in this runtime's home of the bot when it worked
 /// in the home it was read from, with no session of the other runtime's.
-fn place_duty(mut duty: Automation, from_home: &str, home: &Path) -> (Automation, Option<String>) {
-    let mut note = None;
+///
+/// S-17: Remote-to-local migration bundles are untrusted. Every imported duty is
+/// forced to `enabled = false`, and any shell `precheck.command` or
+/// `WatchTarget::Command` is quarantined/stripped until explicitly approved and
+/// re-saved locally by the owner.
+fn place_duty(mut duty: Automation, from_home: &str, home: &Path) -> (Automation, Vec<String>) {
+    let mut notes = Vec::new();
     if duty.project_path == from_home || duty.project_path.starts_with(&format!("{from_home}/")) {
         let rest = duty.project_path[from_home.len()..].trim_start_matches('/');
         duty.project_path = if rest.is_empty() { home.to_string_lossy().into_owned() } else { home.join(rest).to_string_lossy().into_owned() };
     } else if !Path::new(&duty.project_path).is_dir() {
-        note = Some(format!("“{}” works in {}, which is not on this runtime: it fails until that project is here.", duty.name, duty.project_path));
+        notes.push(format!("“{}” works in {}, which is not on this runtime: it fails until that project is here.", duty.name, duty.project_path));
+    }
+    if duty.enabled {
+        duty.enabled = false;
+        notes.push(format!("Imported duty “{}” was disabled pending local review.", duty.name));
+    }
+    if let Some(precheck) = duty.precheck.take() {
+        if !precheck.command.trim().is_empty() {
+            duty.unknown.insert(
+                QUARANTINED_PRECHECK_KEY.into(),
+                json!({
+                    "command": precheck.command,
+                    "timeoutSeconds": precheck.timeout_seconds,
+                    "approved": false,
+                }),
+            );
+            duty.unknown.insert(QUARANTINED_SHELL_KEY.into(), json!(true));
+            notes.push(format!(
+                "Imported duty “{}” had a shell precheck that was quarantined pending explicit local approval.",
+                duty.name
+            ));
+        }
+    }
+    let has_watch_command = matches!(
+        duty.event_trigger.as_ref().map(|t| &t.source),
+        Some(crate::automations::AutomationEventSource::Bot(source))
+            if source.kind == "watch" && matches!(source.fields.target, Some(super::wakes::WatchTarget::Command))
+    );
+    if has_watch_command {
+        if let Some(trigger) = duty.event_trigger.take() {
+            if let crate::automations::AutomationEventSource::Bot(source) = trigger.source {
+                duty.unknown.insert(
+                    QUARANTINED_WATCH_COMMAND_KEY.into(),
+                    json!({
+                        "command": source.fields.value.unwrap_or_default(),
+                        "timeoutSeconds": source.fields.timeout_seconds,
+                        "approved": false,
+                    }),
+                );
+                duty.unknown.insert(QUARANTINED_SHELL_KEY.into(), json!(true));
+                notes.push(format!(
+                    "Imported duty “{}” had a shell watch command that was quarantined pending explicit local approval.",
+                    duty.name
+                ));
+            }
+        }
     }
     duty.session_id = None;
     duty.last_outcome = None;
-    (duty, note)
+    (duty, notes)
 }
 
 /// Take a moved bot in here. `owner_user` is the person whose connection
@@ -326,7 +391,8 @@ pub fn import(sink: &dyn EventSink, bundle: Bundle, owner_user: Option<&str>) ->
     let id = bundle.bot.id.clone();
     bot_store::home_dir(&id).map_err(|_| refused("The bundle's bot has an id that names no folder."))?;
     // Everything is checked before anything here changes.
-    if let Some(existing) = bot_store::get(&id)? {
+    let previous = bot_store::get(&id)?;
+    if let Some(existing) = &previous {
         if existing.runs_on.here() {
             return Err(refused(format!("{} already lives here.", existing.name)));
         }
@@ -361,14 +427,33 @@ pub fn import(sink: &dyn EventSink, bundle: Bundle, owner_user: Option<&str>) ->
     let mut notes = Vec::new();
     let count = bundle.duties.len();
     for duty in bundle.duties {
-        let (duty, note) = place_duty(duty, &bundle.home, &home);
-        notes.extend(note);
+        let (duty, duty_notes) = place_duty(duty, &bundle.home, &home);
+        notes.extend(duty_notes);
         automation_store::insert(duty)?;
     }
     duties::announce_changed(sink);
     let mut incoming = bundle.bot;
     incoming.runs_on = BotRunsOn::ThisMac;
     incoming.modified = crate::store::index::now();
+    // S-17: Never let an untrusted migration bundle escalate local access levels
+    // or silently unpause a locally paused bot.
+    if let Some(existing) = &previous {
+        if access_rank(&incoming.access) > access_rank(&existing.access) {
+            notes.push(format!(
+                "Kept local access level `{}` instead of imported `{}` pending explicit local approval.",
+                existing.access.as_str(),
+                incoming.access.as_str()
+            ));
+            incoming.access = existing.access.clone();
+        }
+        if existing.paused.is_some() && incoming.paused.is_none() {
+            incoming.paused = existing.paused.clone();
+            notes.push("Kept this bot paused as it was locally before migration.".into());
+        }
+    } else if owner_user.is_none() && incoming.access.effective() == super::BotAccess::Full {
+        incoming.access = super::BotAccess::AskOutward;
+        notes.push("Capped newly imported bot access from `full` to `askOutward` pending local review.".into());
+    }
     match owner_user {
         Some(user) => {
             incoming.unknown.insert(OWNER_USER_KEY.into(), json!(user));

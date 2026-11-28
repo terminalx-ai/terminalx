@@ -1,3 +1,5 @@
+import { Buffer } from "buffer";
+
 export type MobileE2EETransport = "direct" | "relay";
 export type MobileE2EEPayloadKind = "text" | "binary";
 export type MobileE2EEDirection = "mobile-to-desktop" | "desktop-to-mobile";
@@ -86,20 +88,22 @@ export function encodeHandshakeTranscript(handshake: MobileE2EEHandshake): Uint8
   return concat(fields.map(([name, value]) => concat([uint32(utf8(name).length), utf8(name), uint32(value.length), value])));
 }
 
+const CANONICAL_BASE64_RE = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/][AQgw]==|[A-Za-z0-9+/]{2}[AEIMQUYcgkosw048]=)?$/;
+
 export function encodeBase64(bytes: Uint8Array): string {
-  let value = "";
-  for (const byte of bytes) value += String.fromCharCode(byte);
-  return btoa(value);
+  return Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString("base64");
+}
+
+export function decodeAnyCanonicalBase64(value: unknown): Uint8Array | null {
+  if (typeof value !== "string" || value.length % 4 !== 0 || !CANONICAL_BASE64_RE.test(value)) return null;
+  const decoded = Buffer.from(value, "base64");
+  return new Uint8Array(decoded.buffer, decoded.byteOffset, decoded.byteLength);
 }
 
 export function decodeCanonicalBase64(value: unknown, length: number): Uint8Array | null {
-  if (typeof value !== "string" || value.length !== Math.ceil(length / 3) * 4 || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value)) return null;
-  try {
-    const bytes = Uint8Array.from(atob(value), (character) => character.charCodeAt(0));
-    return bytes.length === length && encodeBase64(bytes) === value ? bytes : null;
-  } catch {
-    return null;
-  }
+  if (typeof value !== "string" || value.length !== Math.ceil(length / 3) * 4) return null;
+  const bytes = decodeAnyCanonicalBase64(value);
+  return bytes && bytes.length === length ? bytes : null;
 }
 
 export function concat(parts: readonly Uint8Array[]): Uint8Array {

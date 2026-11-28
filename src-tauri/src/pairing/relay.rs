@@ -1418,18 +1418,7 @@ pub(super) async fn open_data_socket(
 }
 
 fn websocket_url(origin: &str, path: &str) -> Result<String> {
-    let mut url = url::Url::parse(origin)?;
-    match url.scheme() {
-        "https" => url.set_scheme("wss").unwrap(),
-        "http" if matches!(url.host_str(), Some("127.0.0.1" | "localhost" | "::1")) => {
-            url.set_scheme("ws").unwrap()
-        }
-        _ => bail!("relay origin must use HTTPS"),
-    }
-    url.set_path(path);
-    url.set_query(None);
-    url.set_fragment(None);
-    Ok(url.into())
+    crate::remote::host::websocket_url(origin, path)
 }
 
 fn now_ms() -> i64 {
@@ -1531,10 +1520,11 @@ mod tests {
     #[test]
     fn relay_websocket_urls_never_carry_credentials() {
         assert_eq!(
-            websocket_url("https://relay.example", "/v1/host/control").unwrap(),
-            "wss://relay.example/v1/host/control"
+            websocket_url("https://relay.terminalx.ai", "/v1/host/control").unwrap(),
+            "wss://relay.terminalx.ai/v1/host/control"
         );
-        assert!(websocket_url("http://relay.example", "/v1/host/control").is_err());
+        assert!(websocket_url("http://relay.terminalx.ai", "/v1/host/control").is_err());
+        assert!(websocket_url("https://relay.example", "/v1/host/control").is_err());
     }
 
     #[test]

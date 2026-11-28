@@ -123,18 +123,24 @@ fn digest(bytes: &[u8]) -> String {
 // ----------------------------------------------------------------- the config
 
 /// The managed `config.toml`: the mirrored keys, the checkouts Raccoon has
-/// opened marked trusted, and the hook trust Codex asked for.
+/// explicitly approved marked trusted, and the hook trust Codex asked for.
 ///
 /// Trust is per checkout and additive: a home that already trusts three
-/// worktrees keeps all three when a fourth tab opens.
+/// worktrees keeps all three when a fourth approved tab opens. Unapproved
+/// checkouts are never auto-trusted.
 #[cfg(test)]
 pub fn mirrored_config(user_toml: &str, previous: &str, cwd: &str, trust: &BTreeMap<String, String>) -> Result<String> {
-    mirrored_config_for(user_toml, previous, cwd, trust, false)
+    mirrored_config_for(user_toml, previous, cwd, trust, false, true)
+}
+
+#[cfg(test)]
+pub fn mirrored_config_with_repo_trust(user_toml: &str, previous: &str, cwd: &str, trust: &BTreeMap<String, String>, repo_trusted: bool) -> Result<String> {
+    mirrored_config_for(user_toml, previous, cwd, trust, false, repo_trusted)
 }
 
 /// `mirrored_config`, and for an agent account's home (`file_store`) the
 /// login kept in its `auth.json`, whatever the reader's own config says.
-fn mirrored_config_for(user_toml: &str, previous: &str, cwd: &str, trust: &BTreeMap<String, String>, file_store: bool) -> Result<String> {
+fn mirrored_config_for(user_toml: &str, previous: &str, cwd: &str, trust: &BTreeMap<String, String>, file_store: bool, repo_trusted: bool) -> Result<String> {
     let user: toml::Table = toml::from_str(user_toml).unwrap_or_default();
     let old: toml::Table = toml::from_str(previous).unwrap_or_default();
     let mut out = toml::Table::new();
@@ -149,10 +155,17 @@ fn mirrored_config_for(user_toml: &str, previous: &str, cwd: &str, trust: &BTree
     }
 
     let mut projects = old.get("projects").and_then(|p| p.as_table()).cloned().unwrap_or_default();
-    let mut entry = toml::Table::new();
-    entry.insert("trust_level".into(), toml::Value::String("trusted".into()));
-    projects.insert(cwd.to_string(), toml::Value::Table(entry));
-    out.insert("projects".into(), toml::Value::Table(projects));
+    if repo_trusted {
+        let mut entry = toml::Table::new();
+        entry.insert("trust_level".into(), toml::Value::String("trusted".into()));
+        projects.insert(cwd.to_string(), toml::Value::Table(entry));
+    } else {
+        // Revoke any stale auto-trust entry if the repository is unapproved or changed.
+        projects.remove(cwd);
+    }
+    if !projects.is_empty() {
+        out.insert("projects".into(), toml::Value::Table(projects));
+    }
 
     let mut state = toml::Table::new();
     for (key, hash) in trust {
@@ -168,7 +181,8 @@ fn mirrored_config_for(user_toml: &str, previous: &str, cwd: &str, trust: &BTree
 }
 
 fn write_config(path: &Path, user: &str, previous: &str, cwd: &str, trust: &BTreeMap<String, String>, file_store: bool) -> Result<()> {
-    let config = mirrored_config_for(user, previous, cwd, trust, file_store)?;
+    let repo_trusted = crate::store::configuration::is_agent_trusted(Path::new(cwd));
+    let config = mirrored_config_for(user, previous, cwd, trust, file_store, repo_trusted)?;
     #[cfg(target_os = "macos")]
     let config = super::browser_use_macos::configure(&config, path.parent().context("Codex config has no home")?, std::env::var_os("PYTHONPATH").as_deref())?;
     crate::store::write_atomic(path, config.as_bytes())
@@ -679,7 +693,8 @@ mod tests {
         let config: toml::Table = toml::from_str(&std::fs::read_to_string(native.join("config.toml")).unwrap()).unwrap();
         assert_eq!(config["model"].as_str(), Some("gpt-5.6-sol"));
         assert!(config.get("notify").is_none());
-        assert_eq!(config["projects"]["/work/repo"]["trust_level"].as_str(), Some("trusted"));
+        // S-04: unapproved checkout is not auto-trusted in Codex config.toml.
+        assert!(config.get("projects").and_then(|p| p.get("/work/repo")).is_none(), "unapproved repo must not be auto-trusted");
         assert!(config["hooks"]["state"].as_table().is_some_and(|state| state.is_empty()), "no hook is trusted");
 
         // A workspace with no Codex credential has none here either.
@@ -876,7 +891,7 @@ url = "https://example.test/mcp"
         let config = std::fs::read_to_string(managed.path().join("config.toml")).unwrap();
         let t: toml::Table = toml::from_str(&config).unwrap();
         assert_eq!(t["model"].as_str(), Some("gpt-5.6-sol"), "the reader's settings came across");
-        assert_eq!(t["projects"][&cwd]["trust_level"].as_str(), Some("trusted"));
+        assert!(t.get("projects").and_then(|p| p.get(&cwd)).is_none(), "unapproved checkout must not be auto-trusted");
 
         let hooks: Value = serde_json::from_str(&std::fs::read_to_string(managed.path().join("hooks.json")).unwrap()).unwrap();
         let state = t["hooks"]["state"].as_table().unwrap();
@@ -984,5 +999,42 @@ url = "https://example.test/mcp"
         // Nothing that is not there gets a dangling link.
         link(managed.path(), user.path(), "skills").unwrap();
         assert!(!managed.path().join("skills").exists());
+    }
+
+    #[test]
+    fn unapproved_repo_is_never_auto_trusted_and_config_changes_revoke_trust() {
+        let _home = crate::store::temp_home();
+        let repo = tempfile::tempdir().unwrap();
+        let cwd = repo.path().to_str().unwrap();
+        let codex_dir = repo.path().join(".codex");
+        std::fs::create_dir_all(&codex_dir).unwrap();
+        std::fs::write(codex_dir.join("config.toml"), "model = \"evil\"\n").unwrap();
+
+        let managed = tempfile::tempdir().unwrap();
+        let config_path = managed.path().join("config.toml");
+
+        // Direct pure helper check: repo_trusted=false never emits trust_level = "trusted".
+        let pure_untrusted = mirrored_config_with_repo_trust("", "", cwd, &BTreeMap::new(), false).unwrap();
+        let pure_parsed: toml::Table = toml::from_str(&pure_untrusted).unwrap();
+        assert!(pure_parsed.get("projects").and_then(|p| p.get(cwd)).is_none());
+
+        // Unapproved repo must not get trust_level = "trusted".
+        write_config(&config_path, "", "", cwd, &BTreeMap::new(), false).unwrap();
+        let parsed: toml::Table = toml::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+        assert!(parsed.get("projects").and_then(|p| p.get(cwd)).is_none(), "unapproved repo must not be trusted");
+
+        // Explicit hash-bound approval enables trust_level = "trusted".
+        crate::store::configuration::approve_agent_trust(repo.path()).unwrap();
+        let prev = std::fs::read_to_string(&config_path).unwrap();
+        write_config(&config_path, "", &prev, cwd, &BTreeMap::new(), false).unwrap();
+        let parsed: toml::Table = toml::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+        assert_eq!(parsed["projects"][cwd]["trust_level"].as_str(), Some("trusted"));
+
+        // Modifying .codex/config.toml revokes trust on the next config write.
+        std::fs::write(codex_dir.join("config.toml"), "model = \"evil-v2\"\n").unwrap();
+        let prev = std::fs::read_to_string(&config_path).unwrap();
+        write_config(&config_path, "", &prev, cwd, &BTreeMap::new(), false).unwrap();
+        let parsed: toml::Table = toml::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+        assert!(parsed.get("projects").and_then(|p| p.get(cwd)).is_none(), "modified repo must lose trust_level");
     }
 }

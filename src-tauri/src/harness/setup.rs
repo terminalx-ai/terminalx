@@ -296,10 +296,9 @@ fn wrapped(script: &str, args: &[String]) -> String {
     line
 }
 
-/// One word for a POSIX shell (and fish): single quotes, a quote in it
-/// closed, escaped and reopened.
+/// One word for a POSIX shell (translated safely by `pty::spawn_after` for fish).
 fn quote(word: &str) -> String {
-    format!("'{}'", word.replace('\'', r#"'\''"#))
+    crate::pty::posix_quote(word)
 }
 
 /// The same two steps on Windows, in Windows PowerShell: the provider's

@@ -14,9 +14,13 @@ use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard,
+    Arc, Condvar, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard,
 };
 use std::time::Duration;
+
+/// Heartbeat refresh cadence for ephemeral `health.json`. Must stay well
+/// inside `host::request("state")`'s 15-second freshness window.
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 
 fn xml(value: &str) -> String {
     value
@@ -261,8 +265,17 @@ pub fn prepare_handover(settle: Duration, agreed: &[String]) -> Result<Exclusive
     bail!("{} under way", cut.join("; "))
 }
 
+#[derive(Default)]
+struct HeartbeatState {
+    detail: Option<String>,
+    stop: bool,
+}
+
+type HeartbeatSignal = Arc<(Mutex<HeartbeatState>, Condvar)>;
+
 pub struct Supervisor {
     stopped: Arc<AtomicBool>,
+    heartbeat_signal: HeartbeatSignal,
     worker: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -316,18 +329,44 @@ impl Supervisor {
         STOPPING.store(false, Ordering::Release);
         let stopped = Arc::new(AtomicBool::new(false));
         let worker_stopped = stopped.clone();
-        let diagnostic = Arc::new(std::sync::Mutex::new(None::<String>));
-        let heartbeat_diagnostic = diagnostic.clone();
+        let heartbeat_signal: HeartbeatSignal = Arc::new((Mutex::new(HeartbeatState::default()), Condvar::new()));
+        let controller_signal = heartbeat_signal.clone();
+        let thread_signal = heartbeat_signal.clone();
         let heartbeat_root = root.clone();
         let heartbeat_stopped = stopped.clone();
         let heartbeat = std::thread::Builder::new().name("local-vm-heartbeat".into()).spawn(move || {
-        while !heartbeat_stopped.load(Ordering::Acquire) {
-            let detail=heartbeat_diagnostic.lock().unwrap().clone();
-            let health=json!({"at":journal::now(),"pid":std::process::id(),"protocol":journal::PROTOCOL,"healthy":detail.is_none(),"detail":detail,"owner":"local-runtime"});
-            if let Ok(bytes)=serde_json::to_vec(&health){let _=journal::atomic_private_write(&heartbeat_root.join("health.json"),&bytes);}
-            std::thread::sleep(Duration::from_secs(1));
-        }
-    })?;
+            let (lock, cvar) = &*thread_signal;
+            let mut last_detail: Option<String> = None;
+            let mut last_write: Option<std::time::Instant> = None;
+            loop {
+                let (detail, stop) = {
+                    let mut guard = lock.lock().unwrap();
+                    if let Some(written) = last_write {
+                        while !guard.stop && !heartbeat_stopped.load(Ordering::Acquire) && guard.detail == last_detail {
+                            let remaining = HEARTBEAT_INTERVAL.saturating_sub(written.elapsed());
+                            if remaining.is_zero() {
+                                break;
+                            }
+                            let (next, result) = cvar.wait_timeout(guard, remaining).unwrap();
+                            guard = next;
+                            if result.timed_out() {
+                                break;
+                            }
+                        }
+                    }
+                    (guard.detail.clone(), guard.stop)
+                };
+                if stop || heartbeat_stopped.load(Ordering::Acquire) {
+                    break;
+                }
+                let health = json!({"at":journal::now(),"pid":std::process::id(),"protocol":journal::PROTOCOL,"healthy":detail.is_none(),"detail":detail,"owner":"local-runtime"});
+                if let Ok(bytes) = serde_json::to_vec(&health) {
+                    let _ = journal::atomic_private_write_ephemeral(&heartbeat_root.join("health.json"), &bytes);
+                }
+                last_detail = detail;
+                last_write = Some(std::time::Instant::now());
+            }
+        })?;
         let spawned = std::thread::Builder::new().name("local-vm-controller".into()).spawn(move || {
         let _lock = lock;
         let mut assertion: Option<Child> = None;
@@ -342,7 +381,15 @@ impl Supervisor {
             let ticking = TICK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             if lifetime.is_stopping() || stopping() { break; }
             let outcome = tick(&journal, &worker_stopped);
-            *diagnostic.lock().unwrap() = outcome.err().map(|e| crate::remote::protocol::redact(&e.to_string()));
+            let next_detail = outcome.err().map(|e| crate::remote::protocol::redact(&e.to_string()));
+            {
+                let (lock, cvar) = &*controller_signal;
+                let mut guard = lock.lock().unwrap();
+                if guard.detail != next_detail {
+                    guard.detail = next_detail;
+                    cvar.notify_all();
+                }
+            }
             let working = journal.read().is_ok_and(|state| state.tasks.values().any(|t| {
                 matches!(t.status, TaskStatus::Starting | TaskStatus::Running | TaskStatus::Canceling)
                     && state.environments.get(&t.target.environment_id).is_some_and(|e| e.keep_awake)
@@ -362,16 +409,27 @@ impl Supervisor {
         }
         if let Some(mut child)=assertion.take() {let _=child.kill(); let _=child.wait();}
         worker_stopped.store(true, Ordering::Release);
+        {
+            let (lock, cvar) = &*controller_signal;
+            lock.lock().unwrap().stop = true;
+            cvar.notify_all();
+        }
         let _ = heartbeat.join();
-        let _=journal::atomic_private_write(&root.join("health.json"), &serde_json::to_vec(&json!({"at":null,"detail":"Local owner stopped; guest execution state must be reconciled on reconnect"})).unwrap());
+        let _=journal::atomic_private_write_ephemeral(&root.join("health.json"), &serde_json::to_vec(&json!({"at":null,"detail":"Local owner stopped; guest execution state must be reconciled on reconnect"})).unwrap());
     });
         match spawned {
             Ok(worker) => Ok(Self {
                 stopped,
+                heartbeat_signal,
                 worker: Some(worker),
             }),
             Err(error) => {
                 stopped.store(true, Ordering::Release);
+                {
+                    let (lock, cvar) = &*heartbeat_signal;
+                    lock.lock().unwrap().stop = true;
+                    cvar.notify_all();
+                }
                 Err(error.into())
             }
         }
@@ -380,6 +438,11 @@ impl Supervisor {
     pub fn shutdown(&mut self) {
         STOPPING.store(true, Ordering::Release);
         self.stopped.store(true, Ordering::Release);
+        {
+            let (lock, cvar) = &*self.heartbeat_signal;
+            lock.lock().unwrap().stop = true;
+            cvar.notify_all();
+        }
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
             if let Ok(journal) = host::journal() {
@@ -1289,5 +1352,11 @@ mod tests {
         assert!(!text.contains(".raccoon"));
         assert!(!text.contains("TERMINALX_NEXT_TOKEN"));
         assert_eq!(xml("<&\"'"), "&lt;&amp;&quot;&apos;");
+    }
+
+    #[test]
+    fn heartbeat_interval_stays_within_freshness_window_and_relaxes_1s_cadence() {
+        assert!(HEARTBEAT_INTERVAL >= Duration::from_secs(5));
+        assert!(HEARTBEAT_INTERVAL <= Duration::from_secs(10));
     }
 }

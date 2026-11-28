@@ -2,13 +2,6 @@ import { EditorView } from "@codemirror/view";
 import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
 import { tags as t } from "@lezer/highlight";
 import { EditorState, type Extension } from "@codemirror/state";
-import { javascript } from "@codemirror/lang-javascript";
-import { rust } from "@codemirror/lang-rust";
-import { python } from "@codemirror/lang-python";
-import { json } from "@codemirror/lang-json";
-import { markdown } from "@codemirror/lang-markdown";
-import { css } from "@codemirror/lang-css";
-import { html } from "@codemirror/lang-html";
 import { extOf } from "@/lib/paths";
 
 /** The diff's collapsed runs say what they hide in the app's words. */
@@ -71,35 +64,93 @@ export const raccoonHighlight = syntaxHighlighting(
   ]),
 );
 
-export function languageFor(path: string): Extension {
+type LangKey = "ts" | "tsx" | "js" | "jsx" | "rs" | "py" | "json" | "md" | "css" | "html";
+
+const loadedLanguages = new Map<LangKey, Extension>();
+const pendingLanguages = new Map<LangKey, Promise<Extension>>();
+
+function langKeyFor(path: string): LangKey | null {
   switch (extOf(path)) {
     case "ts":
-      return javascript({ typescript: true });
+      return "ts";
     case "tsx":
-      return javascript({ typescript: true, jsx: true });
+      return "tsx";
     case "js":
     case "mjs":
     case "cjs":
-      return javascript();
+      return "js";
     case "jsx":
-      return javascript({ jsx: true });
+      return "jsx";
     case "rs":
-      return rust();
+      return "rs";
     case "py":
-      return python();
+      return "py";
     case "json":
-      return json();
+      return "json";
     case "md":
     case "mdx":
-      return markdown();
+      return "md";
     case "css":
     case "scss":
-      return css();
+      return "css";
     case "html":
     case "svg":
     case "xml":
-      return html();
+      return "html";
     default:
-      return [];
+      return null;
   }
+}
+
+async function importLanguage(key: LangKey): Promise<Extension> {
+  switch (key) {
+    case "ts":
+      return (await import("@codemirror/lang-javascript")).javascript({ typescript: true });
+    case "tsx":
+      return (await import("@codemirror/lang-javascript")).javascript({ typescript: true, jsx: true });
+    case "js":
+      return (await import("@codemirror/lang-javascript")).javascript();
+    case "jsx":
+      return (await import("@codemirror/lang-javascript")).javascript({ jsx: true });
+    case "rs":
+      return (await import("@codemirror/lang-rust")).rust();
+    case "py":
+      return (await import("@codemirror/lang-python")).python();
+    case "json":
+      return (await import("@codemirror/lang-json")).json();
+    case "md":
+      return (await import("@codemirror/lang-markdown")).markdown();
+    case "css":
+      return (await import("@codemirror/lang-css")).css();
+    case "html":
+      return (await import("@codemirror/lang-html")).html();
+  }
+}
+
+/** Return the already-loaded CodeMirror language extension for `path`, or `[]` before it has loaded. */
+export function languageFor(path: string): Extension {
+  const key = langKeyFor(path);
+  return key ? (loadedLanguages.get(key) ?? []) : [];
+}
+
+/** Dynamically load and cache the CodeMirror language pack for `path` on demand. */
+export function loadLanguageFor(path: string): Promise<Extension> {
+  const key = langKeyFor(path);
+  if (!key) return Promise.resolve([]);
+  const cached = loadedLanguages.get(key);
+  if (cached) return Promise.resolve(cached);
+  const inflight = pendingLanguages.get(key);
+  if (inflight) return inflight;
+  const promise = importLanguage(key)
+    .then((ext) => {
+      loadedLanguages.set(key, ext);
+      pendingLanguages.delete(key);
+      return ext;
+    })
+    .catch((err) => {
+      pendingLanguages.delete(key);
+      throw err;
+    });
+  pendingLanguages.set(key, promise);
+  return promise;
 }

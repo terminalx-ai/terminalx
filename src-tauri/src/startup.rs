@@ -2,10 +2,10 @@
 //! failure. The owner watches on its own clock, independently of PR metadata.
 //! No action here kills a process, answers a permission, or changes a gate.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, LazyLock, Mutex};
+use std::time::{Duration, SystemTime};
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -238,17 +238,81 @@ fn process_gone(launch: &Launch) -> bool {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileStamp {
+    mtime: Option<SystemTime>,
+    len: u64,
+    #[cfg(unix)]
+    ino: u64,
+}
+
+impl FileStamp {
+    fn of(path: &Path) -> Option<Self> {
+        let meta = std::fs::metadata(path).ok()?;
+        #[cfg(unix)]
+        use std::os::unix::fs::MetadataExt;
+        Some(Self {
+            mtime: meta.modified().ok(),
+            len: meta.len(),
+            #[cfg(unix)]
+            ino: meta.ino(),
+        })
+    }
+}
+
+struct CachedSnapshot {
+    stamp: Option<FileStamp>,
+    snapshot: Snapshot,
+}
+
+static SNAPSHOT_CACHE: LazyLock<Mutex<HashMap<PathBuf, CachedSnapshot>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+#[cfg(test)]
+thread_local! {
+    static SNAPSHOT_DISK_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+fn cache_store(directory: &Path, stamp: Option<FileStamp>, snapshot: Snapshot) {
+    let mut cache = SNAPSHOT_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if cache.len() >= 64 && !cache.contains_key(directory) {
+        cache.clear();
+    }
+    cache.insert(directory.to_path_buf(), CachedSnapshot { stamp, snapshot });
+}
+
+fn read_cached(directory: &Path) -> Result<Snapshot> {
+    let path = directory.join("incidents.json");
+    let stamp = FileStamp::of(&path);
+    {
+        let cache = SNAPSHOT_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(entry) = cache.get(directory) {
+            if entry.stamp == stamp {
+                return Ok(entry.snapshot.clone());
+            }
+        }
+    }
+    #[cfg(test)]
+    SNAPSHOT_DISK_READS.with(|count| count.set(count.get() + 1));
+    let snapshot: Snapshot = crate::store::read_json(&path)?.unwrap_or_default();
+    cache_store(directory, stamp, snapshot.clone());
+    Ok(snapshot)
+}
+
 fn directory() -> Result<PathBuf> { crate::store::ensure_dir(crate::store::root()?.join("startup")) }
 
-pub fn snapshot() -> Result<Snapshot> { Ok(crate::store::read_json(&directory()?.join("incidents.json"))?.unwrap_or_default()) }
+pub fn snapshot() -> Result<Snapshot> { read_cached(&directory()?) }
 
 fn update_at<T>(directory: &Path, work: impl FnOnce(&mut Snapshot) -> Result<T>) -> Result<T> {
     crate::store::transaction::run(&directory.join("incidents.lock"), Duration::from_secs(2), || {
         let path = directory.join("incidents.json");
-        let mut state: Snapshot = crate::store::read_json(&path)?.unwrap_or_default();
+        let mut state = read_cached(directory)?;
         let before = state.clone();
         let result = work(&mut state)?;
-        if state != before { crate::store::write_json(&path, &state)?; }
+        if state != before {
+            crate::store::write_json(&path, &state)?;
+            cache_store(directory, FileStamp::of(&path), state);
+        }
         Ok(result)
     })
 }
@@ -324,9 +388,42 @@ impl Monitor {
         Ok(Ticket { monitor: self.clone(), id })
     }
 
+    /// Whether a cached snapshot needs active polling right now. When all live
+    /// panes are already `startup_proven && phase == Phase::Running`, no incident
+    /// is open, no validation recorder is active, and no permission wait is up,
+    /// polling would be a pure no-op.
+    fn needs_poll(state: &Snapshot, terminals: &crate::pty::Terminals, permissions: Option<&[String]>) -> bool {
+        if state.active().is_some() || state.census_incomplete || state.launches.len() > HISTORY {
+            return true;
+        }
+        if permissions.is_some_and(|panes| !panes.is_empty()) {
+            return true;
+        }
+        if state.launches.iter().any(|launch| {
+            (launch.recorder.is_some() && launch.phase != Phase::Exited)
+                || matches!(launch.phase, Phase::Spawning | Phase::AwaitingReady | Phase::PermissionPrompt)
+                || (launch.phase == Phase::Running && !launch.startup_proven)
+        }) {
+            return true;
+        }
+        terminals.panes().into_iter().filter(|pane| pane.running).any(|pane| {
+            !state.launches.iter().any(|launch| {
+                launch.evidence == Evidence::Readiness
+                    && launch.pane == pane.id
+                    && launch.pid == pane.pid
+                    && launch.startup_proven
+                    && launch.phase == Phase::Running
+            })
+        })
+    }
+
     fn poll(&self, terminals: &crate::pty::Terminals, permissions: Option<&[String]>) -> Result<bool> {
+        let cached = read_cached(&self.directory)?;
+        if !Self::needs_poll(&cached, terminals, permissions) {
+            return Ok(false);
+        }
         #[cfg(target_os = "macos")]
-        let children = macos::children(terminals, &crate::store::read_json::<Snapshot>(&self.directory.join("incidents.json"))?.unwrap_or_default());
+        let children = macos::children(terminals, &cached, permissions);
         update_at(&self.directory, |state| {
             let before = state.clone();
             let at = now();
@@ -340,6 +437,9 @@ impl Monitor {
             let previous_permissions: Vec<_> = state.launches.iter().filter(|launch| launch.phase == Phase::PermissionPrompt).map(|launch| launch.pane.clone()).collect();
             let permissions = permissions.unwrap_or(&previous_permissions);
             for launch in &mut state.launches {
+                if launch.startup_proven && launch.phase == Phase::Running && !permissions.contains(&launch.pane) {
+                    continue;
+                }
                 if launch.evidence == Evidence::Readiness && matches!(launch.phase, Phase::AwaitingReady | Phase::PermissionPrompt | Phase::Running) {
                     // A known application permission card proves startup, but
                     // repeated observation of the same wait is not progress.
@@ -361,7 +461,10 @@ impl Monitor {
                 // A recorder or filesystem error must not suspend incident age.
                 log::warn!("refresh startup probe: {error:#}");
             }
-            Ok(state != &before)
+            let incident_changed = state.incidents != before.incidents
+                || state.census_incomplete != before.census_incomplete
+                || state.observation_lost_at != before.observation_lost_at;
+            Ok(incident_changed)
         })
     }
 }
@@ -465,3 +568,32 @@ fn os_version() -> serde_json::Value {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod perf_tests {
+    use super::*;
+
+    #[test]
+    fn healthy_proven_launches_skip_poll_disk_writes_and_emit() {
+        let directory = tempfile::tempdir().unwrap();
+        let monitor = Monitor { directory: directory.path().into() };
+        let mut proven = tests::launch("tab:healthy", Phase::Running);
+        proven.startup_proven = true;
+        let state = Snapshot { launches: vec![proven], ..Snapshot::default() };
+        let path = directory.path().join("incidents.json");
+        crate::store::write_json(&path, &state).unwrap();
+        let stamp_before = FileStamp::of(&path);
+        let terminals = crate::pty::Terminals::new();
+
+        // First poll populates the in-memory cache and detects nothing to poll.
+        SNAPSHOT_DISK_READS.with(|c| c.set(0));
+        assert!(!monitor.poll(&terminals, Some(&[])).unwrap());
+        assert_eq!(SNAPSHOT_DISK_READS.with(|c| c.get()), 1);
+
+        // Subsequent polls hit the in-memory cache: 0 disk reads, 0 writes, 0 emits.
+        assert!(!monitor.poll(&terminals, Some(&[])).unwrap());
+        assert!(!monitor.poll(&terminals, Some(&[])).unwrap());
+        assert_eq!(SNAPSHOT_DISK_READS.with(|c| c.get()), 1);
+        assert_eq!(FileStamp::of(&path), stamp_before, "incidents.json must not be rewritten");
+    }
+}

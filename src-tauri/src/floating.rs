@@ -270,7 +270,9 @@ fn build(app: &AppHandle) -> tauri::Result<WebviewWindow> {
         .skip_taskbar(true)
         // Shown once it exists and its saved place has been restored, not at
         // a default place first.
-        .visible(false);
+        .visible(false)
+        .on_navigation(|url| crate::is_allowed_webview_navigation(url))
+        .on_new_window(|_url, _features| tauri::webview::NewWindowResponse::Deny);
     // The same chrome as the main window: our own title bar strip over the
     // sidebar material.
     #[cfg(target_os = "macos")]
@@ -463,7 +465,10 @@ pub fn floating_status(app: AppHandle) -> FloatingStatus {
 }
 
 #[tauri::command]
-pub fn set_floating_settings(app: AppHandle, patch: FloatingPatch) -> Result<FloatingStatus, String> {
+pub fn set_floating_settings(app: AppHandle, window: WebviewWindow, patch: FloatingPatch) -> Result<FloatingStatus, String> {
+    if window.label() != "main" && (patch.shortcut.is_some() || patch.retention_days.is_some()) {
+        return Err("Only the main TerminalX window can change floating shortcut or retention settings.".into());
+    }
     update(&app, patch)
 }
 

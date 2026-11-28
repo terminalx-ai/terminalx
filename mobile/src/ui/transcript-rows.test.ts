@@ -243,4 +243,14 @@ describe("where the reader's message is", () => {
     expect(messageDelivery({ replaced: true }, false)).toBe("delivered");
     expect(messageDelivery({}, true)).toBe("queued");
   });
+
+  it("memoizes turnRows per Turn object reference (P-13, P-45)", () => {
+    const committed: Turn = {
+      ...turn,
+      work: [{ kind: "text", key: "a2", seq: 2, text: "Committed **markdown** reply." }],
+    };
+    const first = turnRows(committed);
+    const second = turnRows(committed);
+    expect(second).toBe(first);
+  });
 });

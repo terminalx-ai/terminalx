@@ -630,10 +630,9 @@ impl MachineCode {
             bail!("the code names no way to reach the machine");
         }
         if let Some(relay) = &decoded.relay {
-            let https = |origin: &str| url::Url::parse(origin).is_ok_and(|url| matches!(url.scheme(), "https" | "http") && url.host_str().is_some());
             if relay.relay_host_id != decoded.machine.machine_id
-                || !https(&relay.director_url)
-                || !https(&relay.cell_url)
+                || !crate::remote::host::valid_relay_origin(&relay.director_url)
+                || !crate::remote::host::valid_relay_origin(&relay.cell_url)
                 || !crate::remote::host::valid_opaque_id(&relay.relay_device_id)
                 || URL_SAFE_NO_PAD.decode(&relay.invite_token).map(|token| token.len()) != Ok(32)
             {
@@ -642,7 +641,15 @@ impl MachineCode {
         }
         if decoded.direct_endpoints.len() > 64
             || !decoded.direct_endpoints.iter().all(|endpoint| {
-                url::Url::parse(endpoint).is_ok_and(|url| url.scheme() == "ws" && url.host_str().is_some() && url.path() == MACHINE_PATH)
+                url::Url::parse(endpoint).is_ok_and(|url| {
+                    matches!(url.scheme(), "ws" | "wss")
+                        && url.host_str().is_some()
+                        && url.username().is_empty()
+                        && url.password().is_none()
+                        && url.query().is_none()
+                        && url.fragment().is_none()
+                        && url.path() == MACHINE_PATH
+                })
             })
         {
             bail!("the code's endpoints are invalid");
@@ -897,5 +904,34 @@ mod tests {
         other.direct_endpoints.clear();
         assert!(MachineCode::decode(&encode(&other)).is_err(), "nowhere to connect");
         assert!(MachineCode::decode(&format!("txm2.{}", "A".repeat(MAX_CODE_BYTES))).is_err());
+
+        // S-15: untrusted / plaintext HTTP relay origins and credentialed direct endpoints are rejected.
+        let mut with_relay = code();
+        with_relay.relay = Some(MachineRelay {
+            director_url: "https://relay.terminalx.ai".into(),
+            cell_url: "https://cell-1.relay.terminalx.ai".into(),
+            assignment_epoch: 1,
+            relay_host_id: with_relay.machine.machine_id.clone(),
+            relay_device_id: "computer-1".into(),
+            invite_token: crate::relay_e2ee::random_token(),
+            invite_expires_at: 1_763_200_000_000,
+        });
+        assert!(MachineCode::decode(&encode(&with_relay)).is_ok());
+
+        for (director, cell) in [
+            ("http://relay.terminalx.ai", "https://cell-1.relay.terminalx.ai"),
+            ("https://relay.terminalx.ai", "http://cell-1.relay.terminalx.ai"),
+            ("https://evil.example", "https://cell-1.relay.terminalx.ai"),
+            ("https://relay.terminalx.ai", "http://169.254.169.254"),
+            ("https://relay.terminalx.ai/extra", "https://cell-1.relay.terminalx.ai"),
+        ] {
+            let mut bad = with_relay.clone();
+            bad.relay.as_mut().unwrap().director_url = director.into();
+            bad.relay.as_mut().unwrap().cell_url = cell.into();
+            assert!(MachineCode::decode(&encode(&bad)).is_err(), "{director} / {cell}");
+        }
+        let mut bad_ep = code();
+        bad_ep.direct_endpoints = vec!["ws://user:pass@192.168.1.20:6768/machine/1".into()];
+        assert!(MachineCode::decode(&encode(&bad_ep)).is_err());
     }
 }

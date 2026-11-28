@@ -4,17 +4,14 @@ import { SettingsLeaveBoundaryContext, useSettingsLeaveBoundary } from "@/compon
 import { bootDataPrivacy } from "@/lib/dataPrivacy";
 import { bootSelfUi } from "@/lib/selfUi";
 import { SelfUiAccess } from "@/components/computer/SelfUiAccess";
-import { SignInLinkDialog } from "@/components/account/PasteSignInLink";
 import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 import { WorktreeCopyNotices } from "@/components/ui/WorktreeCopyNotices";
 import { onOpenOrganizationSettings, onOpenSettingRow, onStatsSettingsRequest } from "@/lib/settingsLinks";
 import { onOpenCloudSetup, type CloudSetupTarget } from "@/lib/cloudSetupFlow";
 import { useAccount } from "@/lib/account";
-import { CloudSetupFlow } from "@/components/cloudSetup/CloudSetupFlow";
 import { useUnknownSettingLink } from "@/lib/settingsDeepLink";
 import { bootDesktopLinks } from "@/lib/desktopLinks";
 import { bootLastView } from "@/lib/lastView";
-import { LinkSessionDialog } from "@/components/start/LinkSessionDialog";
 import type { SettingId } from "@/components/settings/settingsRegistry";
 import { onProjectSettingsRequest } from "@/lib/projectAdded";
 import { onOrchestratorSettingsRequest, showRunView, useRun } from "@/lib/orchestration";
@@ -29,21 +26,12 @@ import { NewSessionView } from "@/components/session/NewSessionView";
 import { WelcomeTabActions } from "@/components/start/WelcomeTabActions";
 import { WelcomeScreen } from "@/components/start/WelcomeScreen";
 import { StartScreen } from "@/components/start/StartScreen";
-import { ProjectStartDialogHost } from "@/components/start/ProjectStartDialogs";
-import { IssuesView } from "@/components/issues/IssuesView";
-import { ProjectOverview } from "@/components/project/ProjectOverview";
 import { cn } from "@/lib/cn";
-import { AgentDashboard } from "@/components/dashboard/AgentDashboard";
-import { SkillsView } from "@/components/skills/SkillsView";
-import { SessionView } from "@/components/session/SessionView";
-import { MachineSessionHost } from "@/components/machines/MachineSessionHost";
-import { CloudSessionHost } from "@/components/session/CloudSessionHost";
 import { isCloudKey, isLocalKey, isMachineKey, machineKeyKind } from "@/types/target";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { useShortcut } from "@/lib/hotkeys";
 import { toggleMode } from "@/lib/theme";
 import { setPrefs, usePrefs } from "@/lib/prefs";
-import { NewSessionDialog } from "@/components/session/NewSessionDialog";
 import { UpdateNotice } from "./UpdateNotice";
 import { checkForUpdate, startUpdateChecks } from "@/lib/updates";
 import { getSessionStore, bootSessions, closeNewSession, openNewSession, openHome, openAgents, openAutomations, openIssues, openSkills, startIdleArchive, useSessionStore } from "@/lib/sessions";
@@ -54,6 +42,7 @@ import { loadModels, onAgentSettingsRequest } from "@/lib/models";
 import { startNotifications } from "@/lib/notify";
 import { bootCloudWorkClaims } from "@/lib/cloudWorkClaims";
 import { subscribeTabPty } from "@/lib/tabViews";
+import { subscribeTerminals } from "@/lib/terminal";
 import { MergedCleanupNotices } from "@/components/ui/MergedCleanupNotices";
 import { CloseUndoNotices } from "@/components/ui/CloseUndoNotices";
 import { Toasts } from "@/components/ui/Toasts";
@@ -62,11 +51,6 @@ import { ArchiveNotices } from "@/components/ui/ArchiveNotices";
 import { archiveWithUndo } from "@/lib/archiveNotices";
 import { reportError } from "@/lib/errorToasts";
 import { NotificationsOffCard } from "@/components/ui/NotificationsOffCard";
-import { ShareSessionDialogHost } from "@/components/session/ShareSessionDialog";
-import { GuestSessionHost } from "@/components/session/GuestSession";
-import { CloudSchedulesDialogHost } from "@/components/cloud/CloudSchedulesDialog";
-import { CloudShareDialogHost } from "@/components/cloud/CloudShareDialog";
-import { NewCloudWorkspaceDialogHost } from "@/components/cloud/NewCloudWorkspaceDialog";
 import { startMachineConnections } from "@/lib/machineConnections";
 import { updateMachineSession } from "@/lib/machineCatalog";
 import { startAppUpdateResponder } from "@/lib/machineUpdate";
@@ -74,26 +58,19 @@ import { BypassDialog } from "@/components/session/BypassDialog";
 import { SessionDialogs } from "@/components/session/SessionDialogs";
 import { bootFloating, showFloatingWindow } from "@/lib/floating";
 import { bootMergedCleanup } from "@/lib/mergedCleanup";
-import { WorkspaceRestoreDialog } from "@/components/session/WorkspaceRestoreDialog";
-import { WorkspaceRemoveDialog } from "@/components/session/WorkspaceRemoveDialog";
-import { WorktreeCleanupDialog } from "@/components/cleanup/WorktreeCleanupDialog";
 import { CleanupIndicator } from "@/components/cleanup/CleanupIndicator";
-import { bootStatus, useStatus } from "@/lib/status";
+import { bootStatus, useStatusSelector } from "@/lib/status";
+import { scheduleIdle } from "@/lib/idle";
 import { useRuntimeSwitch } from "@/lib/localRuntime";
-import { AutomationsView } from "@/components/automations/AutomationsView";
 import { bootAutomations } from "@/lib/automations";
 import { bootBots, pauseAllBots, shutBots, useBotStore } from "@/lib/bots";
 import { bootBotPause, noteBotsForPause, noteSessionsForPause, shutBotPause } from "@/lib/botPause";
 import { bootBotItems, noteBotSessions, shutBotItems } from "@/lib/botItems";
 import { botViewFor } from "@/lib/botChats";
 import { useStayOnBot } from "@/components/bots/useStayOnBot";
-import { BotView } from "@/components/bots/BotView";
 import { showBotsTeam, useLeaveBotsWhenOff } from "@/lib/botsPage";
-import { BotsView } from "@/components/bots/BotsView";
 import { bootIssuePipelines } from "@/lib/issuePipeline";
 import { PanelPresence } from "./PanelPresence";
-import { RightPanel } from "@/components/layout/RightPanel";
-import { CommandPalette } from "@/components/command/CommandPalette";
 import { bootAccount } from "@/lib/account";
 import { bootCloudPresence } from "@/lib/cloudPresence";
 import { bootDesktopInbox } from "@/lib/desktopInbox";
@@ -103,21 +80,17 @@ import { bootCloudMirrors } from "@/lib/cloudMirror";
 import { bootCloudSessions } from "@/lib/cloudSessions";
 import { bootCloudPipelines } from "@/lib/cloudPipelines";
 import { bootPairing } from "@/lib/pairing";
-import { PairPhoneDialogHost } from "@/components/pairing/PairPhoneDialog";
 import { DeviceStatus } from "@/components/pairing/DeviceStatus";
-import { MachineApprovalHost } from "@/components/machines/MachineApprovalDialog";
 import { bootTerminalPerf } from "@/lib/terminalPerf";
 import { bootCloudControl } from "@/lib/cloudControl";
 import { bootMachineControl } from "@/lib/machineControl";
 import { useEditors } from "@/lib/editors";
-import { EditorSplit } from "@/components/editor/EditorSplit";
 import { onTemplateSettingsRequest, openLocalProject } from "@/lib/projectStart";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { REPO_URL, repoFile } from "@/lib/repo";
 import { workspaceKey, branchSessionsAsTabs } from "@/lib/tabLayouts";
 import { conversationBranch } from "@/lib/checkout";
 import { stepAttentionSession, stepVisibleSession } from "@/lib/sessionNavigation";
-import { ImageViewerHost } from "@/components/ui/ImageViewer";
 import { WindowControls } from "./WindowControls";
 import { AppMenu } from "./AppMenu";
 import { isMac } from "@/lib/platform";
@@ -125,6 +98,35 @@ import { isMac } from "@/lib/platform";
 const StatusBar = lazy(() => import("@/components/layout/StatusBar").then((module) => ({ default: module.StatusBar })));
 const CloudWorkspaceMain = lazy(() => import("@/components/cloud/CloudWorkspaceMain").then((module) => ({ default: module.CloudWorkspaceMain })));
 const MachineMain = lazy(() => import("@/components/machines/MachineMain").then((module) => ({ default: module.MachineMain })));
+const CloudSetupFlow = lazy(() => import("@/components/cloudSetup/CloudSetupFlow").then((module) => ({ default: module.CloudSetupFlow })));
+const IssuesView = lazy(() => import("@/components/issues/IssuesView").then((module) => ({ default: module.IssuesView })));
+const ProjectOverview = lazy(() => import("@/components/project/ProjectOverview").then((module) => ({ default: module.ProjectOverview })));
+const AgentDashboard = lazy(() => import("@/components/dashboard/AgentDashboard").then((module) => ({ default: module.AgentDashboard })));
+const SkillsView = lazy(() => import("@/components/skills/SkillsView").then((module) => ({ default: module.SkillsView })));
+const AutomationsView = lazy(() => import("@/components/automations/AutomationsView").then((module) => ({ default: module.AutomationsView })));
+const BotsView = lazy(() => import("@/components/bots/BotsView").then((module) => ({ default: module.BotsView })));
+const BotView = lazy(() => import("@/components/bots/BotView").then((module) => ({ default: module.BotView })));
+const CommandPalette = lazy(() => import("@/components/command/CommandPalette").then((module) => ({ default: module.CommandPalette })));
+const SessionView = lazy(() => import("@/components/session/SessionView").then((module) => ({ default: module.SessionView })));
+const MachineSessionHost = lazy(() => import("@/components/machines/MachineSessionHost").then((module) => ({ default: module.MachineSessionHost })));
+const CloudSessionHost = lazy(() => import("@/components/session/CloudSessionHost").then((module) => ({ default: module.CloudSessionHost })));
+const NewSessionDialog = lazy(() => import("@/components/session/NewSessionDialog").then((module) => ({ default: module.NewSessionDialog })));
+const RightPanel = lazy(() => import("@/components/layout/RightPanel").then((module) => ({ default: module.RightPanel })));
+const EditorSplit = lazy(() => import("@/components/editor/EditorSplit").then((module) => ({ default: module.EditorSplit })));
+const SignInLinkDialog = lazy(() => import("@/components/account/PasteSignInLink").then((module) => ({ default: module.SignInLinkDialog })));
+const LinkSessionDialog = lazy(() => import("@/components/start/LinkSessionDialog").then((module) => ({ default: module.LinkSessionDialog })));
+const ProjectStartDialogHost = lazy(() => import("@/components/start/ProjectStartDialogs").then((module) => ({ default: module.ProjectStartDialogHost })));
+const ShareSessionDialogHost = lazy(() => import("@/components/session/ShareSessionDialog").then((module) => ({ default: module.ShareSessionDialogHost })));
+const GuestSessionHost = lazy(() => import("@/components/session/GuestSession").then((module) => ({ default: module.GuestSessionHost })));
+const CloudSchedulesDialogHost = lazy(() => import("@/components/cloud/CloudSchedulesDialog").then((module) => ({ default: module.CloudSchedulesDialogHost })));
+const CloudShareDialogHost = lazy(() => import("@/components/cloud/CloudShareDialog").then((module) => ({ default: module.CloudShareDialogHost })));
+const NewCloudWorkspaceDialogHost = lazy(() => import("@/components/cloud/NewCloudWorkspaceDialog").then((module) => ({ default: module.NewCloudWorkspaceDialogHost })));
+const WorkspaceRestoreDialog = lazy(() => import("@/components/session/WorkspaceRestoreDialog").then((module) => ({ default: module.WorkspaceRestoreDialog })));
+const WorkspaceRemoveDialog = lazy(() => import("@/components/session/WorkspaceRemoveDialog").then((module) => ({ default: module.WorkspaceRemoveDialog })));
+const WorktreeCleanupDialog = lazy(() => import("@/components/cleanup/WorktreeCleanupDialog").then((module) => ({ default: module.WorktreeCleanupDialog })));
+const PairPhoneDialogHost = lazy(() => import("@/components/pairing/PairPhoneDialog").then((module) => ({ default: module.PairPhoneDialogHost })));
+const MachineApprovalHost = lazy(() => import("@/components/machines/MachineApprovalDialog").then((module) => ({ default: module.MachineApprovalHost })));
+const ImageViewerHost = lazy(() => import("@/components/ui/ImageViewer").then((module) => ({ default: module.ImageViewerHost })));
 /** Where Settings opens when no section is asked for: General (PRO-374; it was Account, PRO-81). SettingsPage falls back to the same one. */
 const GENERAL_SETTINGS_TAB: SettingsTab = "general";
 const SettingsPage = lazy(() => import("@/components/settings/SettingsPage").then((module) => ({ default: module.SettingsPage })));
@@ -148,7 +150,7 @@ export const TITLEBAR_INSET = isMac ? 78 : 8;
  */
 export function AppShell() {
   const prefs = usePrefs();
-  const status = useStatus();
+  const statusBarVisible = useStatusSelector((s) => s.settings.visible);
   // A runtime the app is moving to shows in the status bar, even a hidden one (#766).
   const runtimeSwitch = useRuntimeSwitch();
   const store = useSessionStore();
@@ -174,43 +176,50 @@ export function AppShell() {
     setSettingsOpen(true);
   }), [canLeave]);
 
-  // An update is looked for in the background, so it is seen without going to Settings for it.
-  useEffect(() => { void bootDataPrivacy().then(() => startUpdateChecks()); }, []);
+  // Critical interactive subscriptions run immediately; non-critical background services stagger into idle time.
   useEffect(() => {
     void subscribeAgentEvents();
     void subscribeTabPty();
+    void subscribeTerminals();
     void bootSessions();
     // Launch where the app was left (PRO-130): the session and its panel tab, or the page.
     bootLastView();
-    // Conversations nobody has written in for the limit in Settings go to the archive (#718).
-    startIdleArchive();
-    void bootAutomations();
-    void bootIssuePipelines();
-    void bootSelfUi();
     void loadModels();
-    startNotifications();
     void bootStatus();
     void bootDataPrivacy().then(() => {
       void bootAccount();
       bootDesktopInbox();
-      bootCloudPresence();
       bootCloudCatalog();
     });
     bootCloudSelection();
     // Live session lists and local mirrors (PRO-25) follow the connections other surfaces open,
     // from launch and whatever is on screen: hidden sidebar or Settings included (#498).
     bootCloudSessions();
-    bootCloudPipelines();
     bootCloudMirrors();
-    // The reader's cloud sessions say which issues they work on, as this Mac's do (#441).
-    bootCloudWorkClaims();
-    void bootPairing();
-    void bootTerminalPerf();
-    void bootCloudControl();
-    // `terminalx … --machine` (PRO-356): native code has checked the switch and the machine first.
-    void bootMachineControl();
-    void bootFloating();
-    void bootMergedCleanup();
+
+    const cancelIdle = scheduleIdle(() => {
+      void bootDataPrivacy().then(() => {
+        startUpdateChecks();
+        bootCloudPresence();
+      });
+      // Conversations nobody has written in for the limit in Settings go to the archive (#718).
+      startIdleArchive();
+      void bootAutomations();
+      void bootIssuePipelines();
+      void bootSelfUi();
+      startNotifications();
+      bootCloudPipelines();
+      // The reader's cloud sessions say which issues they work on, as this Mac's do (#441).
+      bootCloudWorkClaims();
+      void bootPairing();
+      void bootTerminalPerf();
+      void bootCloudControl();
+      // `terminalx … --machine` (PRO-356): native code has checked the switch and the machine first.
+      void bootMachineControl();
+      void bootFloating();
+      void bootMergedCleanup();
+    });
+    return cancelIdle;
   }, []);
 
   // The first prompt of a new session is sent right after the worktree exists.
@@ -222,6 +231,7 @@ export function AppShell() {
 
   const toggleSidebar = useCallback(() => setPrefs({ sidebarOpen: !prefs.sidebarOpen }), [prefs.sidebarOpen]);
   const togglePanel = useCallback(() => setPrefs({ panelOpen: !prefs.panelOpen }), [prefs.panelOpen]);
+  const openPalette = useCallback(() => setPaletteOpen(true), []);
   // The general way in (the Settings button, the shortcut) names no section and opens Account,
   // whichever section was open last; an action that names one (Agent settings, the palette) gets it.
   // Also a click handler, which is handed the click's event: anything that is not a section's
@@ -429,33 +439,37 @@ export function AppShell() {
         <CleanupIndicator onOpenStorage={openStorageSettings} />
       </NoticeColumn>
       <BypassDialog />
-      <LinkSessionDialog />
-      <ImageViewerHost />
       <SessionDialogs />
-      <CloudShareDialogHost />
-      <CloudSchedulesDialogHost />
-      <ShareSessionDialogHost />
-      <SignInLinkDialog />
-      <GuestSessionHost />
-      <NewCloudWorkspaceDialogHost />
-      <WorkspaceRemoveDialog />
-      <WorkspaceRestoreDialog />
-      <WorktreeCleanupDialog />
-      <ProjectStartDialogHost />
-      <PairPhoneDialogHost />
-      <MachineApprovalHost />
+      <Suspense fallback={null}>
+        <LinkSessionDialog />
+        <ImageViewerHost />
+        <CloudShareDialogHost />
+        <CloudSchedulesDialogHost />
+        <ShareSessionDialogHost />
+        <SignInLinkDialog />
+        <GuestSessionHost />
+        <NewCloudWorkspaceDialogHost />
+        <WorkspaceRemoveDialog />
+        <WorkspaceRestoreDialog />
+        <WorktreeCleanupDialog />
+        <ProjectStartDialogHost />
+        <PairPhoneDialogHost />
+        <MachineApprovalHost />
+      </Suspense>
       <div className="flex min-h-0 flex-1">
         {settingsOpen && cloudSetup ? (
-          <CloudSetupFlow
-            key={`${account.status.identity?.email ?? ""}:${cloudSetup.kind === "resume" ? cloudSetup.organizationId : "create"}`}
-            target={cloudSetup}
-            onExit={() => setCloudSetup(null)}
-            onDone={() => {
-              if (!canLeave()) return;
-              setCloudSetup(null);
-              setSettingsOpen(false);
-            }}
-          />
+          <Suspense fallback={viewFallback}>
+            <CloudSetupFlow
+              key={`${account.status.identity?.email ?? ""}:${cloudSetup.kind === "resume" ? cloudSetup.organizationId : "create"}`}
+              target={cloudSetup}
+              onExit={() => setCloudSetup(null)}
+              onDone={() => {
+                if (!canLeave()) return;
+                setCloudSetup(null);
+                setSettingsOpen(false);
+              }}
+            />
+          </Suspense>
         ) : settingsOpen ? (
           <Suspense fallback={viewFallback}>
             <SettingsPage
@@ -484,7 +498,7 @@ export function AppShell() {
                 onOpenAgents={showAgents}
                 onOpenAutomations={showAutomations}
                 onOpenSkills={showSkills}
-                onSearch={() => setPaletteOpen(true)}
+                onSearch={openPalette}
               />
             )}
             </PanelPresence>
@@ -493,31 +507,43 @@ export function AppShell() {
               // A machine's session in the same SessionView as a local or cloud one (PRO-347, 21.08).
               <main className={MAIN}>
                 <ErrorBoundary key={machineSession} label="the session">
-                  <MachineSessionHost sessionKey={machineSession} sidebarOpen={sidebarOpen} onToggleSidebar={toggleSidebar} />
+                  <Suspense fallback={viewFallback}>
+                    <MachineSessionHost sessionKey={machineSession} sidebarOpen={sidebarOpen} onToggleSidebar={toggleSidebar} />
+                  </Suspense>
                 </ErrorBoundary>
               </main>
             ) : cloudKey ? (
               <main className={MAIN}>
                 <ErrorBoundary key={cloudKey} label="the session">
-                  <CloudSessionHost sessionKey={cloudKey} sidebarOpen={sidebarOpen} onToggleSidebar={toggleSidebar} />
+                  <Suspense fallback={viewFallback}>
+                    <CloudSessionHost sessionKey={cloudKey} sidebarOpen={sidebarOpen} onToggleSidebar={toggleSidebar} />
+                  </Suspense>
                 </ErrorBoundary>
               </main>
             ) : botView ? (
               // A bot's view (PRO-468): its header, tabs and chats, a selected chat of the bot's open in it.
               <ErrorBoundary key={botView.botId} label="the bot">
-                <BotView botId={botView.botId} chatId={botView.chatId} sidebarOpen={sidebarOpen} onToggleSidebar={toggleSidebar} titlebarInset={TITLEBAR_INSET} />
+                <Suspense fallback={viewFallback}>
+                  <BotView botId={botView.botId} chatId={botView.chatId} sidebarOpen={sidebarOpen} onToggleSidebar={toggleSidebar} titlebarInset={TITLEBAR_INSET} />
+                </Suspense>
               </ErrorBoundary>
             ) : selected ? (
               <main className={MAIN}>
                 <ErrorBoundary key={branchSessionsAsTabs(prefs) ? `${workspaceKey(selected, store.chatsPath)}:${conversationBranch(selected, store.chatsPath, store.workspaces)}` : selected.id} label="the session">
-                  <SessionView session={selected} sidebarOpen={sidebarOpen} onToggleSidebar={toggleSidebar} />
+                  <Suspense fallback={viewFallback}>
+                    <SessionView session={selected} sidebarOpen={sidebarOpen} onToggleSidebar={toggleSidebar} />
+                  </Suspense>
                 </ErrorBoundary>
               </main> ) : behind ? (
               <main className={MAIN}>
                 <ErrorBoundary key={behind.id} label="the session">
-                  <SessionView session={behind} sidebarOpen={sidebarOpen} onToggleSidebar={toggleSidebar} />
+                  <Suspense fallback={viewFallback}>
+                    <SessionView session={behind} sidebarOpen={sidebarOpen} onToggleSidebar={toggleSidebar} />
+                  </Suspense>
                 </ErrorBoundary>
-                <NewSessionDialog onClose={closeNewSession} onCreated={onCreated} />
+                <Suspense fallback={null}>
+                  <NewSessionDialog onClose={closeNewSession} onCreated={onCreated} />
+                </Suspense>
               </main>
             ) : cloudWorkspace ? (
               <ErrorBoundary key={cloudWorkspace} label="the cloud workspace">
@@ -545,7 +571,7 @@ export function AppShell() {
       </div>
 
       <div className="flex shrink-0 justify-end">
-        {(status.settings.visible || runtimeSwitch) && !(settingsOpen && cloudSetup) ? (
+        {(statusBarVisible || runtimeSwitch) && !(settingsOpen && cloudSetup) ? (
           <div className="min-w-0 flex-1">
             <ErrorBoundary label="the status bar" fallback={null}>
               <Suspense fallback={statusBarFallback}>
@@ -557,7 +583,11 @@ export function AppShell() {
         {!localDockVisible && <DeviceStatus />}
       </div>
 
-      {paletteOpen ? <CommandPalette open onOpenChange={setPaletteOpen} onOpenSettings={openSettings} onCreated={onCreated} /> : null}
+      {paletteOpen ? (
+        <Suspense fallback={null}>
+          <CommandPalette open onOpenChange={setPaletteOpen} onOpenSettings={openSettings} onCreated={onCreated} />
+        </Suspense>
+      ) : null}
       <UpdateNotice />
     </div>
     </SettingsLeaveBoundaryContext.Provider>
@@ -649,27 +679,37 @@ function UnselectedWorkspace({
           <div className="flex min-h-0 min-w-0 flex-1 flex-col">
             {view === "welcome" && <WelcomeTabActions />}
             {view === "issues" ? (
-              <IssuesView
-                onCreated={onCreated}
-                useWorktree={useWorktree}
-                onUseWorktreeChange={setUseWorktree}
-                onTargetProjectChange={setIssueProjectPath}
-              />
+              <Suspense fallback={viewFallback}>
+                <IssuesView
+                  onCreated={onCreated}
+                  useWorktree={useWorktree}
+                  onUseWorktreeChange={setUseWorktree}
+                  onTargetProjectChange={setIssueProjectPath}
+                />
+              </Suspense>
             ) : view === "project" && store.selectedProject ? (
-              <ProjectOverview key={store.selectedProject} path={store.selectedProject} />
+              <Suspense fallback={viewFallback}>
+                <ProjectOverview key={store.selectedProject} path={store.selectedProject} />
+              </Suspense>
             ) : view === "agents" ? (
-              <AgentDashboard />
+              <Suspense fallback={viewFallback}>
+                <AgentDashboard />
+              </Suspense>
             ) : view === "bots" ? (
               // Nothing until the switch is read on: off, AppShell sends the view back to the welcome screen.
-              botsOn ? <BotsView /> : null
+              botsOn ? <Suspense fallback={viewFallback}><BotsView /></Suspense> : null
             ) : view === "automations" ? (
-              <AutomationsView initialAutomationId={store.selectedAutomationId} />
+              <Suspense fallback={viewFallback}>
+                <AutomationsView initialAutomationId={store.selectedAutomationId} />
+              </Suspense>
             ) : view === "skills" ? (
-              <SkillsView
-                key={`${store.skillsFilter?.projectPath ?? store.selectedProject ?? "home"}:${store.skillsFilter?.agent ?? "all"}`}
-                projectPath={store.skillsFilter?.projectPath ?? store.selectedProject}
-                initialAgent={store.skillsFilter?.agent ?? null}
-              />
+              <Suspense fallback={viewFallback}>
+                <SkillsView
+                  key={`${store.skillsFilter?.projectPath ?? store.selectedProject ?? "home"}:${store.skillsFilter?.agent ?? "all"}`}
+                  projectPath={store.skillsFilter?.projectPath ?? store.selectedProject}
+                  initialAgent={store.skillsFilter?.agent ?? null}
+                />
+              </Suspense>
             ) : startScreen ? (
               <StartScreen onOpenSettings={onOpenSettings} />
             ) : view === "welcome" ? (
@@ -678,24 +718,26 @@ function UnselectedWorkspace({
               <NewSessionView onCreated={onCreated} useWorktree={useWorktree} onUseWorktreeChange={setUseWorktree} />
             )}
           </div>
-          {checkoutEditorId && hasCheckoutEditors ? <EditorSplit sessionId={checkoutEditorId} active /> : null}
+          {checkoutEditorId && hasCheckoutEditors ? <Suspense fallback={null}><EditorSplit sessionId={checkoutEditorId} active /></Suspense> : null}
         </section>
       </main>
       <PanelPresence side="right" open={!!(prefs.panelOpen && panelAvailable && cwd && project)}>
       {prefs.panelOpen && panelAvailable && cwd && project && (
-        <RightPanel
-          key={cwd}
-          cwd={cwd}
-          isGit={project.kind !== "folder"}
-          branch={workspace?.branch}
-          workingTree
-          rootName={project.name}
-          labelMode={labelMode}
-          workspace={workspace?.managed && !workspace.isMain ? { projectPath: project.path, name: workspace.name } : undefined}
-        />
+        <Suspense fallback={null}>
+          <RightPanel
+            key={cwd}
+            cwd={cwd}
+            isGit={project.kind !== "folder"}
+            branch={workspace?.branch}
+            workingTree
+            rootName={project.name}
+            labelMode={labelMode}
+            workspace={workspace?.managed && !workspace.isMain ? { projectPath: project.path, name: workspace.name } : undefined}
+          />
+        </Suspense>
       )}
       </PanelPresence>
-      {underDialog && <NewSessionDialog onClose={closeNewSession} onCreated={onCreated} />}
+      {underDialog && <Suspense fallback={null}><NewSessionDialog onClose={closeNewSession} onCreated={onCreated} /></Suspense>}
     </>
   );
 }

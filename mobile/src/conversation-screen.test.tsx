@@ -1676,4 +1676,29 @@ describe("one quiet connection state in a session (#983)", () => {
     await render();
     expect(strip()).toEqual([false, false]);
   });
+
+  it("debounces draft AsyncStorage writes while typing and isolates composer input from TranscriptList (P-45)", async () => {
+    vi.useFakeTimers();
+    try {
+      await render();
+      const draftKey = `terminalx:draft:${mocks.params.hostId}:worktree:claude`;
+      const initialData = mocks.listProps.data;
+
+      await type("h");
+      await type("he");
+      await type("hel");
+      await type("hell");
+      await type("hello");
+
+      // Typing must not write to AsyncStorage synchronously on every keystroke, and TranscriptList data reference stays untouched.
+      expect(mocks.storage.has(draftKey)).toBe(false);
+      expect(mocks.listProps.data).toBe(initialData);
+
+      // Once the debounce interval elapses, the latest draft is persisted in one write.
+      await act(async () => { await vi.advanceTimersByTimeAsync(500); });
+      expect(mocks.storage.get(draftKey)).toBe("hello");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

@@ -77,6 +77,9 @@ interface TurnProps {
   /** What the turn details say for settings a turn's own record lacks. */
   turnFallback?: TurnFallback;
   onReset?: (endSeq: number) => void;
+  /** Indexed reset callback so callers can pass a stable reference without allocating per-turn closures. */
+  onResetAt?: (endSeq: number, turnIndex: number) => void;
+  turnIndex?: number;
   /** The agent's name, for what a message taken mid-turn says ("Codex reads it at its next tool call"). */
   agent?: { id: string; name: string };
   /** When the agent started working on the running turn (ms): the working line counts up from it. */
@@ -94,6 +97,7 @@ interface TurnProps {
   resetUnavailable?: string;
   secondOpinionUnavailable?: string;
   retryInNewChatUnavailable?: string;
+  webLinksOnly?: boolean;
 }
 
 function TurnBody({
@@ -115,6 +119,8 @@ function TurnBody({
   onSaveSnippet,
   turnFallback,
   onReset,
+  onResetAt,
+  turnIndex,
   workingSince,
   onRetry,
   onRetryInNewChat,
@@ -122,24 +128,38 @@ function TurnBody({
   resetUnavailable,
   secondOpinionUnavailable,
   retryInNewChatUnavailable,
+  webLinksOnly = false,
 }: TurnProps) {
   const prefs = usePrefs();
   const [expanded, setExpanded] = useDisclosure("fold");
-  const hasAnswer = turn.work.some((w) => w.kind === "text");
-  const toolItems = turn.work.filter((w) => !outsideFold(w));
+  const { hasAnswer, toolItems, failure, work, outsideWork, foldedSteps, trailingSteps } = useMemo(() => {
+    const hasAnswer = turn.work.some((w) => w.kind === "text");
+    const toolItems = turn.work.filter((w) => !outsideFold(w));
+    const failure = failureOf(turn);
+    const work = failure ? turn.work.filter((w) => !failure.merged.has(w.key)) : turn.work;
+    const lastStep = work.reduce((last, w, i) => (outsideFold(w) ? last : i), -1);
+    return {
+      hasAnswer,
+      toolItems,
+      failure,
+      work,
+      lastStep,
+      outsideWork: work.filter(outsideFold),
+      foldedSteps: work.slice(0, lastStep + 1),
+      trailingSteps: work.slice(lastStep + 1),
+    };
+  }, [turn]);
   const foldable = prefs.foldToolCalls && !turn.live && toolItems.some(inFoldSummary) && (hasAnswer || turn.completed);
-  const streamText = stream.filter((s) => s.kind === "text" && s.text);
-  const streamThinking = stream.filter((s) => s.kind === "thinking" && s.text && !s.done);
+  const streamText = useMemo(() => (stream.length ? stream.filter((s) => s.kind === "text" && s.text) : []), [stream]);
+  const streamThinking = useMemo(() => (stream.length ? stream.filter((s) => s.kind === "thinking" && s.text && !s.done) : []), [stream]);
   const linkContext = useMemo(() => cwd ? { sessionId, cwd } : undefined, [cwd, sessionId]);
   const changes = useMemo(() => (prefs.turnChanges && turn.completed ? turnFileChanges(turn) : []), [prefs.turnChanges, turn]);
-  const outcome = turnOutcome(turn);
-  // A failed turn says why once (one card), not as an error row and again as the turn's failure.
-  const failure = useMemo(() => failureOf(turn), [turn]);
-  const work = failure ? turn.work.filter((w) => !failure.merged.has(w.key)) : turn.work;
-  // Opened, the fold holds everything up to the last step, in the order it happened: the agent's words before and
-  // between its steps stay where it said them. What it said after its last step is the answer, under the fold.
-  const lastStep = work.reduce((last, w, i) => (outsideFold(w) ? last : i), -1);
-  const row = (w: WorkItem) => <WorkRow key={w.key} item={w} cwd={cwd} linkContext={linkContext} onSendQueuedNow={onSendQueuedNow} onSendAgain={onSendAgain} agent={agent} />;
+  const outcome = useMemo(() => turnOutcome(turn), [turn]);
+  const effectiveOnReset = useMemo(
+    () => (onReset ?? (onResetAt && turnIndex != null ? (endSeq: number) => onResetAt(endSeq, turnIndex) : undefined)),
+    [onReset, onResetAt, turnIndex],
+  );
+  const row = (w: WorkItem) => <WorkRow key={w.key} item={w} cwd={cwd} linkContext={linkContext} onSendQueuedNow={onSendQueuedNow} onSendAgain={onSendAgain} agent={agent} webLinksOnly={webLinksOnly} />;
 
   return (
     // A block formatting context: a last row's margin stays inside, so the turn's measured height is all the room it takes (#727).
@@ -163,12 +183,12 @@ function TurnBody({
           {expanded ? (
             <>
               <div className="ml-1 mt-1 border-l border-hairline pl-3.5" data-testid="turn-fold-body">
-                {work.slice(0, lastStep + 1).map(row)}
+                {foldedSteps.map(row)}
               </div>
-              {work.slice(lastStep + 1).map(row)}
+              {trailingSteps.map(row)}
             </>
           ) : (
-            work.filter(outsideFold).map(row)
+            outsideWork.map(row)
           )}
         </div>
       ) : (
@@ -191,7 +211,7 @@ function TurnBody({
         </div>
       )}
       {streamText.map((s) => (
-        <div key={`${s.ref.messageId}:${s.ref.index}`} className="mb-3"><Markdown text={s.text} streaming linkContext={linkContext} /></div>
+        <div key={`${s.ref.messageId}:${s.ref.index}`} className="mb-3"><Markdown text={s.text} streaming linkContext={linkContext} webLinksOnly={webLinksOnly} remoteImages={false} /></div>
       ))}
 
       {working && !streamText.length && !streamThinking.length && !streamingTool && (
@@ -205,7 +225,7 @@ function TurnBody({
 
       {prefs.turnChanges && turn.completed && <TurnChanges key={`${sessionId}:${checkpointTabId ?? ""}:${turn.checkpointSeq ?? turn.seq}`} changes={changes} cwd={cwd} linkContext={linkContext} checkpoint={checkpointTabId ? { sessionId, tabId: checkpointTabId, seq: turn.checkpointSeq ?? turn.seq, api: checkpoints } : undefined} range={turn.prompt?.baseline && turn.completed.head ? { base: turn.prompt.baseline, head: turn.completed.head } : null} />}
 
-      {(turn.completed || !turn.live) && <TurnFooter showSecondOpinionButton={prefs.secondOpinionButton} turn={turn} sessionId={sessionId} tabId={tabId} outcome={outcome} fallback={turnFallback} onSecondOpinion={turn.completed && !turn.live ? onSecondOpinion : undefined} secondOpinionAgent={secondOpinionAgent} onReset={onReset} onFork={onFork} onSaveSnippet={onSaveSnippet}
+      {(turn.completed || !turn.live) && <TurnFooter showSecondOpinionButton={prefs.secondOpinionButton} turn={turn} sessionId={sessionId} tabId={tabId} outcome={outcome} fallback={turnFallback} onSecondOpinion={turn.completed && !turn.live ? onSecondOpinion : undefined} secondOpinionAgent={secondOpinionAgent} onReset={effectiveOnReset} onFork={onFork} onSaveSnippet={onSaveSnippet}
         unavailable={{ fork: forkUnavailable, reset: resetUnavailable, secondOpinion: turn.completed && !turn.live ? secondOpinionUnavailable : undefined }} />}
     </div>
   );
@@ -495,11 +515,11 @@ export function previewFromPartialJson(partial: string): string {
   return "";
 }
 
-function WorkRow({ item, cwd, linkContext, onSendQueuedNow, onSendAgain, agent }: { item: WorkItem; cwd?: string; linkContext?: { sessionId: string; cwd: string }; onSendQueuedNow?: (seq: number) => void; onSendAgain?: (seq: number) => void; agent?: { id: string; name: string } }) {
+const WorkRow = memo(function WorkRow({ item, cwd, linkContext, onSendQueuedNow, onSendAgain, agent, webLinksOnly = false }: { item: WorkItem; cwd?: string; linkContext?: { sessionId: string; cwd: string }; onSendQueuedNow?: (seq: number) => void; onSendAgain?: (seq: number) => void; agent?: { id: string; name: string }; webLinksOnly?: boolean }) {
   const section = useSearchSection(item.kind === "queued" ? `message:${item.seq}` : item.key);
   switch (item.kind) {
     case "text":
-      return <div className="mb-3"><div {...section}><Markdown text={item.text} linkContext={linkContext} /></div>{linkContext && <MentionedMedia text={item.text} linkContext={linkContext} />}</div>;
+      return <div className="mb-3"><div {...section}><Markdown text={item.text} linkContext={linkContext} webLinksOnly={webLinksOnly} remoteImages={false} /></div>{!webLinksOnly && linkContext && <MentionedMedia text={item.text} linkContext={linkContext} />}</div>;
     case "reasoning":
       return <ReasoningRow name={item.key} text={item.text} durationMs={item.durationMs} linkContext={linkContext} />;
     case "tool":
@@ -566,7 +586,7 @@ function WorkRow({ item, cwd, linkContext, onSendQueuedNow, onSendAgain, agent }
         </div>
       );
   }
-}
+});
 
 /** The prompt an automation or a handoff started the session with, folded under its status line. */
 /** An error in the conversation. Its time in view, in the tab in front, is told to the tab's recovery incidents (#815). */
@@ -680,7 +700,7 @@ function WithdrawnNote({ seq, unconfirmed, onSendAgain }: { seq?: number; unconf
 }
 
 function MentionedMedia({ text, linkContext }: { text: string; linkContext: { sessionId: string; cwd: string } }) {
-  const paths = useMemo(() => mediaMentions(text), [text]);
+  const paths = useMemo(() => mediaMentions(text, linkContext.cwd), [text, linkContext.cwd]);
   return <ChatMedia paths={paths} context={linkContext} />;
 }
 

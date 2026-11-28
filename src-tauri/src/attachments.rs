@@ -143,16 +143,21 @@ pub struct FilePart {
 /// What one part read for an upload holds: 384 KiB, as one `session.attach` part takes.
 pub const READ_PART_BYTES: u64 = 384 * 1024;
 
-/// The bytes of `path` from `offset`, at most [`READ_PART_BYTES`] of them,
-/// for a file attached to a message for a machine (PRO-407). Refused as
-/// [`store`] refuses it: not a regular file, or over [`MAX_ATTACHMENT_BYTES`].
-pub fn read_part(path: &str, offset: u64) -> Result<FilePart> {
-    use std::io::{Read, Seek, SeekFrom};
+/// Root-confined part reader for Tauri IPC: only registered
+/// workspace/attachment roots or explicitly OS-dropped files may be read.
+/// Refused as [`store`] refuses it: not a regular file, or over [`MAX_ATTACHMENT_BYTES`].
+pub fn read_part_confined(path: &str, offset: u64) -> Result<FilePart> {
     let name = sanitized(path)?;
-    let mut file = std::fs::File::open(path).with_context(|| format!("{name} can’t be read."))?;
+    let (_, file) = crate::files::open_confined_read_in(Path::new(path), &crate::files::allowed_read_roots(), true, false)
+        .with_context(|| format!("{name} can’t be read."))?;
+    read_part_from_file(&name, file, offset)
+}
+
+fn read_part_from_file(name: &str, mut file: std::fs::File, offset: u64) -> Result<FilePart> {
+    use std::io::{Read, Seek, SeekFrom};
     let meta = file.metadata().with_context(|| format!("{name} can’t be read."))?;
     ensure!(meta.is_file(), "{name} is not a file that can be attached.");
-    if meta.len() > MAX_ATTACHMENT_BYTES { return Err(too_large(&name)); }
+    if meta.len() > MAX_ATTACHMENT_BYTES { return Err(too_large(name)); }
     let mut bytes = Vec::new();
     if offset < meta.len() {
         file.seek(SeekFrom::Start(offset)).with_context(|| format!("{name} can’t be read."))?;
@@ -183,8 +188,10 @@ fn new_folder(dir: &Path) -> Result<PathBuf> {
 }
 
 /// Where one file's bytes come from, once it has passed the rules.
+/// Keeping the already-opened `File` closes the symlink TOCTOU gap between
+/// validation and copy.
 enum Source {
-    Path(PathBuf),
+    File(std::fs::File),
     Bytes(Vec<u8>),
 }
 
@@ -196,18 +203,26 @@ fn reserved(name: &str) -> anyhow::Error {
     anyhow!("{name} is a name TerminalX uses for session files. Rename it and attach it again.")
 }
 
-/// Check one file against the rules, and say where its bytes are.
-fn admit_input(file: &FileInput) -> Result<(String, Source, u64)> {
+/// Check one file against the rules, and open its handle immediately (`O_NOFOLLOW`)
+/// so a concurrent symlink swap cannot redirect the copy.
+fn admit_input(file: &FileInput, allowed_roots: Option<&[PathBuf]>) -> Result<(String, Source, u64)> {
     let name = sanitized(&file.name)?;
     if is_reserved(&name) { return Err(reserved(&name)); }
     match (&file.path, &file.data) {
         (Some(path), None) => {
-            let path = PathBuf::from(path);
-            let meta = std::fs::metadata(&path).with_context(|| format!("{name} can’t be read."))?;
+            let opened = if let Some(roots) = allowed_roots {
+                crate::files::open_confined_read_in(Path::new(path), roots, true, false)
+                    .with_context(|| format!("{name} can’t be read."))?
+                    .1
+            } else {
+                let canonical = Path::new(path).canonical().with_context(|| format!("{name} can’t be read."))?;
+                let parent = canonical.parent().ok_or_else(|| anyhow!("{name} can’t be read."))?;
+                crate::workspace_file::open(parent, &canonical).with_context(|| format!("{name} can’t be read."))?
+            };
+            let meta = opened.metadata().with_context(|| format!("{name} can’t be read."))?;
             ensure!(meta.is_file(), "{name} is not a file that can be attached.");
             if meta.len() > MAX_ATTACHMENT_BYTES { return Err(too_large(&name)); }
-            std::fs::File::open(&path).with_context(|| format!("{name} can’t be read."))?;
-            Ok((name, Source::Path(path), meta.len()))
+            Ok((name, Source::File(opened), meta.len()))
         }
         (None, Some(data)) => {
             // Base64 is a third larger than the bytes: refuse before decoding.
@@ -225,22 +240,51 @@ fn admit_input(file: &FileInput) -> Result<(String, Source, u64)> {
 /// Copy `files` into one new folder of the session's attachments folder.
 /// All or nothing: one file refused refuses the call, and nothing is left.
 pub fn store(session_id: &str, files: &[FileInput]) -> Result<Vec<FileRef>> {
+    store_with_roots(session_id, files, None)
+}
+
+/// Root-confined variant of [`store`] for Tauri IPC: path-based inputs must live
+/// inside registered workspace/attachment roots or explicitly OS-dropped files.
+pub fn store_confined(session_id: &str, files: &[FileInput]) -> Result<Vec<FileRef>> {
+    let roots = crate::files::allowed_read_roots();
+    store_with_roots(session_id, files, Some(&roots))
+}
+
+#[cfg(test)]
+pub fn store_in_roots(session_id: &str, files: &[FileInput], allowed_roots: &[PathBuf]) -> Result<Vec<FileRef>> {
+    store_with_roots(session_id, files, Some(allowed_roots))
+}
+
+fn store_with_roots(session_id: &str, files: &[FileInput], allowed_roots: Option<&[PathBuf]>) -> Result<Vec<FileRef>> {
+    use std::io::{Read, Write};
     ensure!(files.len() <= MAX_FILES_PER_MESSAGE, "At most {MAX_FILES_PER_MESSAGE} files go with one message.");
     if files.is_empty() { return Ok(Vec::new()); }
-    let admitted = files.iter().map(admit_input).collect::<Result<Vec<_>>>()?;
+    let admitted = files.iter().map(|f| admit_input(f, allowed_roots)).collect::<Result<Vec<_>>>()?;
     let folder = new_folder(&session_folder(session_id)?)?;
     let written = (|| {
         let mut used = HashSet::new();
         let mut refs = Vec::with_capacity(admitted.len());
-        for ((name, source, size), input) in admitted.into_iter().zip(files) {
+        for ((name, source, expected_size), input) in admitted.into_iter().zip(files) {
             let name = unique(&name, &mut used);
             let to = folder.join(&name);
-            match source {
-                Source::Path(from) => { std::fs::copy(&from, &to).with_context(|| format!("copy {name}"))?; }
-                Source::Bytes(bytes) => std::fs::write(&to, bytes).with_context(|| format!("write {name}"))?,
-            }
+            let actual_size = match source {
+                Source::File(from) => {
+                    let mut out = open_new_attachment_file(&to).with_context(|| format!("create {name}"))?;
+                    let copied = std::io::copy(&mut from.take(MAX_ATTACHMENT_BYTES + 1), &mut out)
+                        .with_context(|| format!("copy {name}"))?;
+                    if copied > MAX_ATTACHMENT_BYTES {
+                        return Err(too_large(&name));
+                    }
+                    copied
+                }
+                Source::Bytes(bytes) => {
+                    let mut out = open_new_attachment_file(&to).with_context(|| format!("write {name}"))?;
+                    out.write_all(&bytes).with_context(|| format!("write {name}"))?;
+                    expected_size
+                }
+            };
             let media_type = input.media_type.clone().filter(|m| !m.is_empty()).or_else(|| media_type_of(&to));
-            refs.push(FileRef { path: to.to_string_lossy().into_owned(), name, media_type, size: Some(size) });
+            refs.push(FileRef { path: to.to_string_lossy().into_owned(), name, media_type, size: Some(actual_size) });
         }
         Ok(refs)
     })();
@@ -248,19 +292,46 @@ pub fn store(session_id: &str, files: &[FileInput]) -> Result<Vec<FileRef>> {
     written
 }
 
+fn open_new_attachment_file(to: &Path) -> std::io::Result<std::fs::File> {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags(libc::O_NOFOLLOW);
+    }
+    opts.open(to)
+}
+
 /// Size and media type of each path, in the order given. One bad path is
 /// marked `unreadable`; it never fails the rest.
+#[cfg(test)]
 pub fn inspect(paths: &[String]) -> Vec<FileFacts> {
+    inspect_with_roots(paths, None)
+}
+
+/// Root-confined variant of [`inspect`] for Tauri IPC: paths outside registered
+/// workspace/attachment roots (and not explicitly OS-dropped) report `unreadable`.
+pub fn inspect_confined(paths: &[String]) -> Vec<FileFacts> {
+    let roots = crate::files::allowed_read_roots();
+    inspect_with_roots(paths, Some(&roots))
+}
+
+fn inspect_with_roots(paths: &[String], allowed_roots: Option<&[PathBuf]>) -> Vec<FileFacts> {
     paths.iter().map(|path| {
         let p = Path::new(path);
         let name = base_name(path).to_string();
-        let meta = std::fs::metadata(p).ok().filter(|meta| meta.is_file());
-        let readable = meta.is_some() && std::fs::File::open(p).is_ok();
+        let opened = match allowed_roots {
+            Some(roots) => crate::files::open_confined_read_in(p, roots, true, false).ok().map(|(_, f)| f),
+            None => std::fs::File::open(p).ok(),
+        };
+        let meta = opened.and_then(|f| f.metadata().ok()).filter(|meta| meta.is_file());
+        let readable = meta.is_some();
         FileFacts {
             path: path.clone(),
             name,
             size: meta.as_ref().map_or(0, |meta| meta.len()),
-            media_type: media_type_of(p),
+            media_type: if readable { media_type_of(p) } else { None },
             unreadable: !readable,
         }
     }).collect()
@@ -277,10 +348,13 @@ fn attachments_root() -> Result<PathBuf> {
 /// save dialog (so it may replace a file there). `path` must be inside an
 /// attachments folder.
 pub fn save_copy(path: &str, to: &str) -> Result<()> {
+    let root = attachments_root()?;
     let from = Path::new(path).canonical().with_context(|| format!("{} is no longer on this computer.", base_name(path)))?;
-    ensure!(from.starts_with(attachments_root()?), "Only an attached file can be saved from here.");
-    ensure!(from.is_file(), "{} is not a file.", base_name(path));
-    std::fs::copy(&from, to).with_context(|| format!("save a copy to {to}"))?;
+    ensure!(from.starts_with(&root), "Only an attached file can be saved from here.");
+    let mut src = crate::workspace_file::open(&root, &from).with_context(|| format!("{} is no longer on this computer.", base_name(path)))?;
+    ensure!(src.metadata()?.is_file(), "{} is not a file.", base_name(path));
+    let mut dst = crate::files::open_export_destination(Path::new(to)).with_context(|| format!("save a copy to {to}"))?;
+    std::io::copy(&mut src, &mut dst).with_context(|| format!("save a copy to {to}"))?;
     Ok(())
 }
 
@@ -594,5 +668,34 @@ mod tests {
             assert_eq!(files.len(), 1, "{cli}");
             assert_eq!((files[0].path.as_str(), files[0].name.as_str(), files[0].size), (stored[0].path.as_str(), "pr-template.md", Some(10)), "{cli}");
         }
+    }
+
+    #[test]
+    fn confined_attachment_store_rejects_outside_paths_and_symlinks() {
+        let _home = store::temp_home();
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let ws_root = workspace.path().canonical().unwrap();
+        let allowed_file = workspace.path().join("notes.txt");
+        let secret_file = outside.path().join("id_rsa");
+        std::fs::write(&allowed_file, b"hello").unwrap();
+        std::fs::write(&secret_file, b"PRIVATE KEY").unwrap();
+
+        let stored = store_in_roots("s1", &[at("notes.txt", &allowed_file)], &[ws_root.clone()]).unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(std::fs::read(&stored[0].path).unwrap(), b"hello");
+
+        assert!(store_in_roots("s1", &[at("id_rsa", &secret_file)], &[ws_root.clone()]).is_err());
+
+        #[cfg(unix)]
+        {
+            let link = workspace.path().join("escape.txt");
+            std::os::unix::fs::symlink(&secret_file, &link).unwrap();
+            assert!(store_in_roots("s1", &[at("escape.txt", &link)], &[ws_root]).is_err());
+        }
+
+        // save_copy refuses writing into TERMINALX_HOME.
+        let internal = store::root().unwrap().join("settings.json");
+        assert!(save_copy(&stored[0].path, &internal.to_string_lossy()).is_err());
     }
 }

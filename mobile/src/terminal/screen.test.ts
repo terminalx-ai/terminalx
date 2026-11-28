@@ -65,4 +65,85 @@ describe("the phone's terminal screen", () => {
     expect(paletteColor(232)).toBe("#080808");
     expect(paletteColor(255)).toBe("#eeeeee");
   });
+
+  it("extracts only newly scrolled and viewport rows instead of re-reading full scrollback (P-45)", async () => {
+    const screen = new TerminalScreen(40, 4, 200);
+    // Push 80 lines into scrollback.
+    const bulk = Array.from({ length: 80 }, (_, i) => `line-${i}`).join("\r\n") + "\r\nactive-0";
+    await screen.write(bulk);
+    const initial = screen.lines();
+    expect(initial.length).toBeGreaterThan(75);
+    expect(text(screen).at(0)).toBe("line-0");
+
+    // Repeated lines() with no new write does zero extraction.
+    const countAfterFirst = screen.extractedRowsCount;
+    expect(screen.lines()).toBe(initial);
+    expect(screen.extractedRowsCount).toBe(countAfterFirst);
+
+    // 10 viewport-only redraws (spinner / progress updates): only 4 viewport rows extracted per draw.
+    for (let i = 1; i <= 10; i++) {
+      await screen.write(`\ractive-${i}   `);
+      const rows = screen.lines();
+      expect(rows.slice(0, 5)).toEqual(initial.slice(0, 5));
+      expect(rows.at(-1)?.spans.map((s) => s.text).join("").trimEnd()).toBe(`active-${i}`);
+    }
+    const extractedDuringRedraws = screen.extractedRowsCount - countAfterFirst;
+    expect(extractedDuringRedraws).toBe(10 * 4);
+
+    // Scrolling 2 more lines extracts only those 2 newly scrolled lines + 4 viewport rows.
+    const beforeScroll = screen.extractedRowsCount;
+    await screen.write("\r\nnew-a\r\nnew-b");
+    const afterScroll = text(screen);
+    expect(afterScroll).toContain("new-a");
+    expect(afterScroll).toContain("new-b");
+    expect(screen.extractedRowsCount - beforeScroll).toBeLessThanOrEqual(8);
+
+    // Wrapping past scrollback capacity keeps exact buffer contents.
+    const overflow = Array.from({ length: 250 }, (_, i) => `wrap-${i}`).join("\r\n");
+    await screen.write(`\r\n${overflow}`);
+    const wrapped = text(screen);
+    expect(wrapped).toContain("wrap-249");
+    expect(wrapped).not.toContain("line-0");
+    screen.dispose();
+  });
+
+  it("preserves exact scrollback contents during DECSTBM scroll-region scrolls both below and at the scrollback cap (P-45)", async () => {
+    // 1. Below scrollback cap (rows=4, scrollback=10): 6 lines push 3 lines into scrollback.
+    const belowCap = new TerminalScreen(20, 4, 10);
+    await belowCap.write("L0\r\nL1\r\nL2\r\nL3\r\nL4\r\nL5\r\nL6");
+    expect(text(belowCap).slice(0, 3)).toEqual(["L0", "L1", "L2"]);
+    const beforeDecstbmBelow = belowCap.extractedRowsCount;
+
+    // DECSTBM scroll region (rows 2..4) triggers xterm onScroll without evicting scrollback.
+    await belowCap.write("\x1b[2;4r\x1b[4;1Hx\r\ny\r\nz\r\n");
+    const afterBelow = text(belowCap);
+    // Top scrollback lines must stay intact (not sliced or duplicated).
+    expect(afterBelow.slice(0, 3)).toEqual(["L0", "L1", "L2"]);
+    // Only the 4 viewport rows were extracted (zero scrollback re-extraction).
+    expect(belowCap.extractedRowsCount - beforeDecstbmBelow).toBe(4);
+    belowCap.dispose();
+
+    // 2. At scrollback cap (rows=4, scrollback=5): fill scrollback completely to cap=5.
+    const atCap = new TerminalScreen(20, 4, 5);
+    await atCap.write(Array.from({ length: 12 }, (_, i) => `S${i}`).join("\r\n"));
+    const initialAtCap = text(atCap);
+    expect(initialAtCap).toHaveLength(9); // 5 scrollback + 4 viewport
+    expect(initialAtCap.slice(0, 5)).toEqual(["S3", "S4", "S5", "S6", "S7"]);
+    const beforeDecstbmAtCap = atCap.extractedRowsCount;
+
+    // DECSTBM scroll region at cap must NOT evict or duplicate scrollback lines.
+    await atCap.write("\x1b[2;4r\x1b[4;1Ha\r\nb\r\nc\r\n");
+    const afterDecstbmAtCap = text(atCap);
+    expect(afterDecstbmAtCap.slice(0, 5)).toEqual(["S3", "S4", "S5", "S6", "S7"]);
+    expect(atCap.extractedRowsCount - beforeDecstbmAtCap).toBe(4);
+
+    // 3. Mixed DECSTBM scroll + real full-screen scroll in the same batch at cap.
+    await atCap.write("\x1b[2;4r\x1b[4;1Hd\r\ne\r\n\x1b[r\x1b[4;1H\r\nM1\r\nM2");
+    const afterMixed = text(atCap);
+    // Resetting scroll region and scrolling 2 real lines evicts S3, S4 and keeps S5, S6, S7 + 2 newly scrolled lines.
+    expect(afterMixed.slice(0, 3)).toEqual(["S5", "S6", "S7"]);
+    expect(afterMixed.at(-2)).toBe("M1");
+    expect(afterMixed.at(-1)).toBe("M2");
+    atCap.dispose();
+  });
 });

@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 use serde_json::{json, Map, Value};
 
-use super::bridge::{check_text_argument, guard_exec_args, parse_shell_args, Ctx, ExecOptions, EXEC_TIMEOUT};
+use super::bridge::{check_text_argument, guard_exec_args, parse_shell_args, reject_leading_dash, Ctx, ExecOptions, EXEC_TIMEOUT};
 use super::pages::{new_page_id, BrowserPage, PageInfo};
 use super::{BrowserError, BrowserResult, BrowserRuntime, Target};
 
@@ -41,7 +41,15 @@ fn flag(params: &Value, name: &str) -> bool {
 fn element(params: &Value) -> BrowserResult<String> {
     let value = req(params, "element")?;
     check_text_argument("--element", &value)?;
+    reject_leading_dash("--element", &value)?;
     Ok(value)
+}
+
+fn validated_url(raw: &str) -> BrowserResult<String> {
+    reject_leading_dash("--url", raw)?;
+    let url = normalize_url(raw);
+    reject_leading_dash("--url", &url)?;
+    Ok(url)
 }
 
 fn with_page_id(target: &Target, value: Value) -> Value {
@@ -110,7 +118,7 @@ fn refresh_title(rt: &BrowserRuntime, target: &Target, ctx: &mut Ctx<'_>, mut va
 // ----------------------------------------------------------------- navigation
 
 pub fn goto(rt: &BrowserRuntime, target: &Target, params: &Value) -> BrowserResult<Value> {
-    let url = normalize_url(&req(params, "url")?);
+    let url = validated_url(&req(params, "url")?)?;
     let value = on_page(rt, target, |ctx| ctx.run(&["open", &url], ExecOptions::default()))?;
     remember_location(rt, target, &value);
     Ok(with_page_id(target, value))
@@ -133,9 +141,13 @@ pub fn snapshot(rt: &BrowserRuntime, target: &Target, params: &Value) -> Browser
         args.push("-c".into());
     }
     if let Some(depth) = opt_nonempty(params, "depth") {
-        args.extend(["-d".into(), depth]);
+        let parsed = depth
+            .parse::<u32>()
+            .map_err(|_| BrowserError::new("invalid_arguments", "--depth must be a non-negative integer."))?;
+        args.extend(["-d".into(), parsed.to_string()]);
     }
     if let Some(selector) = opt_nonempty(params, "selector") {
+        reject_leading_dash("--selector", &selector)?;
         args.extend(["-s".into(), selector]);
     }
     let argv: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -178,7 +190,10 @@ pub fn screenshot(rt: &BrowserRuntime, target: &Target, params: &Value, full: bo
         return Err(BrowserError::new("invalid_arguments", "--format must be png or jpeg."));
     }
     let path = match opt_nonempty(params, "path") {
-        Some(p) => PathBuf::from(p),
+        Some(p) => {
+            reject_leading_dash("--path", &p)?;
+            PathBuf::from(p)
+        }
         None => output_path(rt, "screenshots", &target.page, &format)?,
     };
     let path_text = path.to_string_lossy().into_owned();
@@ -205,7 +220,10 @@ pub fn screenshot(rt: &BrowserRuntime, target: &Target, params: &Value, full: bo
 
 pub fn pdf(rt: &BrowserRuntime, target: &Target, params: &Value) -> BrowserResult<Value> {
     let path = match opt_nonempty(params, "path") {
-        Some(p) => PathBuf::from(p),
+        Some(p) => {
+            reject_leading_dash("--path", &p)?;
+            PathBuf::from(p)
+        }
         None => output_path(rt, "pdf", &target.page, "pdf")?,
     };
     let path_text = path.to_string_lossy().into_owned();
@@ -237,6 +255,7 @@ pub fn scroll(rt: &BrowserRuntime, target: &Target, params: &Value) -> BrowserRe
     let mut args: Vec<&str> = vec!["scroll", &direction, &amount];
     let selector = opt_nonempty(params, "selector");
     if let Some(sel) = &selector {
+        reject_leading_dash("--selector", sel)?;
         args.extend(["--selector", sel]);
     }
     let value = on_page(rt, target, |ctx| ctx.run(&args, ExecOptions::default()))?;
@@ -247,15 +266,20 @@ pub fn wait(rt: &BrowserRuntime, target: &Target, params: &Value) -> BrowserResu
     let mut args: Vec<String> = vec!["wait".into()];
     let mut modes = 0;
     if let Some(selector) = opt_nonempty(params, "selector") {
+        reject_leading_dash("--selector", &selector)?;
         args.push(selector);
         modes += 1;
     }
     if let Some(ms) = opt_nonempty(params, "ms") {
-        args.push(ms);
+        let parsed = ms
+            .parse::<u64>()
+            .map_err(|_| BrowserError::new("invalid_arguments", "--ms must be a non-negative integer."))?;
+        args.push(parsed.to_string());
         modes += 1;
     }
     for (flag_name, cli) in [("text", "--text"), ("url", "--url"), ("load", "--load"), ("fn", "--fn"), ("download", "--download")] {
         if let Some(v) = opt_nonempty(params, flag_name) {
+            reject_leading_dash(cli, &v)?;
             args.extend([cli.into(), v]);
             modes += 1;
         }
@@ -264,6 +288,7 @@ pub fn wait(rt: &BrowserRuntime, target: &Target, params: &Value) -> BrowserResu
         return Err(BrowserError::new("invalid_arguments", "wait needs one of --selector, --text, --url, --load, --fn, --download or --ms."));
     }
     if let Some(state) = opt_nonempty(params, "state") {
+        reject_leading_dash("--state", &state)?;
         args.extend(["--state".into(), state]);
     }
     let timeout_ms = opt_nonempty(params, "timeout").map(|t| t.parse::<u64>()).transpose().map_err(|_| BrowserError::new("invalid_arguments", "--timeout must be milliseconds."))?;
@@ -290,12 +315,11 @@ pub fn fill(rt: &BrowserRuntime, target: &Target, params: &Value) -> BrowserResu
     let el = element(params)?;
     let value = opt(params, "value").unwrap_or_default();
     let result = on_page(rt, target, |ctx| {
-        if value.len() <= super::bridge::TEXT_ARGUMENT_MAX_BYTES {
+        if value.len() <= super::bridge::TEXT_ARGUMENT_MAX_BYTES && !value.trim_start().starts_with('-') {
             return ctx.run(&["fill", &el, &value], ExecOptions::default());
         }
-        // Too large for argv: focus the control and set its value the way a
-        // framework expects (native setter + input/change events), streamed
-        // over stdin.
+        // Too large for argv or starts with '-' (avoid CLI option injection):
+        // focus the control and set its value via stdin.
         ctx.run(&["focus", &el], ExecOptions::default())?;
         let script = focused_value_set_expression(&value);
         ctx.run(&["eval", "--stdin"], ExecOptions { timeout: EXEC_TIMEOUT, stdin: Some(script) })?;
@@ -309,9 +333,16 @@ pub fn fill(rt: &BrowserRuntime, target: &Target, params: &Value) -> BrowserResu
 pub fn type_text(rt: &BrowserRuntime, target: &Target, params: &Value) -> BrowserResult<Value> {
     let text = opt(params, "input").or_else(|| opt(params, "text")).ok_or_else(|| BrowserError::new("invalid_arguments", "Missing --input."))?;
     let el = opt_nonempty(params, "element");
+    if let Some(ref e) = el {
+        reject_leading_dash("--element", e)?;
+    }
+    let chunks_vec = chunk_text(&text, TYPE_CHUNK_BYTES);
+    for chunk in &chunks_vec {
+        reject_leading_dash("--input", chunk)?;
+    }
     let count = on_page(rt, target, |ctx| {
         let mut chunks = 0;
-        for chunk in chunk_text(&text, TYPE_CHUNK_BYTES) {
+        for chunk in chunks_vec {
             match &el {
                 Some(el) if chunks == 0 => ctx.run(&["type", el, chunk], ExecOptions::default())?,
                 _ => ctx.run(&["keyboard", "type", chunk], ExecOptions::default())?,
@@ -325,9 +356,13 @@ pub fn type_text(rt: &BrowserRuntime, target: &Target, params: &Value) -> Browse
 
 pub fn insert_text(rt: &BrowserRuntime, target: &Target, params: &Value) -> BrowserResult<Value> {
     let text = req(params, "text")?;
+    let chunks_vec = chunk_text(&text, TYPE_CHUNK_BYTES);
+    for chunk in &chunks_vec {
+        reject_leading_dash("--text", chunk)?;
+    }
     let count = on_page(rt, target, |ctx| {
         let mut chunks = 0;
-        for chunk in chunk_text(&text, TYPE_CHUNK_BYTES) {
+        for chunk in chunks_vec {
             ctx.run(&["keyboard", "inserttext", chunk], ExecOptions::default())?;
             chunks += 1;
         }
@@ -342,6 +377,9 @@ pub fn select(rt: &BrowserRuntime, target: &Target, params: &Value) -> BrowserRe
         Some(Value::Array(items)) => items.iter().filter_map(Value::as_str).map(String::from).collect(),
         _ => vec![req(params, "value")?],
     };
+    for v in &values {
+        reject_leading_dash("--value", v)?;
+    }
     let mut args: Vec<&str> = vec!["select", &el];
     args.extend(values.iter().map(String::as_str));
     let value = on_page(rt, target, |ctx| ctx.run(&args, ExecOptions::default()))?;
@@ -365,6 +403,7 @@ pub fn select_all(rt: &BrowserRuntime, target: &Target, params: &Value) -> Brows
 
 pub fn keypress(rt: &BrowserRuntime, target: &Target, params: &Value) -> BrowserResult<Value> {
     let key = req(params, "key")?;
+    reject_leading_dash("--key", &key)?;
     let value = on_page(rt, target, |ctx| ctx.run(&["press", &key], ExecOptions::default()))?;
     Ok(with_page_id(target, value))
 }
@@ -372,6 +411,8 @@ pub fn keypress(rt: &BrowserRuntime, target: &Target, params: &Value) -> Browser
 pub fn drag(rt: &BrowserRuntime, target: &Target, params: &Value) -> BrowserResult<Value> {
     let from = req(params, "from")?;
     let to = req(params, "to")?;
+    reject_leading_dash("--from", &from)?;
+    reject_leading_dash("--to", &to)?;
     let value = on_page(rt, target, |ctx| ctx.run(&["drag", &from, &to], ExecOptions::default()))?;
     Ok(with_page_id(target, value))
 }
@@ -386,6 +427,7 @@ pub fn upload(rt: &BrowserRuntime, target: &Target, params: &Value) -> BrowserRe
         return Err(BrowserError::new("invalid_arguments", "--files needs at least one path."));
     }
     for file in &files {
+        reject_leading_dash("--files", file)?;
         if !std::path::Path::new(file).is_file() {
             return Err(BrowserError::new("invalid_arguments", format!("{file} is not a readable file.")));
         }
@@ -398,8 +440,12 @@ pub fn upload(rt: &BrowserRuntime, target: &Target, params: &Value) -> BrowserRe
 
 pub fn download(rt: &BrowserRuntime, target: &Target, params: &Value) -> BrowserResult<Value> {
     let selector = opt_nonempty(params, "selector").or_else(|| opt_nonempty(params, "element")).ok_or_else(|| BrowserError::new("invalid_arguments", "Missing --selector."))?;
+    reject_leading_dash("--selector", &selector)?;
     let path = match opt_nonempty(params, "path") {
-        Some(p) => PathBuf::from(p),
+        Some(p) => {
+            reject_leading_dash("--path", &p)?;
+            PathBuf::from(p)
+        }
         None => target.session.download_dir.join(format!("{}-{}", target.page.id, chrono::Utc::now().format("%Y%m%d-%H%M%S"))),
     };
     let path_text = path.to_string_lossy().into_owned();
@@ -414,7 +460,9 @@ pub fn get(rt: &BrowserRuntime, target: &Target, params: &Value) -> BrowserResul
         "title" | "url" | "cdp-url" => {}
         "attr" => {
             args.push(element(params)?);
-            args.push(req(params, "name")?);
+            let name = req(params, "name")?;
+            reject_leading_dash("--name", &name)?;
+            args.push(name);
         }
         "text" | "html" | "value" | "count" | "box" | "styles" => args.push(element(params)?),
         other => return Err(BrowserError::new("invalid_arguments", format!("Unknown --what {other}."))),
@@ -439,18 +487,39 @@ pub fn mouse(rt: &BrowserRuntime, target: &Target, action: &str, params: &Value)
     let mut args: Vec<String> = vec!["mouse".into(), action.into()];
     match action {
         "move" => {
-            args.push(req(params, "x")?);
-            args.push(req(params, "y")?);
+            for name in ["x", "y"] {
+                let raw = req(params, name)?;
+                let parsed = raw
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|n| n.is_finite())
+                    .ok_or_else(|| BrowserError::new("invalid_arguments", format!("--{name} must be a finite number.")))?;
+                args.push(parsed.to_string());
+            }
         }
         "down" | "up" => {
             if let Some(button) = opt_nonempty(params, "button") {
+                if !matches!(button.as_str(), "left" | "right" | "middle") {
+                    return Err(BrowserError::new("invalid_arguments", "--button must be left, right or middle."));
+                }
                 args.push(button);
             }
         }
         "wheel" => {
-            args.push(req(params, "dy")?);
-            if let Some(dx) = opt_nonempty(params, "dx") {
-                args.push(dx);
+            let dy_raw = req(params, "dy")?;
+            let dy = dy_raw
+                .parse::<f64>()
+                .ok()
+                .filter(|n| n.is_finite())
+                .ok_or_else(|| BrowserError::new("invalid_arguments", "--dy must be a finite number."))?;
+            args.push(dy.to_string());
+            if let Some(dx_raw) = opt_nonempty(params, "dx") {
+                let dx = dx_raw
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|n| n.is_finite())
+                    .ok_or_else(|| BrowserError::new("invalid_arguments", "--dx must be a finite number."))?;
+                args.push(dx.to_string());
             }
         }
         other => return Err(BrowserError::new("invalid_arguments", format!("Unknown mouse action {other}."))),
@@ -464,9 +533,13 @@ pub fn find(rt: &BrowserRuntime, target: &Target, params: &Value) -> BrowserResu
     let locator = req(params, "locator")?;
     let value = req(params, "value")?;
     let action = req(params, "action")?;
+    reject_leading_dash("--locator", &locator)?;
+    reject_leading_dash("--value", &value)?;
+    reject_leading_dash("--action", &action)?;
     let mut args: Vec<&str> = vec!["find", &locator, &value, &action];
     let text = opt_nonempty(params, "text");
     if let Some(t) = &text {
+        reject_leading_dash("--text", t)?;
         args.push(t);
     }
     let result = on_page(rt, target, |ctx| ctx.run(&args, ExecOptions::default()))?;
@@ -506,7 +579,10 @@ pub fn tab_switch(rt: &BrowserRuntime, target: &Target, focus: bool) -> BrowserR
 /// Open a page in the workspace's browser. The first page of a profile
 /// reuses the tab Chromium opens at launch; later ones are new tabs.
 pub fn tab_create(rt: &BrowserRuntime, workspace: &str, url: Option<&str>, profile_id: &str) -> BrowserResult<Value> {
-    let url = url.map(normalize_url).unwrap_or_else(|| "about:blank".into());
+    let url = match url {
+        Some(raw) => validated_url(raw)?,
+        None => "about:blank".into(),
+    };
     let session = rt.session_for(profile_id)?;
     let listing = rt.reconcile_session(&session, Some(workspace))?;
     let known = rt.pages.in_profile(profile_id);
@@ -646,11 +722,14 @@ pub fn cookie_get(rt: &BrowserRuntime, target: &Target, params: &Value) -> Brows
 
 pub fn cookie_set(rt: &BrowserRuntime, target: &Target, params: &Value) -> BrowserResult<Value> {
     let name = req(params, "name")?;
+    reject_leading_dash("--name", &name)?;
     let value = opt(params, "value").ok_or_else(|| BrowserError::new("invalid_arguments", "Missing --value (or pipe it on stdin with --value-stdin)."))?;
     check_text_argument("--value", &value)?;
+    reject_leading_dash("--value", &value)?;
     let mut args: Vec<String> = vec!["cookies".into(), "set".into(), name, value];
     for (key, cli) in [("url", "--url"), ("domain", "--domain"), ("path", "--path"), ("sameSite", "--sameSite"), ("expires", "--expires")] {
         if let Some(v) = opt_nonempty(params, key) {
+            reject_leading_dash(cli, &v)?;
             args.extend([cli.into(), v]);
         }
     }
@@ -701,6 +780,7 @@ pub fn network(rt: &BrowserRuntime, target: &Target, params: &Value) -> BrowserR
     let mut args: Vec<String> = vec!["network".into(), "requests".into()];
     for (key, cli) in [("filter", "--filter"), ("type", "--type"), ("method", "--method"), ("status", "--status")] {
         if let Some(v) = opt_nonempty(params, key) {
+            reject_leading_dash(cli, &v)?;
             args.extend([cli.into(), v]);
         }
     }
@@ -724,7 +804,10 @@ pub fn capture_start(rt: &BrowserRuntime, target: &Target) -> BrowserResult<Valu
 
 pub fn capture_stop(rt: &BrowserRuntime, target: &Target, params: &Value) -> BrowserResult<Value> {
     let path = match opt_nonempty(params, "path") {
-        Some(p) => PathBuf::from(p),
+        Some(p) => {
+            reject_leading_dash("--path", &p)?;
+            PathBuf::from(p)
+        }
         None => output_path(rt, "captures", &target.page, "har")?,
     };
     let path_text = path.to_string_lossy().into_owned();
@@ -745,7 +828,13 @@ pub fn intercept_enable(rt: &BrowserRuntime, target: &Target, params: &Value) ->
         Some(Value::Array(items)) => items.iter().filter_map(Value::as_str).map(String::from).collect(),
         _ => opt_nonempty(params, "patterns").unwrap_or_else(|| "**/*".into()).split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect(),
     };
+    for pattern in &patterns {
+        reject_leading_dash("--patterns", pattern)?;
+    }
     let body = opt_nonempty(params, "body");
+    if let Some(ref b) = body {
+        reject_leading_dash("--body", b)?;
+    }
     let abort = flag(params, "abort") || body.is_none();
     let applied = on_page(rt, target, |ctx| {
         for pattern in &patterns {
@@ -787,12 +876,17 @@ pub fn viewport(rt: &BrowserRuntime, target: &Target, params: &Value) -> Browser
     for (name, v) in [("--width", &width), ("--height", &height)] {
         v.parse::<u32>().map_err(|_| BrowserError::new("invalid_arguments", format!("{name} must be a whole number of pixels.")))?;
     }
-    let mut args: Vec<&str> = vec!["set", "viewport", &width, &height];
-    let scale = opt_nonempty(params, "scale");
-    if let Some(s) = &scale {
-        args.push(s);
+    let mut args: Vec<String> = vec!["set".into(), "viewport".into(), width, height];
+    if let Some(s) = opt_nonempty(params, "scale") {
+        let parsed = s
+            .parse::<f64>()
+            .ok()
+            .filter(|n| n.is_finite() && *n > 0.0)
+            .ok_or_else(|| BrowserError::new("invalid_arguments", "--scale must be a positive number."))?;
+        args.push(parsed.to_string());
     }
-    let value = on_page(rt, target, |ctx| ctx.run(&args, ExecOptions::default()))?;
+    let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+    let value = on_page(rt, target, |ctx| ctx.run(&argv, ExecOptions::default()))?;
     Ok(with_page_id(target, value))
 }
 
@@ -800,7 +894,10 @@ pub fn geolocation(rt: &BrowserRuntime, target: &Target, params: &Value) -> Brow
     let lat = req(params, "latitude")?;
     let lng = req(params, "longitude")?;
     for (name, v) in [("--latitude", &lat), ("--longitude", &lng)] {
-        v.parse::<f64>().map_err(|_| BrowserError::new("invalid_arguments", format!("{name} must be a number.")))?;
+        v.parse::<f64>()
+            .ok()
+            .filter(|n| n.is_finite())
+            .ok_or_else(|| BrowserError::new("invalid_arguments", format!("{name} must be a finite number.")))?;
     }
     let value = on_page(rt, target, |ctx| ctx.run(&["set", "geo", &lat, &lng], ExecOptions::default()))?;
     Ok(with_page_id(target, value))
@@ -809,7 +906,11 @@ pub fn geolocation(rt: &BrowserRuntime, target: &Target, params: &Value) -> Brow
 pub fn set(rt: &BrowserRuntime, target: &Target, what: &str, params: &Value) -> BrowserResult<Value> {
     let mut args: Vec<String> = vec!["set".into(), what.into()];
     match what {
-        "device" => args.push(req(params, "name")?),
+        "device" => {
+            let name = req(params, "name")?;
+            reject_leading_dash("--name", &name)?;
+            args.push(name);
+        }
         "offline" => {
             let state = opt_nonempty(params, "state").unwrap_or_else(|| "on".into());
             if !matches!(state.as_str(), "on" | "off") {
@@ -819,12 +920,17 @@ pub fn set(rt: &BrowserRuntime, target: &Target, what: &str, params: &Value) -> 
         }
         "headers" => {
             let headers = req(params, "headers")?;
+            reject_leading_dash("--headers", &headers)?;
             serde_json::from_str::<Map<String, Value>>(&headers).map_err(|e| BrowserError::new("invalid_arguments", format!("--headers must be a JSON object: {e}")))?;
             args.push(headers);
         }
         "credentials" => {
-            args.push(req(params, "user")?);
-            args.push(opt(params, "pass").ok_or_else(|| BrowserError::new("invalid_arguments", "Missing --pass (or pipe it on stdin with --pass-stdin)."))?);
+            let user = req(params, "user")?;
+            let pass = opt(params, "pass").ok_or_else(|| BrowserError::new("invalid_arguments", "Missing --pass (or pipe it on stdin with --pass-stdin)."))?;
+            reject_leading_dash("--user", &user)?;
+            reject_leading_dash("--pass", &pass)?;
+            args.push(user);
+            args.push(pass);
         }
         "media" => {
             if let Some(scheme) = opt_nonempty(params, "colorScheme") {
@@ -853,6 +959,7 @@ pub fn clipboard(rt: &BrowserRuntime, target: &Target, op: &str, params: &Value)
     if op == "write" {
         let text = req(params, "text")?;
         check_text_argument("--text", &text)?;
+        reject_leading_dash("--text", &text)?;
         args.push(text);
     }
     let argv: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -864,6 +971,7 @@ pub fn dialog(rt: &BrowserRuntime, target: &Target, op: &str, params: &Value) ->
     let mut args: Vec<String> = vec!["dialog".into(), op.into()];
     if op == "accept" {
         if let Some(text) = opt_nonempty(params, "text") {
+            reject_leading_dash("--text", &text)?;
             args.push(text);
         }
     }
@@ -877,13 +985,17 @@ pub fn storage(rt: &BrowserRuntime, target: &Target, kind: &str, op: &str, param
     match op {
         "get" => {
             if let Some(key) = opt_nonempty(params, "key") {
+                reject_leading_dash("--key", &key)?;
                 args.push(key);
             }
         }
         "set" => {
-            args.push(req(params, "key")?);
+            let key = req(params, "key")?;
+            reject_leading_dash("--key", &key)?;
+            args.push(key);
             let value = opt(params, "value").ok_or_else(|| BrowserError::new("invalid_arguments", "Missing --value."))?;
             check_text_argument("--value", &value)?;
+            reject_leading_dash("--value", &value)?;
             args.push(value);
         }
         "clear" => {}
@@ -1057,5 +1169,49 @@ mod tests {
         assert!(is_blank("about:blank"));
         assert!(is_blank("chrome://newtab/"));
         assert!(!is_blank("https://example.com"));
+    }
+
+    #[test]
+    fn validated_url_rejects_option_injection_even_with_scheme_marker() {
+        assert_eq!(validated_url("example.com").unwrap(), "https://example.com");
+        assert_eq!(validated_url("https://example.com").unwrap(), "https://example.com");
+        assert_eq!(validated_url("--executable-path=/tmp/pwn").unwrap_err().code, "invalid_arguments");
+        assert_eq!(validated_url("--init-script=http://evil/x.js").unwrap_err().code, "invalid_arguments");
+        assert_eq!(validated_url("  --allow-file-access").unwrap_err().code, "invalid_arguments");
+    }
+
+    #[test]
+    fn typed_ops_reject_leading_dash_option_injection_before_bridge() {
+        let _home = crate::store::temp_home();
+        let rt = BrowserRuntime::open().unwrap();
+        let session = rt.session_for("default").unwrap();
+        let page = BrowserPage {
+            id: "bp-test".into(),
+            profile_id: "default".into(),
+            tab_id: "t0".into(),
+            url: "https://example.com".into(),
+            title: "Example".into(),
+            workspace_path: None,
+            created: "2026-01-01T00:00:00Z".into(),
+        };
+        let target = Target { page, session };
+
+        assert_eq!(goto(&rt, &target, &json!({"url": "--executable-path=http://evil"})).unwrap_err().code, "invalid_arguments");
+        assert_eq!(element_verb(&rt, &target, "click", &json!({"element": "--executable-path=/bin/sh"})).unwrap_err().code, "invalid_arguments");
+        assert_eq!(snapshot(&rt, &target, &json!({"depth": "--init-script=/tmp/x"})).unwrap_err().code, "invalid_arguments");
+        assert_eq!(snapshot(&rt, &target, &json!({"selector": "--allow-file-access"})).unwrap_err().code, "invalid_arguments");
+        assert_eq!(wait(&rt, &target, &json!({"selector": "--executable-path=/bin/sh"})).unwrap_err().code, "invalid_arguments");
+        assert_eq!(wait(&rt, &target, &json!({"ms": "--init-script=/tmp/x"})).unwrap_err().code, "invalid_arguments");
+        assert_eq!(wait(&rt, &target, &json!({"url": "--download-path=/tmp/x"})).unwrap_err().code, "invalid_arguments");
+        assert_eq!(cookie_set(&rt, &target, &json!({"name": "--init-script=/tmp/x", "value": "1"})).unwrap_err().code, "invalid_arguments");
+        assert_eq!(cookie_set(&rt, &target, &json!({"name": "sid", "value": "--executable-path=/bin/sh"})).unwrap_err().code, "invalid_arguments");
+        assert_eq!(cookie_set(&rt, &target, &json!({"name": "sid", "value": "ok", "url": "--args=--no-sandbox"})).unwrap_err().code, "invalid_arguments");
+        assert_eq!(mouse(&rt, &target, "move", &json!({"x": "--executable-path=/bin/sh", "y": "10"})).unwrap_err().code, "invalid_arguments");
+        assert_eq!(mouse(&rt, &target, "down", &json!({"button": "--executable-path=/bin/sh"})).unwrap_err().code, "invalid_arguments");
+        assert_eq!(scroll(&rt, &target, &json!({"selector": "--allow-file-access"})).unwrap_err().code, "invalid_arguments");
+        assert_eq!(find(&rt, &target, &json!({"locator": "--executable-path=/bin/sh", "value": "a", "action": "click"})).unwrap_err().code, "invalid_arguments");
+        assert_eq!(storage(&rt, &target, "local", "set", &json!({"key": "--init-script=/tmp/x", "value": "1"})).unwrap_err().code, "invalid_arguments");
+        assert_eq!(viewport(&rt, &target, &json!({"width": "800", "height": "600", "scale": "--executable-path=/bin/sh"})).unwrap_err().code, "invalid_arguments");
+        assert_eq!(tab_create(&rt, "/tmp/ws", Some("--init-script=http://evil"), "default").unwrap_err().code, "invalid_arguments");
     }
 }

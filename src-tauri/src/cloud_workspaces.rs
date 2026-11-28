@@ -2199,14 +2199,18 @@ pub(crate) enum RequestRisk {
 
 struct Client {
     base: Url,
-    timeout: Duration,
+    agent: ureq::Agent,
 }
 
 impl Client {
+    fn build_agent(timeout: Duration) -> ureq::Agent {
+        crate::data_privacy::http_agent().timeout(timeout).redirects(0).build()
+    }
+
     fn production() -> Self {
         Self {
             base: Url::parse(&crate::account::api_base_url()).expect("valid account service URL"),
-            timeout: REQUEST_TIMEOUT,
+            agent: Self::build_agent(REQUEST_TIMEOUT),
         }
     }
 
@@ -2214,7 +2218,7 @@ impl Client {
     fn for_test(base: &str, timeout: Duration) -> Self {
         Self {
             base: Url::parse(base).unwrap(),
-            timeout,
+            agent: Self::build_agent(timeout),
         }
     }
 
@@ -2333,7 +2337,7 @@ impl Client {
     }
 
     fn authorized_request(&self, method: &str, context: &AccountContext, url: &Url) -> ureq::Request {
-        crate::data_privacy::http_agent().timeout(self.timeout).redirects(0).build()
+        self.agent
             .request(method, url.as_str())
             .set("authorization", &format!("Bearer {}", context.access_token))
             .set("content-type", "application/json")
@@ -2360,8 +2364,7 @@ impl Client {
             .map_err(|_| CloudWorkspaceClientError::local("cloud_workspace_client_invalid", false))?
             .extend(["v1", "desktop", "cloud-catalog"]);
         if presence { url.query_pairs_mut().append_pair("presence", "1"); }
-        let agent = crate::data_privacy::http_agent().timeout(self.timeout).redirects(0).build();
-        let mut request = agent
+        let mut request = self.agent
             .request("GET", url.as_str())
             .set("authorization", &format!("Bearer {}", context.access_token))
             .set("X-TerminalX-Cloud-Workspace-Contract", CONTRACT)
@@ -9108,5 +9111,45 @@ mod tests {
         let captured = requests.join().unwrap();
         assert!(captured[0].starts_with("GET ") && captured[1].contains("/resume HTTP/1.1"));
         assert_eq!(error.code, "cloud_schedule_needs_approval");
+    }
+
+    #[test]
+    fn client_reuses_http_connection_across_requests() {
+        use std::io::{Read, Write};
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accepts = Arc::new(AtomicUsize::new(0));
+        let accepts_server = accepts.clone();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            accepts_server.fetch_add(1, Ordering::SeqCst);
+            stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            let body = json!({"workspaces": []}).to_string();
+            for _ in 0..2 {
+                let mut buf = Vec::new();
+                while !buf.ends_with(b"\r\n\r\n") {
+                    let mut byte = [0u8; 1];
+                    stream.read_exact(&mut byte).unwrap();
+                    buf.push(byte[0]);
+                }
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(resp.as_bytes()).unwrap();
+            }
+        });
+        let client = Client::for_test(&format!("http://{addr}"), Duration::from_secs(3));
+        let ctx = context();
+        let r1: Value = client.request(&ctx, &["workspaces"], None, None, None, RequestRisk::Read).unwrap();
+        let r2: Value = client.request(&ctx, &["workspaces"], None, None, None, RequestRisk::Read).unwrap();
+        assert_eq!(r1["workspaces"], json!([]));
+        assert_eq!(r2["workspaces"], json!([]));
+        server.join().unwrap();
+        assert_eq!(accepts.load(Ordering::SeqCst), 1, "Client must pool HTTP keep-alive connections across requests");
     }
 }

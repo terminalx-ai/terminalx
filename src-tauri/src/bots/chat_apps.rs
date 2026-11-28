@@ -50,8 +50,8 @@
 //! Bots is off.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
-use std::sync::{Condvar, Mutex};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -253,33 +253,142 @@ impl Logins {
     }
 }
 
+const KEYCHAIN_SERVICE: &str = "com.terminalx.bot-chat-logins";
+const SECRET_STORE_KEY: &str = "secretStore";
+const SECRET_STORE_KEYCHAIN: &str = "keychain";
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct KeychainTokens {
+    token: String,
+    #[serde(default)]
+    app_token: String,
+}
+
+fn keychain_account(root: &Path, bot_id: &str, service: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let canonical = crate::paths::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let home_hash = format!("{:x}", Sha256::digest(canonical.to_string_lossy().as_bytes()));
+    format!("{}:{bot_id}:{service}", &home_hash[..16])
+}
+
 fn logins_path() -> Result<PathBuf> {
     Ok(crate::store::root()?.join(LOGINS))
 }
 
-/// The saved logins. One that cannot be read is an error, never "none": it is not written over.
-pub fn read_logins() -> Result<Logins> {
-    let path = logins_path()?;
-    match std::fs::metadata(&path) {
+fn read_logins_disk(path: &Path) -> Result<Logins> {
+    match std::fs::metadata(path) {
         Ok(meta) if meta.len() > READ_LIMIT => anyhow::bail!("{} is larger than {} MB", path.display(), READ_LIMIT / 1024 / 1024),
         Ok(_) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Logins::default()),
         Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
     }
     // The file's content is never part of an error: it holds tokens.
-    let bytes = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+    let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
     serde_json::from_slice(&bytes).map_err(|error| anyhow::anyhow!("{} could not be read (line {}, column {})", path.display(), error.line(), error.column()))
 }
 
-/// Read, change and write the logins under the store's lock, which the window and the runtime both take. Written
-/// readable by the owner alone (`store::write_atomic`).
+/// The saved logins, hydrating secrets from the OS keychain when stored there
+/// and migrating legacy plaintext tokens into the OS keychain when available (S-21).
+pub fn read_logins() -> Result<Logins> {
+    read_logins_with(&crate::keychain::Keychain)
+}
+
+pub(crate) fn read_logins_with(secrets: &dyn crate::keychain::SecretStore) -> Result<Logins> {
+    let root = crate::store::root()?;
+    let path = root.join(LOGINS);
+    let mut logins = read_logins_disk(&path)?;
+    let mut migrated = false;
+    let mut disk_copy = logins.clone();
+    for (bot_id, services) in &mut logins.bots {
+        for (service, login) in services.iter_mut() {
+            let account = keychain_account(&root, bot_id, service);
+            let stored_in_keychain = login
+                .unknown
+                .get(SECRET_STORE_KEY)
+                .and_then(Value::as_str)
+                == Some(SECRET_STORE_KEYCHAIN);
+            if stored_in_keychain || (login.token.is_empty() && login.app_token.is_empty()) {
+                if let Ok(Some(bytes)) = secrets.get(KEYCHAIN_SERVICE, &account) {
+                    if let Ok(tokens) = serde_json::from_slice::<KeychainTokens>(&bytes) {
+                        login.token = tokens.token;
+                        login.app_token = tokens.app_token;
+                    }
+                }
+            } else if !login.token.is_empty() || !login.app_token.is_empty() {
+                // Opportunistic safe migration from legacy plaintext JSON to OS keychain.
+                let payload = KeychainTokens {
+                    token: login.token.clone(),
+                    app_token: login.app_token.clone(),
+                };
+                if let Ok(bytes) = serde_json::to_vec(&payload) {
+                    if secrets.set(KEYCHAIN_SERVICE, &account, &bytes).is_ok() {
+                        if let Some(disk_login) = disk_copy.bots.get_mut(bot_id).and_then(|s| s.get_mut(service)) {
+                            disk_login.token.clear();
+                            disk_login.app_token.clear();
+                            disk_login.unknown.insert(SECRET_STORE_KEY.into(), json!(SECRET_STORE_KEYCHAIN));
+                            migrated = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if migrated {
+        let _ = crate::store::transaction::run(&root.join(LOGINS_LOCK), Duration::from_secs(5), || {
+            crate::store::write_json(&path, &disk_copy)
+        });
+    }
+    Ok(logins)
+}
+
+/// Read, change and write the logins under the store's lock, preferring the OS
+/// keychain for secret tokens with safe `0o600` file fallback (S-21).
 fn change_logins<T>(apply: impl FnOnce(&mut Logins) -> Result<T>) -> Result<T> {
+    change_logins_with(&crate::keychain::Keychain, apply)
+}
+
+pub(crate) fn change_logins_with<T>(
+    secrets: &dyn crate::keychain::SecretStore,
+    apply: impl FnOnce(&mut Logins) -> Result<T>,
+) -> Result<T> {
     let root = crate::store::root()?;
     crate::store::transaction::run(&root.join(LOGINS_LOCK), Duration::from_secs(10), || {
-        let mut logins = read_logins()?;
+        let mut logins = read_logins_with(secrets)?;
+        let before: Vec<(String, String)> = logins
+            .bots
+            .iter()
+            .flat_map(|(bot, services)| services.keys().map(move |svc| (bot.clone(), svc.clone())))
+            .collect();
         let answer = apply(&mut logins)?;
         logins.bots.retain(|_, services| !services.is_empty());
-        crate::store::write_json(&logins_path()?, &logins)?;
+        // Delete keychain entries for any removed bot/service login.
+        for (bot_id, service) in before {
+            if logins.get(&bot_id, &service).is_none() {
+                let _ = secrets.delete(KEYCHAIN_SERVICE, &keychain_account(&root, &bot_id, &service));
+            }
+        }
+        // Persist tokens into OS keychain when available, scrubbing them from disk.
+        let mut to_disk = logins.clone();
+        for (bot_id, services) in &mut to_disk.bots {
+            for (service, login) in services.iter_mut() {
+                let account = keychain_account(&root, bot_id, service);
+                let payload = KeychainTokens {
+                    token: login.token.clone(),
+                    app_token: login.app_token.clone(),
+                };
+                if let Ok(bytes) = serde_json::to_vec(&payload) {
+                    if secrets.set(KEYCHAIN_SERVICE, &account, &bytes).is_ok() {
+                        login.token.clear();
+                        login.app_token.clear();
+                        login.unknown.insert(SECRET_STORE_KEY.into(), json!(SECRET_STORE_KEYCHAIN));
+                    } else {
+                        login.unknown.remove(SECRET_STORE_KEY);
+                    }
+                }
+            }
+        }
+        crate::store::write_json(&logins_path()?, &to_disk)?;
         Ok(answer)
     })
 }
@@ -1330,6 +1439,90 @@ fn chat_for(manager: &SessionManager, bot: &Bot, message: &Inbound) -> Result<Se
     })
 }
 
+/// Scrub known configured secret tokens and high-confidence credential patterns
+/// from outbound bot replies before posting to Slack or Telegram (S-21).
+pub(crate) fn scrub_secrets(text: &str) -> String {
+    let mut secrets: Vec<String> = Vec::new();
+    if let Ok(logins) = read_logins() {
+        for services in logins.bots.values() {
+            for login in services.values() {
+                if !login.token.is_empty() {
+                    secrets.push(login.token.clone());
+                }
+                if !login.app_token.is_empty() {
+                    secrets.push(login.app_token.clone());
+                }
+            }
+        }
+    }
+    if let Some(linear_key) = crate::store::settings::load().linear_api_key {
+        if !linear_key.trim().is_empty() {
+            secrets.push(linear_key);
+        }
+    }
+    if let Ok(root) = crate::store::root() {
+        if let Ok(control_tok) = std::fs::read_to_string(root.join("run").join("control.token")) {
+            let trimmed = control_tok.trim();
+            if !trimmed.is_empty() {
+                secrets.push(trimmed.to_owned());
+            }
+        }
+    }
+    for env_key in [crate::hooks::CONTROL_TOKEN_ENV, crate::hooks::TOKEN_ENV] {
+        if let Ok(val) = std::env::var(env_key) {
+            if !val.trim().is_empty() {
+                secrets.push(val);
+            }
+        }
+    }
+    scrub_secrets_with(text, &secrets)
+}
+
+pub(crate) fn scrub_secrets_with(text: &str, secrets: &[String]) -> String {
+    use regex::Regex;
+    use std::sync::OnceLock;
+
+    static PATTERNS: OnceLock<Vec<Regex>> = OnceLock::new();
+    let patterns = PATTERNS.get_or_init(|| {
+        [
+            r"(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----",
+            r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b",
+            r"\bxapp-[A-Za-z0-9-]{10,}\b",
+            r"\b\d{8,12}:[A-Za-z0-9_-]{30,}\b",
+            r"\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}\b",
+            r"\bgithub_pat_[A-Za-z0-9_]{20,}\b",
+            r"\blin_api_[A-Za-z0-9]{16,}\b",
+            r"\bsk-ant-[A-Za-z0-9_-]{16,}\b",
+            r"\bsk-proj-[A-Za-z0-9_-]{16,}\b",
+            r"\bAKIA[0-9A-Z]{16}\b",
+        ]
+        .iter()
+        .filter_map(|p| Regex::new(p).ok())
+        .collect()
+    });
+
+    let mut out = text.to_owned();
+    // Replace longest exact configured secrets first so substrings do not interfere.
+    let mut exact: Vec<&str> = secrets
+        .iter()
+        .map(|s| s.trim())
+        .filter(|s| s.len() >= 8)
+        .collect();
+    exact.sort_by_key(|s| std::cmp::Reverse(s.len()));
+    exact.dedup();
+    for secret in exact {
+        if out.contains(secret) {
+            out = out.replace(secret, "[REDACTED]");
+        }
+    }
+    for pattern in patterns {
+        if pattern.is_match(&out) {
+            out = pattern.replace_all(&out, "[REDACTED]").into_owned();
+        }
+    }
+    out
+}
+
 /// Queue the reply of each message whose turn has ended, to where it was asked; give up on one after [`REPLY_HOURS`].
 fn collect_replies(manager: &SessionManager) {
     let Ok(store) = read() else { return };
@@ -1339,8 +1532,8 @@ fn collect_replies(manager: &SessionManager) {
         let stale = message.delivered.as_deref().and_then(parse_time).is_none_or(|at| Utc::now() - at > chrono::TimeDelta::hours(REPLY_HOURS));
         let reply = if manager.turn_open(session, tab) { None } else { manager.load_events(session, tab).ok().and_then(|events| reply_in(&events, after, &message.head)) };
         let text = match (reply, stale) {
-            (Some(Reply::Text(text)), _) => Some(text),
-            (Some(Reply::None(why)), _) => Some(format!("({why})")),
+            (Some(Reply::Text(text)), _) => Some(scrub_secrets(&text)),
+            (Some(Reply::None(why)), _) => Some(scrub_secrets(&format!("({why})"))),
             (None, true) => Some("(No reply came in time.)".into()),
             (None, false) => None,
         };
@@ -1382,7 +1575,7 @@ fn forward_owner_turns(manager: &SessionManager) {
         let key = format!("{session}:{tab}");
         let Ok(Some(named)) = crate::store::bots::get(&bot) else { continue };
         let asked: String = one_line(&asked).chars().take(160).collect();
-        let text = format!("You wrote to {} in TerminalX: “{asked}”\n\n{reply}", named.name);
+        let text = scrub_secrets(&format!("You wrote to {} in TerminalX: “{asked}”\n\n{reply}", named.name));
         let links: Vec<Link> = store.direct_links(&bot).into_iter().filter(|link| services.contains(&link.service)).collect();
         let queued = change(|store| {
             if store.forwarded.get(&key).is_some_and(|known| *known >= seq) {
@@ -1453,6 +1646,31 @@ impl From<super::slack::Error> for SendError {
     }
 }
 
+/// Reuse one Slack Web API client (and its pooled `ureq::Agent`) per bot login
+/// instead of constructing a brand-new TLS client on every outbox send.
+fn slack_client_for(bot: &str, login: &Login) -> Arc<super::slack::Client> {
+    use std::hash::{Hash, Hasher};
+    struct CachedSlackClient {
+        saved: String,
+        digest: u64,
+        client: Arc<super::slack::Client>,
+    }
+    static CLIENTS: std::sync::OnceLock<Mutex<BTreeMap<String, CachedSlackClient>>> = std::sync::OnceLock::new();
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    login.token.hash(&mut hasher);
+    login.app_token.hash(&mut hasher);
+    let fingerprint = hasher.finish();
+    let mut cache = CLIENTS.get_or_init(|| Mutex::new(BTreeMap::new())).lock().unwrap_or_else(|error| error.into_inner());
+    if let Some(entry) = cache.get(bot) {
+        if entry.saved == login.saved && entry.digest == fingerprint {
+            return entry.client.clone();
+        }
+    }
+    let client = Arc::new(super::slack::Client::new(super::slack::API, &login.token, &login.app_token));
+    cache.insert(bot.to_string(), CachedSlackClient { saved: login.saved.clone(), digest: fingerprint, client: client.clone() });
+    client
+}
+
 /// Send one message with `login`; the id of what was sent.
 fn send_one(login: &Login, out: &Outgoing) -> std::result::Result<String, SendError> {
     match out.service.as_str() {
@@ -1466,7 +1684,7 @@ fn send_one(login: &Login, out: &Outgoing) -> std::result::Result<String, SendEr
             Ok(client.send(&out.chat, &out.text, reply_to, &out.buttons, out.silent)?)
         }
         SLACK => {
-            let client = super::slack::Client::new(super::slack::API, &login.token, &login.app_token);
+            let client = slack_client_for(&out.bot, login);
             if out.kind == "settle" {
                 client.settle(&out.chat, &out.target, &out.text, &out.note)?;
                 return Ok(out.target.clone());
@@ -1936,3 +2154,25 @@ pub fn runtime_call(manager: &SessionManager, operation: &str, params: &Value) -
 #[cfg(test)]
 #[path = "chat_apps_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod agent_pool_tests {
+    use super::*;
+
+    #[test]
+    fn slack_client_is_reused_until_login_rotates() {
+        let login = Login {
+            token: "xoxb-test-token-00000000000000000".into(),
+            app_token: "xapp-test-token-00000000000000000".into(),
+            account: Account::default(),
+            saved: "2026-01-01T00:00:00Z".into(),
+            unknown: BTreeMap::new(),
+        };
+        let first = slack_client_for("bot-pool-test", &login);
+        let second = slack_client_for("bot-pool-test", &login);
+        assert!(Arc::ptr_eq(&first, &second), "unchanged login must reuse pooled Slack client");
+        let rotated = Login { token: "xoxb-rotated-token-0000000000000".into(), saved: "2026-01-02T00:00:00Z".into(), ..login };
+        let third = slack_client_for("bot-pool-test", &rotated);
+        assert!(!Arc::ptr_eq(&first, &third), "rotated login must rebuild Slack client");
+    }
+}

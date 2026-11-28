@@ -132,6 +132,71 @@ pub fn validate_action_params(method: ActionMethod, params: &Value) -> Result<()
             require_string_allowing_empty(params, "value")?;
         }
     }
+    if let Some(bounds) = params.get("windowBounds").filter(|v| v.is_object()) {
+        validate_window_bounds_coordinates(method, params, bounds)?;
+    }
+    Ok(())
+}
+
+/// Enforce that window-local coordinates for click, scroll, and drag lie inside
+/// `[0, windowBounds.width] × [0, windowBounds.height]`.
+pub fn validate_window_bounds_coordinates(
+    method: ActionMethod,
+    params: &Value,
+    window_bounds: &Value,
+) -> Result<(), ComputerError> {
+    let Some(width) = window_bounds
+        .get("width")
+        .and_then(Value::as_f64)
+        .filter(|n| n.is_finite() && *n > 0.0)
+    else {
+        return Ok(());
+    };
+    let Some(height) = window_bounds
+        .get("height")
+        .and_then(Value::as_f64)
+        .filter(|n| n.is_finite() && *n > 0.0)
+    else {
+        return Ok(());
+    };
+    match method {
+        ActionMethod::Click | ActionMethod::Scroll => {
+            if let (Some(x), Some(y)) = (
+                require_non_negative_coordinate(params, "x")?,
+                require_non_negative_coordinate(params, "y")?,
+            ) {
+                check_point_in_bounds(x, y, width, height, "x", "y")?;
+            }
+        }
+        ActionMethod::Drag => {
+            if let (Some(fx), Some(fy), Some(tx), Some(ty)) = (
+                require_non_negative_coordinate(params, "fromX")?,
+                require_non_negative_coordinate(params, "fromY")?,
+                require_non_negative_coordinate(params, "toX")?,
+                require_non_negative_coordinate(params, "toY")?,
+            ) {
+                check_point_in_bounds(fx, fy, width, height, "fromX", "fromY")?;
+                check_point_in_bounds(tx, ty, width, height, "toX", "toY")?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn check_point_in_bounds(
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    x_name: &str,
+    y_name: &str,
+) -> Result<(), ComputerError> {
+    if x < 0.0 || y < 0.0 || x > width || y > height {
+        return Err(ComputerError::invalid(format!(
+            "{x_name} and {y_name} ({x}, {y}) are out of window bounds [0, {width}] x [0, {height}]"
+        )));
+    }
     Ok(())
 }
 
@@ -176,8 +241,8 @@ fn validate_element_or_coordinates(action: &str, params: &Value) -> Result<(), C
     if has_element {
         require_non_negative_integer(params, "elementIndex")?;
     }
-    require_finite_number(params, "x")?;
-    require_finite_number(params, "y")?;
+    require_non_negative_coordinate(params, "x")?;
+    require_non_negative_coordinate(params, "y")?;
     Ok(())
 }
 
@@ -215,7 +280,7 @@ fn validate_drag_target(params: &Value) -> Result<(), ComputerError> {
     }
     if has_coordinate_pair {
         for key in coordinates {
-            require_finite_number(params, key)?;
+            require_non_negative_coordinate(params, key)?;
         }
     }
     Ok(())
@@ -254,14 +319,21 @@ fn require_non_negative_integer(params: &Value, key: &str) -> Result<u64, Comput
         .ok_or_else(|| ComputerError::invalid(format!("{key} must be a non-negative integer")))
 }
 
-fn require_finite_number(params: &Value, key: &str) -> Result<Option<f64>, ComputerError> {
+fn require_non_negative_coordinate(params: &Value, key: &str) -> Result<Option<f64>, ComputerError> {
     match params.get(key) {
         None | Some(Value::Null) => Ok(None),
-        Some(value) => value
-            .as_f64()
-            .filter(|n| n.is_finite())
-            .map(Some)
-            .ok_or_else(|| ComputerError::invalid(format!("{key} must be a finite number"))),
+        Some(value) => {
+            let number = value
+                .as_f64()
+                .filter(|n| n.is_finite())
+                .ok_or_else(|| ComputerError::invalid(format!("{key} must be a finite number")))?;
+            if number < 0.0 {
+                return Err(ComputerError::invalid(format!(
+                    "{key} must be non-negative (within window bounds)"
+                )));
+            }
+            Ok(Some(number))
+        }
     }
 }
 
@@ -358,5 +430,58 @@ mod tests {
         let error = check(ActionMethod::PasteText, json!({"app": "a", "text": big})).unwrap_err();
         assert_eq!(error.message, PASTE_TEXT_TOO_LARGE);
         assert!(check(ActionMethod::PasteText, json!({"app": "a", "text": "ok"})).is_ok());
+    }
+
+    #[test]
+    fn negative_and_out_of_window_bounds_coordinates_are_rejected() {
+        // Negative coordinates rejected without needing windowBounds.
+        for (method, params) in [
+            (ActionMethod::Click, json!({"app": "a", "x": -1, "y": 5})),
+            (ActionMethod::Click, json!({"app": "a", "x": 5, "y": -0.1})),
+            (ActionMethod::Scroll, json!({"app": "a", "x": -10, "y": 2, "direction": "down"})),
+            (ActionMethod::Drag, json!({"app": "a", "fromX": -1, "fromY": 0, "toX": 5, "toY": 5})),
+            (ActionMethod::Drag, json!({"app": "a", "fromX": 0, "fromY": 0, "toX": 5, "toY": -5})),
+        ] {
+            assert_eq!(check(method, params).unwrap_err().code, "invalid_argument");
+        }
+
+        let bounds = json!({"x": 100, "y": 200, "width": 400, "height": 300});
+        // In-bounds edge coordinates accepted.
+        assert!(validate_window_bounds_coordinates(
+            ActionMethod::Click,
+            &json!({"app": "a", "x": 0, "y": 0}),
+            &bounds
+        ).is_ok());
+        assert!(validate_window_bounds_coordinates(
+            ActionMethod::Click,
+            &json!({"app": "a", "x": 400, "y": 300}),
+            &bounds
+        ).is_ok());
+        assert!(validate_window_bounds_coordinates(
+            ActionMethod::Drag,
+            &json!({"app": "a", "fromX": 10, "fromY": 20, "toX": 399, "toY": 299}),
+            &bounds
+        ).is_ok());
+
+        // Past-width / past-height rejected.
+        for (method, params) in [
+            (ActionMethod::Click, json!({"app": "a", "x": 401, "y": 10})),
+            (ActionMethod::Click, json!({"app": "a", "x": 10, "y": 300.5})),
+            (ActionMethod::Scroll, json!({"app": "a", "x": 500, "y": 10, "direction": "up"})),
+            (ActionMethod::Drag, json!({"app": "a", "fromX": 401, "fromY": 10, "toX": 10, "toY": 10})),
+            (ActionMethod::Drag, json!({"app": "a", "fromX": 10, "fromY": 10, "toX": 10, "toY": 301})),
+        ] {
+            let err = validate_window_bounds_coordinates(method, &params, &bounds).unwrap_err();
+            assert_eq!(err.code, "invalid_argument");
+            assert!(err.message.contains("out of window bounds"));
+        }
+
+        // Inline windowBounds in params is also validated by validate_action_params.
+        let inline_err = check(
+            ActionMethod::Click,
+            json!({"app": "a", "x": 450, "y": 10, "windowBounds": bounds}),
+        )
+        .unwrap_err();
+        assert_eq!(inline_err.code, "invalid_argument");
     }
 }

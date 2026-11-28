@@ -13,9 +13,31 @@ import { pty } from "@/lib/api";
 import { refreshWorkspaces, useSessionStore } from "@/lib/sessions";
 import { useTerminals } from "@/lib/terminal";
 import { usePrefs } from "@/lib/prefs";
-import type { SessionEntry } from "@/types/session";
+import type { SessionEntry, Workspace } from "@/types/session";
 
 const RunningSessions = createContext<{ commands: ReadonlySet<string>; ports: ReadonlySet<string> }>({ commands: new Set(), ports: new Set() });
+
+function setsEqual(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
+  if (a.size !== b.size) return false;
+  for (const item of a) if (!b.has(item)) return false;
+  return true;
+}
+
+const workspaceByPathCache = new WeakMap<Record<string, Workspace[]>, Map<string, Workspace>>();
+function getWorkspaceByPath(workspaces: Record<string, Workspace[]>): Map<string, Workspace> {
+  let map = workspaceByPathCache.get(workspaces);
+  if (!map) {
+    map = new Map();
+    for (const list of Object.values(workspaces)) {
+      for (const workspace of list) {
+        const key = workspace.path.replace(/\/+$/, "");
+        if (!map.has(key)) map.set(key, workspace);
+      }
+    }
+    workspaceByPathCache.set(workspaces, map);
+  }
+  return map;
+}
 
 /** One batch for the sidebar, independent of which conversation is open. */
 export function SessionRowData({ children }: { children: ReactNode }) {
@@ -42,13 +64,25 @@ export function SessionRowData({ children }: { children: ReactNode }) {
           pty.listeningSessions(sessions).catch(() => []),
         ]);
         const busy = new Set(commands);
-        if (live) setRunning({ commands: new Set(entries.filter(([id]) => busy.has(id)).map(([, session]) => session)), ports: new Set(ports) });
+        const nextCommands = new Set(entries.filter(([id]) => busy.has(id)).map(([, session]) => session));
+        const nextPorts = new Set(ports);
+        if (live) {
+          setRunning((prev) => (setsEqual(prev.commands, nextCommands) && setsEqual(prev.ports, nextPorts) ? prev : { commands: nextCommands, ports: nextPorts }));
+        }
       } catch { /* Keep the last successful observation until the next poll. */ }
       finally { reading = false; }
     };
     void read();
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") void read();
+    };
     const timer = window.setInterval(() => void read(), 5_000);
-    return () => { live = false; window.clearInterval(timer); };
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      live = false;
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
   }, [shells, directories]);
   return <RunningSessions.Provider value={running}>{children}</RunningSessions.Provider>;
 }
@@ -91,14 +125,17 @@ export function SessionRowExtras({ sessions, selected, status, at }: { sessions:
   const { workspaces } = useSessionStore();
   const { colourLineCounts } = usePrefs();
   const running = useContext(RunningSessions);
-  const paths = new Set(sessions.filter((s) => !s.worktreeRemoved).map((s) => s.cwd.replace(/\/+$/, "")));
+  const byPath = getWorkspaceByPath(workspaces);
   const seen = new Set<string>();
   let additions = 0;
   let deletions = 0;
-  for (const workspace of Object.values(workspaces).flat()) {
-    const path = workspace.path.replace(/\/+$/, "");
-    if (!paths.has(path) || seen.has(path)) continue;
+  for (const s of sessions) {
+    if (s.worktreeRemoved) continue;
+    const path = s.cwd.replace(/\/+$/, "");
+    if (seen.has(path)) continue;
     seen.add(path);
+    const workspace = byPath.get(path);
+    if (!workspace) continue;
     additions += workspace.branchAdditions ?? workspace.additions;
     deletions += workspace.branchDeletions ?? workspace.deletions;
   }

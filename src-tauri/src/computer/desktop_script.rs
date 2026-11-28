@@ -12,6 +12,7 @@ pub use bridge::{script_path, Platform};
 pub struct DesktopScriptProvider {
     platform: Platform,
     script: PathBuf,
+    app_identifier: Option<String>,
     capabilities: Option<Value>,
     snapshots: snapshot::SnapshotStore,
 }
@@ -21,13 +22,26 @@ impl DesktopScriptProvider {
         Self {
             platform,
             script,
+            app_identifier: None,
             capabilities: None,
             snapshots: Default::default(),
         }
     }
 
+    pub fn with_app_identifier(mut self, app_identifier: Option<String>) -> Self {
+        self.app_identifier = app_identifier;
+        self
+    }
+
     fn call_bridge(&self, request: &Value) -> Result<Value, ComputerError> {
-        bridge::call(self.platform, &self.script, request)
+        let mut enriched = request.clone();
+        if let Some(object) = enriched.as_object_mut() {
+            object.insert(
+                "ownApp".into(),
+                super::own_app_context(self.app_identifier.as_deref()),
+            );
+        }
+        bridge::call(self.platform, &self.script, &enriched)
     }
 
     fn ensure_capability(&mut self, group: &str, key: &str) -> Result<(), ComputerError> {
@@ -149,6 +163,9 @@ impl ComputerProvider for DesktopScriptProvider {
         super::validation::validate_action_params(method, &params)?;
         let query = app(&params)?;
         let current = self.snapshots.current(query, &params);
+        if let Some(bounds) = current.as_ref().and_then(|s| s.get("windowBounds")) {
+            super::validation::validate_window_bounds_coordinates(method, &params, bounds)?;
+        }
         let mut request = snapshot_request(bridge_tool(method), &params);
         // Resolve before even launching a handshake: cache misses must never
         // allow an index to be interpreted against an unrelated fresh tree.
@@ -297,7 +314,9 @@ fn action_metadata(
             })
             .and_then(|element| element["value"].as_str());
         let expected = params["value"].as_str();
-        action["verification"] = if actual.is_some() && actual == expected {
+        action["verification"] = if actual == Some("[redacted]") {
+            json!({"state": "unverified", "reason": "redacted_sensitive_field", "actualPreview": "[redacted]"})
+        } else if actual.is_some() && actual == expected {
             json!({"state": "verified", "property": "value", "expected": expected, "actualPreview": actual})
         } else {
             json!({"state": "unverified", "reason": if actual.is_some() { "value_mismatch" } else { "provider_unavailable" }, "expected": expected, "actualPreview": actual})
@@ -463,5 +482,50 @@ print(json.dumps({'ok': True, **reply}))
                 .code,
             "element_not_found"
         );
+    }
+
+    #[test]
+    fn set_value_verification_never_echoes_secrets_for_redacted_fields() {
+        let params = json!({"elementIndex": 3, "value": "super-secret-password"});
+        let target = json!({"index": 3, "runtimeId": [1, 7]});
+        let response = json!({"snapshot": {"elements": [
+            {"index": 3, "runtimeId": [1, 7], "value": "[redacted]"}
+        ]}});
+        let action = action_metadata(ActionMethod::SetValue, &params, &response, &target, None);
+        assert_eq!(action["verification"]["state"], "unverified");
+        assert_eq!(action["verification"]["reason"], "redacted_sensitive_field");
+        assert_eq!(action["verification"]["actualPreview"], "[redacted]");
+        assert!(action["verification"].get("expected").is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn desktop_script_provider_passes_own_app_metadata_and_rejects_out_of_bounds_clicks() {
+        let root = tempfile::tempdir().unwrap();
+        let script = root.path().join("fake.py");
+        std::fs::write(&script, r#"
+import json, pathlib, sys
+op = json.loads(pathlib.Path(sys.argv[1]).read_text())
+own = op.get('ownApp')
+assert isinstance(own, dict) and own['pid'] > 0
+assert own['releaseBundleId'] == 'com.terminalx.next'
+assert own['appIdentifier'] == 'com.terminalx.dev'
+snapshot = {'app': {'name': 'Editor', 'pid': 123}, 'windowIndex': 0, 'windowBounds': {'x': 10, 'y': 20, 'width': 200, 'height': 150}, 'treeLines': ['0 window Editor'], 'elements': []}
+if op['tool'] == 'handshake':
+    reply = {'capabilities': {'protocolVersion': 1, 'provider': 'fake', 'supports': {'actions': {'click': True}}}}
+else:
+    reply = {'snapshot': snapshot}
+print(json.dumps({'ok': True, **reply}))
+"#).unwrap();
+        let mut provider = DesktopScriptProvider::new(Platform::Linux, script)
+            .with_app_identifier(Some("com.terminalx.dev".into()));
+        provider
+            .snapshot(json!({"app": "Editor", "noScreenshot": true}))
+            .unwrap();
+        let err = provider
+            .action(ActionMethod::Click, json!({"app": "Editor", "x": 250, "y": 50}))
+            .unwrap_err();
+        assert_eq!(err.code, "invalid_argument");
+        assert!(err.message.contains("out of window bounds"));
     }
 }

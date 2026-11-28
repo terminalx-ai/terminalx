@@ -1,12 +1,44 @@
 //! Pinned turn trees and narrowly scoped restores. No shell interpolation or pathspec expansion.
 use super::*;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
+use std::io::Write;
+use std::process::Stdio;
 #[path = "checkpoint_bytes.rs"]
 pub(crate) mod bytes;
 #[path = "checkpoint_retention.rs"]
 mod retention;
 #[cfg(test)]
 pub use retention::enforce_for_test as enforce_retention;
+
+#[cfg(test)]
+thread_local! {
+    static TEST_RESTORE_GIT_SPAWNS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+fn run_stdin(cwd: &Path, args: &[&str], input: &[u8]) -> Result<Vec<u8>> {
+    #[cfg(test)]
+    TEST_RESTORE_GIT_SPAWNS.with(|c| c.set(c.get() + 1));
+    let mut child = git()
+        .current_dir(cwd)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let mut stdin = child.stdin.take().expect("stdin is piped");
+    let (write_res, output) = std::thread::scope(|scope| {
+        let writer = scope.spawn(move || stdin.write_all(input));
+        let output = child.wait_with_output();
+        let write_res = writer.join().unwrap_or(Ok(()));
+        (write_res, output)
+    });
+    let output = output?;
+    if !output.status.success() {
+        bail!("git {}: {}", args.join(" "), String::from_utf8_lossy(&output.stderr));
+    }
+    write_res?;
+    Ok(output.stdout)
+}
 
 pub fn reference(session: &str, turn: &str, edge: &str) -> Result<String> {
     for part in [session, turn, edge] {
@@ -73,21 +105,29 @@ pub fn exists(cwd: &Path, session: &str, turn: &str, edge: &str) -> Result<bool>
     Ok(run_ok(cwd, &["show-ref", "--verify", "--quiet", &reference(session, turn, edge)?]))
 }
 
-pub fn prune_turn(cwd: &Path, session: &str, turn: &str) -> Result<()> {
-    let prefix = reference(session, turn, "start")?.trim_end_matches("start").to_string();
-    for name in run(cwd, &["for-each-ref", "--format=%(refname)", &prefix])?.lines() {
-        run(cwd, &["update-ref", "-d", name])?;
+fn delete_refs_with_prefix(cwd: &Path, prefix: &str) -> Result<()> {
+    let listing = run(cwd, &["for-each-ref", "--format=%(refname)", prefix])?;
+    let mut input = String::new();
+    for name in listing.lines().filter(|line| !line.is_empty()) {
+        input.push_str("delete ");
+        input.push_str(name);
+        input.push('\n');
+    }
+    if !input.is_empty() {
+        run_stdin(cwd, &["update-ref", "--stdin"], input.as_bytes())?;
     }
     Ok(())
+}
+
+pub fn prune_turn(cwd: &Path, session: &str, turn: &str) -> Result<()> {
+    let prefix = reference(session, turn, "start")?.trim_end_matches("start").to_string();
+    delete_refs_with_prefix(cwd, &prefix)
 }
 
 pub fn prune(cwd: &Path, session: &str) -> Result<()> {
     reference(session, "validate", "start")?;
     let prefix = format!("refs/raccoon-checkpoints/{session}/");
-    for name in run(cwd, &["for-each-ref", "--format=%(refname)", &prefix])?.lines() {
-        run(cwd, &["update-ref", "-d", name])?;
-    }
-    Ok(())
+    delete_refs_with_prefix(cwd, &prefix)
 }
 
 pub fn paths(cwd: &Path, base: &str, head: &str) -> Result<Vec<String>> {
@@ -143,12 +183,13 @@ pub fn current(cwd: &Path, paths: &[String]) -> Result<bytes::Snapshot> {
 /// Roll back a failed restore when possible. Callers pin the backup trees before writing.
 pub fn restore_with_backup(cwd: &Path, target: &bytes::Snapshot, index: &str, paths: &[String], before: &bytes::Snapshot, before_index: &str) -> Result<()> {
     // Refuse invalid paths/source entries before starting (and before attempting rollback).
+    validate_trees(cwd, target.tree.as_str(), index)?;
     for path in paths {
         safe_path(cwd, path)?;
-        contains(cwd, &target.tree, path)?;
-        contains(cwd, index, path)?;
     }
-    if let Err(error) = restore_exact(cwd, target, index, paths) {
+    let target_blobs = tree_blobs(cwd, &target.tree, paths)?;
+    let index_blobs = tree_blobs(cwd, index, paths)?;
+    if let Err(error) = restore_exact_prepared(cwd, target, index, paths, &target_blobs, &index_blobs) {
         return match restore_exact(cwd, before, before_index, paths) {
             Ok(()) => Err(error.context("Restore failed; the previous files and staging were restored")),
             Err(rollback) => Err(error.context(format!(
@@ -159,18 +200,49 @@ pub fn restore_with_backup(cwd: &Path, target: &bytes::Snapshot, index: &str, pa
     Ok(())
 }
 
-fn contains(cwd: &Path, tree: &str, path: &str) -> Result<bool> {
+fn validate_trees(cwd: &Path, tree: &str, index_tree: &str) -> Result<()> {
+    for candidate in [tree, index_tree] {
+        if !is_tree_id(candidate) {
+            bail!("Invalid restore tree");
+        }
+        #[cfg(test)]
+        TEST_RESTORE_GIT_SPAWNS.with(|c| c.set(c.get() + 1));
+        run(cwd, &["cat-file", "-e", &format!("{candidate}^{{tree}}")])?;
+    }
+    Ok(())
+}
+
+/// Inspect all `paths` in `tree` in batched `git ls-tree` calls, returning
+/// `(mode, oid)` for every present blob and rejecting any directory/submodule.
+fn tree_blobs(cwd: &Path, tree: &str, paths: &[String]) -> Result<HashMap<String, (String, String)>> {
     if !is_tree_id(tree) {
         bail!("Invalid restore tree");
     }
-    let entry = run(cwd, &["--literal-pathspecs", "ls-tree", "-z", tree, "--", path])?;
-    if entry.is_empty() {
-        return Ok(false);
+    let mut blobs = HashMap::new();
+    if paths.is_empty() {
+        return Ok(blobs);
     }
-    if entry.split_whitespace().nth(1) != Some("blob") {
-        bail!("Cannot restore directory or submodule {path} as a file");
+    const CHUNK: usize = 256;
+    for chunk in paths.chunks(CHUNK) {
+        #[cfg(test)]
+        TEST_RESTORE_GIT_SPAWNS.with(|c| c.set(c.get() + 1));
+        let mut args: Vec<&str> = Vec::with_capacity(chunk.len() + 5);
+        args.extend(["--literal-pathspecs", "ls-tree", "-z", tree, "--"]);
+        args.extend(chunk.iter().map(String::as_str));
+        let listing = run(cwd, &args)?;
+        for entry in listing.split('\0').filter(|e| !e.is_empty()) {
+            let Some((meta, path)) = entry.split_once('\t') else { continue };
+            let mut parts = meta.split_whitespace();
+            let (Some(mode), Some(kind), Some(oid)) = (parts.next(), parts.next(), parts.next()) else {
+                continue;
+            };
+            if kind != "blob" {
+                bail!("Cannot restore directory or submodule {path} as a file");
+            }
+            blobs.insert(path.to_owned(), (mode.to_owned(), oid.to_owned()));
+        }
     }
-    Ok(true)
+    Ok(blobs)
 }
 
 /// Restore only the named files, including binary blobs, modes, links and deletions.
@@ -183,24 +255,31 @@ pub fn restore(cwd: &Path, tree: &str, index_tree: &str, paths: &[String]) -> Re
 
 /// [`restore`] of a snapshot, each file with its exact bytes.
 pub fn restore_exact(cwd: &Path, snapshot: &bytes::Snapshot, index_tree: &str, paths: &[String]) -> Result<()> {
-    let tree = snapshot.tree.as_str();
-    for tree in [tree, index_tree] {
-        if !is_tree_id(tree) {
-            bail!("Invalid restore tree");
-        }
-        run(cwd, &["cat-file", "-e", &format!("{tree}^{{tree}}")])?;
+    validate_trees(cwd, snapshot.tree.as_str(), index_tree)?;
+    for path in paths {
+        safe_path(cwd, path)?;
     }
-    let entries: Vec<_> = paths
-        .iter()
-        .map(|path| {
-            safe_path(cwd, path)?;
-            Ok((path, contains(cwd, tree, path)?, contains(cwd, index_tree, path)?))
-        })
-        .collect::<Result<_>>()?;
-    for (path, in_tree, in_index) in entries {
-        if in_tree {
-            run(cwd, &["--literal-pathspecs", "restore", &format!("--source={tree}"), "--worktree", "--", path])?;
-            bytes::put_back(cwd, snapshot, path)?;
+    let target_blobs = tree_blobs(cwd, snapshot.tree.as_str(), paths)?;
+    let index_blobs = tree_blobs(cwd, index_tree, paths)?;
+    restore_exact_prepared(cwd, snapshot, index_tree, paths, &target_blobs, &index_blobs)
+}
+
+fn restore_exact_prepared(
+    cwd: &Path,
+    snapshot: &bytes::Snapshot,
+    index_tree: &str,
+    paths: &[String],
+    target_blobs: &HashMap<String, (String, String)>,
+    index_blobs: &HashMap<String, (String, String)>,
+) -> Result<()> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+    let tree = snapshot.tree.as_str();
+    let mut worktree_restore: Vec<&str> = Vec::new();
+    for path in paths {
+        if target_blobs.contains_key(path.as_str()) {
+            worktree_restore.push(path.as_str());
         } else {
             match std::fs::remove_file(cwd.join(path)) {
                 Ok(()) => {}
@@ -208,15 +287,46 @@ pub fn restore_exact(cwd: &Path, snapshot: &bytes::Snapshot, index_tree: &str, p
                 Err(e) => return Err(e.into()),
             }
         }
-        if in_index {
-            run(
-                cwd,
-                &["--literal-pathspecs", "restore", &format!("--source={index_tree}"), "--staged", "--", path],
-            )?;
-        } else {
-            run(cwd, &["--literal-pathspecs", "rm", "--cached", "-f", "--ignore-unmatch", "--", path])?;
+    }
+    // Batch all worktree file checkouts in one git invocation using NUL-delimited literal pathspecs.
+    if !worktree_restore.is_empty() {
+        let mut pathspec_input = Vec::new();
+        for path in &worktree_restore {
+            pathspec_input.extend_from_slice(path.as_bytes());
+            pathspec_input.push(0);
+        }
+        let source_arg = format!("--source={tree}");
+        run_stdin(
+            cwd,
+            &["--literal-pathspecs", "restore", &source_arg, "--worktree", "--pathspec-from-file=-", "--pathspec-file-nul"],
+            &pathspec_input,
+        )?;
+        if snapshot.kept.is_some() {
+            for path in &worktree_restore {
+                bytes::put_back(cwd, snapshot, path)?;
+            }
         }
     }
+    // Batch all staged additions, updates, and removals in one `git update-index -z --index-info`.
+    let zero_oid = "0".repeat(index_tree.len());
+    let mut index_input = Vec::new();
+    for path in paths {
+        if let Some((mode, oid)) = index_blobs.get(path.as_str()) {
+            index_input.extend_from_slice(mode.as_bytes());
+            index_input.push(b' ');
+            index_input.extend_from_slice(oid.as_bytes());
+            index_input.push(b'\t');
+            index_input.extend_from_slice(path.as_bytes());
+            index_input.push(0);
+        } else {
+            index_input.extend_from_slice(b"0 ");
+            index_input.extend_from_slice(zero_oid.as_bytes());
+            index_input.push(b'\t');
+            index_input.extend_from_slice(path.as_bytes());
+            index_input.push(0);
+        }
+    }
+    run_stdin(cwd, &["update-index", "-z", "--index-info"], &index_input)?;
     Ok(())
 }
 
@@ -298,5 +408,44 @@ mod tests {
         assert_ne!(std::fs::metadata(p.join("run.sh")).unwrap().permissions().mode() & 0o111, 0);
         assert_eq!(std::fs::read_link(p.join("link")).unwrap(), Path::new("a.txt"));
         assert_eq!(std::fs::read_to_string(p.join("a.txt")).unwrap(), "hello\n");
+    }
+
+    #[test]
+    fn batched_restore_uses_constant_git_spawns_for_many_files() {
+        let _home = crate::store::temp_home();
+        let repo = super::super::tests::repo();
+        let p = repo.path();
+        for i in 0..25 {
+            std::fs::write(p.join(format!("f{i:02}.txt")), format!("before-{i}\n")).unwrap();
+        }
+        run(p, &["add", "f00.txt", "f01.txt"]).unwrap();
+        let index = run(p, &["write-tree"]).unwrap().trim().to_string();
+        let start = snapshot_tree(p).unwrap();
+
+        // Modify all 25 files, add 5 extra files, and stage changes.
+        for i in 0..25 {
+            std::fs::write(p.join(format!("f{i:02}.txt")), format!("after-{i}\n")).unwrap();
+        }
+        for i in 0..5 {
+            std::fs::write(p.join(format!("extra{i}.txt")), "extra\n").unwrap();
+        }
+        run(p, &["add", "f02.txt", "extra0.txt"]).unwrap();
+        let end = snapshot_tree(p).unwrap();
+        let changed = paths(p, &start, &end).unwrap();
+        assert_eq!(changed.len(), 30);
+
+        TEST_RESTORE_GIT_SPAWNS.with(|c| c.set(0));
+        restore(p, &start, &index, &changed).unwrap();
+        let spawns = TEST_RESTORE_GIT_SPAWNS.with(|c| c.get());
+        assert!(spawns <= 6, "batched restore for 30 files should take O(1) git spawns, got {spawns}");
+
+        for i in 0..25 {
+            assert_eq!(std::fs::read_to_string(p.join(format!("f{i:02}.txt"))).unwrap(), format!("before-{i}\n"));
+        }
+        for i in 0..5 {
+            assert!(!p.join(format!("extra{i}.txt")).exists());
+        }
+        assert_eq!(run(p, &["show", ":f00.txt"]).unwrap(), "before-0\n");
+        assert!(run(p, &["show", ":extra0.txt"]).is_err());
     }
 }

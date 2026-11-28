@@ -255,7 +255,7 @@ function SkillReader({ skill, onRefresh }: { skill: DiscoveredSkill | null; onRe
       ) : (
         <div className="flex min-h-0 flex-1">
           <div className="min-w-0 flex-1 overflow-y-auto scrollbar-thin px-6 py-5">
-            <Markdown text={detail.markdown} />
+            <Markdown text={detail.markdown} webLinksOnly remoteImages={false} />
           </div>
           <aside className="w-56 shrink-0 overflow-y-auto border-l border-hairline p-3 scrollbar-thin">
             {detail.executableFiles.length > 0 && (

@@ -544,9 +544,13 @@ pub fn github_comment(cwd: &Path, repo: &str, number: i64, body: &str) -> Result
 
 // ------------------------------------------------------------------ Linear
 
+pub(crate) fn linear_agent() -> &'static ureq::Agent {
+    static AGENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
+    AGENT.get_or_init(|| crate::data_privacy::http_agent().timeout(Duration::from_secs(20)).build())
+}
+
 pub(crate) fn graphql(key: &str, query: &str, variables: Value) -> Result<Value> {
-    let agent = crate::data_privacy::http_agent().timeout(Duration::from_secs(20)).build();
-    let resp = agent
+    let resp = linear_agent()
         .post(linear_api().as_ref())
         .set("Authorization", key)
         .set("Content-Type", "application/json")
@@ -1293,5 +1297,10 @@ mod tests {
         assert_eq!(i.body.as_deref(), Some("Users get logged out."));
         let teams = parse_linear_teams(&serde_json::from_str::<Value>(r#"{"teams":{"nodes":[{"id":"t1","key":"ENG","name":"Engineering"}]}}"#).unwrap());
         assert_eq!(teams[0].key, "ENG");
+    }
+
+    #[test]
+    fn linear_agent_is_pooled_across_calls() {
+        assert!(std::ptr::eq(linear_agent(), linear_agent()));
     }
 }

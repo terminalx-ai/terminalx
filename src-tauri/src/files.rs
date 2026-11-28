@@ -7,7 +7,7 @@
 use crate::paths::Canonical;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -20,19 +20,30 @@ const MAX_FILES: usize = 60_000;
 /// ones up to this many in all. A `node_modules` alone often passes 60,000.
 const MAX_FILES_WITH_IGNORED: usize = 250_000;
 const FRESH_FOR: Duration = Duration::from_secs(20);
+const MAX_CACHED_ROOTS: usize = 16;
 
-#[derive(Clone)]
 struct Index {
     built: Instant,
     files: Vec<String>,
     truncated: bool,
 }
 
+struct CacheEntry {
+    index: Arc<Index>,
+    last_used: u64,
+}
+
+#[derive(Default)]
+struct IndexCache {
+    tick: u64,
+    entries: HashMap<(PathBuf, bool), CacheEntry>,
+}
+
 /// One index per checkout and per mode: with `include_ignored` it also holds
 /// what `.gitignore` (and the folders skipped by name) would leave out.
-fn cache() -> &'static Mutex<HashMap<(PathBuf, bool), Index>> {
-    static C: OnceLock<Mutex<HashMap<(PathBuf, bool), Index>>> = OnceLock::new();
-    C.get_or_init(|| Mutex::new(HashMap::new()))
+fn cache() -> &'static Mutex<IndexCache> {
+    static C: OnceLock<Mutex<IndexCache>> = OnceLock::new();
+    C.get_or_init(|| Mutex::new(IndexCache::default()))
 }
 
 /// The files of a checkout, hidden ones included, as the file tree shows
@@ -93,26 +104,49 @@ fn build(root: &Path, include_ignored: bool, caps: (usize, usize)) -> Index {
     Index { built: Instant::now(), files, truncated: plain.truncated || cut }
 }
 
-fn cached(root: &Path, include_ignored: bool) -> Option<Index> {
-    let c = cache().lock().unwrap();
-    c.get(&(root.to_path_buf(), include_ignored)).filter(|ix| ix.built.elapsed() < FRESH_FOR).cloned()
+fn cached(root: &Path, include_ignored: bool) -> Option<Arc<Index>> {
+    let mut c = cache().lock().unwrap_or_else(|e| e.into_inner());
+    let key = (root.to_path_buf(), include_ignored);
+    let fresh = c.entries.get(&key).is_some_and(|e| e.index.built.elapsed() < FRESH_FOR);
+    if !fresh {
+        c.entries.remove(&key);
+        return None;
+    }
+    c.tick = c.tick.wrapping_add(1);
+    let tick = c.tick;
+    let entry = c.entries.get_mut(&key)?;
+    entry.last_used = tick;
+    Some(Arc::clone(&entry.index))
 }
 
-fn store(root: &Path, include_ignored: bool, ix: Index) -> Index {
-    cache().lock().unwrap().insert((root.to_path_buf(), include_ignored), ix.clone());
-    ix
+fn store(root: &Path, include_ignored: bool, ix: Index) -> Arc<Index> {
+    let arc = Arc::new(ix);
+    let mut c = cache().lock().unwrap_or_else(|e| e.into_inner());
+    c.entries.retain(|_, entry| entry.index.built.elapsed() < FRESH_FOR);
+    let key = (root.to_path_buf(), include_ignored);
+    if !c.entries.contains_key(&key) {
+        while c.entries.len() >= MAX_CACHED_ROOTS {
+            let Some(lru_key) = c.entries.iter().min_by_key(|(_, e)| e.last_used).map(|(k, _)| k.clone()) else {
+                break;
+            };
+            c.entries.remove(&lru_key);
+        }
+    }
+    c.tick = c.tick.wrapping_add(1);
+    let tick = c.tick;
+    c.entries.insert(key, CacheEntry { index: Arc::clone(&arc), last_used: tick });
+    arc
 }
 
 /// The cached index, or a fresh walk. The cache lock is never held while
 /// walking: a slow walk of one checkout (or of ignored files) holds up no
 /// other search. Two searches that both miss may both walk; the last one wins.
-fn index_for(root: &Path, include_ignored: bool) -> (Vec<String>, bool) {
-    let ix = cached(root, include_ignored).unwrap_or_else(|| store(root, include_ignored, build(root, include_ignored, (MAX_FILES, MAX_FILES_WITH_IGNORED))));
-    (ix.files, ix.truncated)
+fn index_for(root: &Path, include_ignored: bool) -> Arc<Index> {
+    cached(root, include_ignored).unwrap_or_else(|| store(root, include_ignored, build(root, include_ignored, (MAX_FILES, MAX_FILES_WITH_IGNORED))))
 }
 
 pub fn invalidate(root: &Path) {
-    cache().lock().unwrap().retain(|(path, _), _| path != root);
+    cache().lock().unwrap_or_else(|e| e.into_inner()).entries.retain(|(path, _), _| path != root);
 }
 
 /// How many files a search looks through (quick open's footer).
@@ -125,8 +159,8 @@ pub struct FileCount {
 }
 
 pub fn count(root: &Path, include_ignored: bool) -> FileCount {
-    let (files, truncated) = index_for(root, include_ignored);
-    FileCount { files: files.len(), truncated }
+    let ix = index_for(root, include_ignored);
+    FileCount { files: ix.files.len(), truncated: ix.truncated }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -137,36 +171,67 @@ pub struct FileHit {
     pub score: u32,
 }
 
+fn cmp_case_insensitive(a: &str, b: &str) -> std::cmp::Ordering {
+    if a.is_ascii() && b.is_ascii() {
+        a.bytes()
+            .map(|b| b.to_ascii_lowercase())
+            .cmp(b.bytes().map(|b| b.to_ascii_lowercase()))
+    } else {
+        a.to_lowercase().cmp(&b.to_lowercase())
+    }
+}
+
 /// Fuzzy-search the index. An empty query lists the shallowest files first,
 /// which is what a bare `@` should open on. `include_ignored` searches the
 /// files Git ignores as well.
 pub fn search(root: &Path, query: &str, limit: usize, include_ignored: bool) -> Result<Vec<FileHit>> {
-    let (files, _) = index_for(root, include_ignored);
-    let name_of = |p: &str| p.rsplit('/').next().unwrap_or(p).to_string();
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let ix = index_for(root, include_ignored);
+    fn name_str(p: &str) -> &str {
+        p.rsplit('/').next().unwrap_or(p)
+    }
     if query.trim().is_empty() {
-        let mut v: Vec<&String> = files.iter().collect();
-        v.sort_by_key(|p| (p.matches('/').count(), p.to_lowercase()));
-        return Ok(v.into_iter().take(limit).map(|p| FileHit { path: p.clone(), name: name_of(p), score: 0 }).collect());
+        let mut v: Vec<(usize, &str)> = ix.files.iter().map(|p| (p.matches('/').count(), p.as_str())).collect();
+        let cmp = |a: &(usize, &str), b: &(usize, &str)| {
+            a.0.cmp(&b.0).then_with(|| cmp_case_insensitive(a.1, b.1)).then_with(|| a.1.cmp(b.1))
+        };
+        if v.len() > limit {
+            v.select_nth_unstable_by(limit, cmp);
+            v.truncate(limit);
+        }
+        v.sort_unstable_by(cmp);
+        return Ok(v.into_iter().map(|(_, p)| FileHit { path: p.to_owned(), name: name_str(p).to_owned(), score: 0 }).collect());
     }
     let mut matcher = Matcher::new(Config::DEFAULT.match_paths());
     let pattern = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
     let mut buf = Vec::new();
-    let mut hits: Vec<(u32, &String)> = files
+    let mut nb = Vec::new();
+    let mut hits: Vec<(u32, &str)> = ix
+        .files
         .iter()
         .filter_map(|p| {
-            let hay = Utf32Str::new(p, &mut buf);
+            let p_str = p.as_str();
+            let hay = Utf32Str::new(p_str, &mut buf);
             let mut score = pattern.score(hay, &mut matcher)?;
             // A match in the file name is worth more than one in a directory.
-            let name = name_of(p);
-            let mut nb = Vec::new();
-            if let Some(ns) = pattern.score(Utf32Str::new(&name, &mut nb), &mut matcher) {
+            let name = name_str(p_str);
+            if let Some(ns) = pattern.score(Utf32Str::new(name, &mut nb), &mut matcher) {
                 score = score.max(ns + 100);
             }
-            Some((score, p))
+            Some((score, p_str))
         })
         .collect();
-    hits.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.len().cmp(&b.1.len())));
-    Ok(hits.into_iter().take(limit).map(|(score, p)| FileHit { path: p.clone(), name: name_of(p), score }).collect())
+    let cmp = |a: &(u32, &str), b: &(u32, &str)| {
+        b.0.cmp(&a.0).then_with(|| a.1.len().cmp(&b.1.len())).then_with(|| a.1.cmp(b.1))
+    };
+    if hits.len() > limit {
+        hits.select_nth_unstable_by(limit, cmp);
+        hits.truncate(limit);
+    }
+    hits.sort_unstable_by(cmp);
+    Ok(hits.into_iter().map(|(score, p)| FileHit { path: p.to_owned(), name: name_str(p).to_owned(), score }).collect())
 }
 
 #[cfg(test)]
@@ -283,6 +348,51 @@ mod tests {
         assert!(!all.iter().any(|f| f == ".env" || f.starts_with(".git/")));
         assert_eq!(list_all(p, 50).unwrap().paths.len(), all.len(), "the same files the tree lists");
     }
+
+    #[test]
+    fn index_cache_shares_arc_enforces_lru_cap_and_top_k_search() {
+        let dirs: Vec<_> = (0..(MAX_CACHED_ROOTS + 4)).map(|i| {
+            let dir = tempfile::tempdir().unwrap();
+            for j in 0..15 {
+                std::fs::write(dir.path().join(format!("file_{i}_{j:02}.rs")), "hello").unwrap();
+            }
+            dir
+        }).collect();
+
+        // Repeated cached() calls share the exact same Arc without deep-cloning.
+        let first = index_for(dirs[0].path(), false);
+        let second = cached(dirs[0].path(), false).unwrap();
+        assert!(Arc::ptr_eq(&first, &second), "cached() must return an O(1) Arc clone");
+        assert_eq!(count(dirs[0].path(), false), FileCount { files: 15, truncated: false });
+
+        // Top-K search returns exact top-5 results in order.
+        let top5 = search(dirs[0].path(), "", 5, false).unwrap();
+        let all = search(dirs[0].path(), "", 20, false).unwrap();
+        assert_eq!(top5.iter().map(|h| &h.path).collect::<Vec<_>>(), all.iter().take(5).map(|h| &h.path).collect::<Vec<_>>());
+        let fuzzy5 = search(dirs[0].path(), "file_0", 5, false).unwrap();
+        let fuzzy_all = search(dirs[0].path(), "file_0", 20, false).unwrap();
+        assert_eq!(fuzzy5.iter().map(|h| &h.path).collect::<Vec<_>>(), fuzzy_all.iter().take(5).map(|h| &h.path).collect::<Vec<_>>());
+
+        // Populate more than MAX_CACHED_ROOTS roots and verify LRU eviction bounds cache size.
+        for dir in &dirs {
+            let _ = index_for(dir.path(), false);
+        }
+        let len = cache().lock().unwrap().entries.len();
+        assert!(len <= MAX_CACHED_ROOTS, "cache len {len} exceeded cap {MAX_CACHED_ROOTS}");
+    }
+
+    #[test]
+    fn searchable_bytes_rejects_oversized_files_before_reading() {
+        let dir = tempfile::tempdir().unwrap();
+        let big = dir.path().join("huge.txt");
+        let file = std::fs::File::create(&big).unwrap();
+        file.set_len(MAX_TEXT + 1024).unwrap();
+        assert!(searchable_bytes(&big).is_none());
+
+        let small = dir.path().join("small.txt");
+        std::fs::write(&small, "needle").unwrap();
+        assert_eq!(searchable_bytes(&small).as_deref(), Some(b"needle".as_slice()));
+    }
 }
 
 // ------------------------------------------------------------------ tree, text, search
@@ -299,7 +409,16 @@ pub struct DirEntry {
 /// One level of the tree: what git would track, dot-files included, `.git`
 /// and the app's own worktree folder left out. Directories first.
 pub fn list_dir(root: &Path, rel: &str) -> Result<Vec<DirEntry>> {
-    let dir = if rel.is_empty() { root.to_path_buf() } else { root.join(rel) };
+    let canonical_root = root.canonical()?;
+    let rel_path = Path::new(rel);
+    if !rel.is_empty() {
+        anyhow::ensure!(
+            rel_path.components().all(|c| matches!(c, std::path::Component::Normal(_))),
+            "Directory path must stay inside the workspace"
+        );
+    }
+    let dir = if rel.is_empty() { canonical_root.clone() } else { canonical_root.join(rel_path).canonical()? };
+    anyhow::ensure!(dir.starts_with(&canonical_root), "Directory path is outside the workspace");
     let mut out = Vec::new();
     let walker = ignore::WalkBuilder::new(&dir)
         .max_depth(Some(1))
@@ -319,7 +438,7 @@ pub fn list_dir(root: &Path, rel: &str) -> Result<Vec<DirEntry>> {
             continue;
         }
         let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
-        let path = entry.path().strip_prefix(root).map(|p| p.to_string_lossy().replace('\\', "/")).unwrap_or_default();
+        let path = entry.path().strip_prefix(&canonical_root).map(|p| p.to_string_lossy().replace('\\', "/")).unwrap_or_default();
         out.push(DirEntry { name: entry.file_name().to_string_lossy().into_owned(), path, is_dir });
     }
     out.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())));
@@ -397,6 +516,7 @@ fn mtime_ms(meta: &std::fs::Metadata) -> u64 {
     meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_millis() as u64).unwrap_or(0)
 }
 
+#[cfg(test)]
 pub fn read_text(path: &Path) -> Result<TextFile> {
     let meta = std::fs::metadata(path)?;
     let size = meta.len();
@@ -420,6 +540,7 @@ pub fn read_text(path: &Path) -> Result<TextFile> {
 const MAX_WHOLE_TEXT: u64 = 256 * 1024 * 1024;
 
 /// A file's whole text, for copying a file the editor shows truncated.
+#[cfg(test)]
 pub fn read_whole_text(path: &Path) -> Result<String> {
     let size = std::fs::metadata(path)?.len();
     anyhow::ensure!(size <= MAX_WHOLE_TEXT, "This file is too large to copy ({} MB); the limit is {} MB.", size / (1024 * 1024), MAX_WHOLE_TEXT / (1024 * 1024));
@@ -431,6 +552,7 @@ pub fn read_whole_text(path: &Path) -> Result<String> {
 /// Save a copy of a file somewhere the person chose (the file tab's
 /// Download): the file's exact bytes from `from`, or `content` (an unsaved
 /// buffer, or a cloud workspace's file). Returns the bytes written.
+#[cfg(test)]
 pub fn export_file(to: &Path, from: Option<&Path>, content: Option<&str>) -> Result<u64> {
     anyhow::ensure!(to.is_absolute(), "The download location must be an absolute path");
     anyhow::ensure!(!to.is_dir(), "{} is a folder", to.display());
@@ -453,6 +575,7 @@ pub fn export_file(to: &Path, from: Option<&Path>, content: Option<&str>) -> Res
     }
 }
 
+#[cfg(test)]
 pub fn write_text(path: &Path, content: &str) -> Result<u64> {
     anyhow::ensure!(crate::media_types::media_type(path).is_none(), "Media files are read-only in the file pane");
     if let Some(parent) = path.parent() {
@@ -464,6 +587,7 @@ pub fn write_text(path: &Path, content: &str) -> Result<u64> {
 
 /// Write a file that must not exist yet. The create is exclusive, so a file
 /// another writer made in the meantime is refused, never emptied or replaced.
+#[cfg(test)]
 pub fn create_text(path: &Path, content: &str) -> Result<u64> {
     use std::io::Write;
     anyhow::ensure!(crate::media_types::media_type(path).is_none(), "Media files are read-only in the file pane");
@@ -479,14 +603,29 @@ pub fn create_text(path: &Path, content: &str) -> Result<u64> {
     Ok(mtime_ms(&file.metadata()?))
 }
 
+#[cfg(test)]
 pub fn stat_mtime(path: &Path) -> Option<u64> {
     std::fs::metadata(path).ok().map(|m| mtime_ms(&m))
 }
 
 /// Resolve a link only after a local webview activation. This deliberately is
 /// not part of ACP or paired RPC: it returns metadata, never file contents.
+///
+/// The target must resolve strictly inside `base` (no arbitrary out-of-workspace
+/// parent root synthesis).
+#[cfg(test)]
 pub fn inspect_local_path(base: &Path, requested: &Path) -> Result<LocalPathInfo> {
-    let candidate = if requested.is_absolute() { requested.to_path_buf() } else { base.join(requested) };
+    inspect_local_path_in_roots(base, requested, &[])
+}
+
+/// Resolve `requested` relative to `base`, confining the canonical result to
+/// `base` or one of `extra_roots` (e.g. registered workspaces or attachments).
+/// Never synthesizes an arbitrary `(parent, filename)` root for out-of-workspace files.
+pub fn inspect_local_path_in_roots(base: &Path, requested: &Path, extra_roots: &[PathBuf]) -> Result<LocalPathInfo> {
+    let canonical_base = base
+        .canonical()
+        .map_err(|error| anyhow::anyhow!("Workspace {} is unavailable: {error}", base.display()))?;
+    let candidate = if requested.is_absolute() { requested.to_path_buf() } else { canonical_base.join(requested) };
     let path = existing_local_path(&candidate)?;
     let metadata = path.metadata()?;
     let kind = if metadata.is_dir() {
@@ -497,21 +636,18 @@ pub fn inspect_local_path(base: &Path, requested: &Path) -> Result<LocalPathInfo
         anyhow::bail!("Destination {} is not a regular file or folder", path.display());
     };
 
-    let canonical_base = base.canonical().unwrap_or_else(|_| base.to_path_buf());
     let (root, rel) = if let Ok(relative) = path.strip_prefix(&canonical_base) {
         (canonical_base, relative.to_path_buf())
-    } else if path.parent().is_none() {
-        // Filesystem roots are valid folder destinations even though they do
-        // not have a parent from which to construct an editor-relative path.
-        (path.clone(), PathBuf::new())
+    } else if let Some(allowed) = find_containing_root(&path, extra_roots) {
+        let relative = path.strip_prefix(allowed).unwrap_or_else(|_| Path::new(""));
+        (allowed.clone(), relative.to_path_buf())
     } else {
-        let parent = path.parent().expect("filesystem roots handled above");
-        (parent.to_path_buf(), path.file_name().map(PathBuf::from).unwrap_or_default())
+        anyhow::bail!("Destination {} is outside the active workspace", path.display());
     };
     let text = matches!(&kind, LocalPathKind::File) && {
         use std::io::Read;
         let mut sample = [0_u8; 8192];
-        std::fs::File::open(&path)
+        crate::workspace_file::open(&root, &path)
             .and_then(|mut file| file.read(&mut sample))
             .map(|read| {
                 let bytes = &sample[..read];
@@ -543,6 +679,668 @@ pub fn existing_local_path(candidate: &Path) -> Result<PathBuf> {
     let metadata = path.metadata()?;
     anyhow::ensure!(metadata.is_file() || metadata.is_dir(), "Destination {} is not a regular file or folder", path.display());
     Ok(path)
+}
+
+// ------------------------------------------------------------------ IPC confinement & safe open
+
+const MAX_EXPLICIT_ALLOWED_FILES: usize = 256;
+
+/// Files explicitly handed to the app by native OS events (such as window
+/// drag-and-drop), never populated from untrusted JS IPC.
+fn explicit_allowed_files() -> &'static Mutex<Vec<PathBuf>> {
+    static FILES: OnceLock<Mutex<Vec<PathBuf>>> = OnceLock::new();
+    FILES.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// Record native OS-dropped regular files so attachment preview and storage
+/// commands can read only what the user explicitly dropped onto the window.
+pub fn allow_explicit_paths(paths: &[PathBuf]) {
+    let mut allowed = explicit_allowed_files().lock().unwrap_or_else(|e| e.into_inner());
+    for raw in paths {
+        let Ok(canonical) = raw.canonical() else { continue };
+        if !canonical.is_file() {
+            continue;
+        }
+        if let Some(pos) = allowed.iter().position(|existing| existing == &canonical) {
+            allowed.remove(pos);
+        }
+        allowed.push(canonical);
+        if allowed.len() > MAX_EXPLICIT_ALLOWED_FILES {
+            let overflow = allowed.len() - MAX_EXPLICIT_ALLOWED_FILES;
+            allowed.drain(..overflow);
+        }
+    }
+}
+
+pub fn is_explicitly_allowed_file(canonical: &Path) -> bool {
+    explicit_allowed_files()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .any(|allowed| allowed == canonical)
+}
+
+/// Canonical roots of registered projects, active session workspaces, and quick-chat folders.
+pub fn registered_workspace_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    let mut push_unique = |path: PathBuf| {
+        if let Ok(canonical) = path.canonical() {
+            if !roots.contains(&canonical) {
+                roots.push(canonical);
+            }
+        }
+    };
+    if let Ok((projects, _)) = crate::store::projects::list() {
+        for project in projects {
+            push_unique(PathBuf::from(project.path));
+        }
+    }
+    if let Ok(sessions) = crate::store::index::load() {
+        for session in sessions {
+            push_unique(PathBuf::from(session.cwd));
+        }
+    }
+    if let Ok(quick_root) = crate::store::quick::root() {
+        push_unique(quick_root);
+    }
+    if let Ok(store_root) = crate::store::root() {
+        push_unique(store_root.join("Chats"));
+    }
+    roots
+}
+
+/// Canonical root for stored session attachments (`$TERMINALX_HOME/attachments`).
+pub fn attachments_root() -> Option<PathBuf> {
+    crate::store::root().ok()?.join("attachments").canonical().ok()
+}
+
+/// Canonical roots allowed for read/inspect/media operations: registered workspaces + attachments.
+pub fn allowed_read_roots() -> Vec<PathBuf> {
+    let mut roots = registered_workspace_roots();
+    if let Some(att) = attachments_root() {
+        if !roots.contains(&att) {
+            roots.push(att);
+        }
+    }
+    roots
+}
+
+/// Most specific containing root for `canonical`.
+pub fn find_containing_root<'a>(canonical: &Path, roots: &'a [PathBuf]) -> Option<&'a PathBuf> {
+    roots
+        .iter()
+        .filter(|root| canonical.starts_with(root))
+        .max_by_key(|root| root.components().count())
+}
+
+/// Settings files that SettingsFiles.tsx is allowed to view read-only via `read_text_file`.
+fn is_allowed_settings_file(canonical: &Path) -> bool {
+    if crate::store::settings::file::status()
+        .ok()
+        .and_then(|status| Path::new(status.path()).canonical().ok())
+        .is_some_and(|user| user == canonical)
+    {
+        return true;
+    }
+    crate::store::managed_configuration::path()
+        .and_then(|p| p.canonical().ok())
+        .is_some_and(|managed| managed == canonical)
+}
+
+/// Bot markdown notes (`ROLE.md`, `MEMORY.md`, `memory/*.md`) under `$TERMINALX_HOME/bots/`.
+fn is_allowed_bot_markdown(canonical: &Path) -> bool {
+    let Some(bots_root) = crate::store::root().ok().and_then(|r| r.join("bots").canonical().ok()) else {
+        return false;
+    };
+    if !canonical.starts_with(&bots_root) || !canonical.is_file() {
+        return false;
+    }
+    let ext_is_md = canonical
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("md"));
+    if !ext_is_md {
+        return false;
+    }
+    let file_name = canonical.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    if matches!(file_name, "ROLE.md" | "MEMORY.md") {
+        return true;
+    }
+    canonical
+        .parent()
+        .and_then(|p| p.file_name())
+        .and_then(|n| n.to_str())
+        .is_some_and(|dir| dir == "memory")
+}
+
+/// Extensions that must NEVER be launched via `open_local_path` (executables,
+/// scripts, macOS/Linux/Windows bundles, shortcuts, disk images, HTML/SVG).
+const BLOCKED_OPEN_EXTENSIONS: &[&str] = &[
+    // macOS bundles, scripts, profiles, disk images, internet locations
+    "app", "command", "tool", "action", "workflow", "applescript", "scpt", "scptd", "osax",
+    "pkg", "mpkg", "dmg", "iso", "img", "webloc", "inetloc", "term", "terminal",
+    "mobileconfig", "prefpane", "kext", "plugin", "bundle", "framework", "xpc", "service",
+    "qlgenerator", "mdimporter", "saver",
+    // Unix / cross-platform shells, scripts, binaries, packages
+    "sh", "bash", "zsh", "fish", "csh", "tcsh", "ksh", "dash",
+    "py", "pyw", "rb", "pl", "pm", "php", "js", "mjs", "cjs", "ts", "mts", "cts", "lua", "awk",
+    "jar", "jnlp", "desktop", "appimage", "run", "bin", "elf", "so", "dylib", "out",
+    "deb", "rpm", "flatpak", "snap",
+    // Windows executables, installers, scripts, shortcuts, libraries
+    "exe", "bat", "cmd", "com", "msi", "msp", "mst", "msu",
+    "ps1", "psm1", "psd1", "vbs", "vbe", "vba", "wsf", "wsh", "hta", "scr", "pif",
+    "cpl", "msc", "inf", "reg", "lnk", "url", "dll", "sys", "ocx", "drv", "scf",
+    "settingcontent-ms", "appref-ms", "library-ms", "searchconnector-ms",
+    // Active web / markup documents that can execute scripts in browsers
+    "html", "htm", "xhtml", "xht", "mhtml", "mht", "shtml", "svg", "svgz", "swf", "xml", "xsl", "xslt",
+];
+
+/// Whether `path` (or any ancestor bundle component such as `Foo.app/Contents/...`)
+/// has a dangerous executable/script/bundle/HTML/SVG extension or Unix execute bit.
+pub fn is_blocked_open_path(path: &Path) -> bool {
+    for component in path.components() {
+        if let std::path::Component::Normal(name) = component {
+            if let Some(ext) = Path::new(name).extension().and_then(|e| e.to_str()) {
+                let lower = ext.to_ascii_lowercase();
+                if BLOCKED_OPEN_EXTENSIONS.contains(&lower.as_str()) {
+                    return true;
+                }
+            }
+        }
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if path.extension().is_none() {
+            if let Ok(meta) = std::fs::metadata(path) {
+                if meta.is_file() && (meta.permissions().mode() & 0o111 != 0) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Validate a target for `open_local_path`: must be a canonical existing file
+/// or directory inside `allowed_roots` (or an allowlisted bot markdown file),
+/// must not be an executable/script/bundle/HTML/SVG, and regular files are
+/// verified against symlink swaps via `workspace_file::open`.
+pub fn validate_open_local_path_in(candidate: &Path, allowed_roots: &[PathBuf], allow_bot_md: bool) -> Result<PathBuf> {
+    let path = existing_local_path(candidate)?;
+    let containing_root = find_containing_root(&path, allowed_roots).cloned();
+    let bot_md = allow_bot_md && is_allowed_bot_markdown(&path);
+    anyhow::ensure!(
+        containing_root.is_some() || bot_md,
+        "Destination {} is outside registered workspaces and attachments",
+        path.display()
+    );
+    anyhow::ensure!(
+        !is_blocked_open_path(&path),
+        "Executable, script, bundle, HTML, and SVG files cannot be opened directly with a system application. Reveal {} in your file manager instead.",
+        path.display()
+    );
+    if path.is_file() {
+        let root = if let Some(root) = containing_root {
+            root
+        } else {
+            path.parent().map(Path::to_path_buf).unwrap_or_else(|| path.clone())
+        };
+        let file = crate::workspace_file::open(&root, &path)?;
+        anyhow::ensure!(file.metadata()?.is_file(), "Destination {} is not a regular file", path.display());
+    }
+    Ok(path)
+}
+
+pub fn validate_open_local_path(candidate: &Path) -> Result<PathBuf> {
+    validate_open_local_path_in(candidate, &allowed_read_roots(), true)
+}
+
+/// Ensure `root` is inside one of `allowed_roots` and return its canonical path.
+pub fn require_root_in(root: &Path, allowed_roots: &[PathBuf]) -> Result<PathBuf> {
+    let canonical = root
+        .canonical()
+        .map_err(|error| anyhow::anyhow!("Workspace {} is unavailable: {error}", root.display()))?;
+    anyhow::ensure!(
+        find_containing_root(&canonical, allowed_roots).is_some(),
+        "Path {} is outside registered workspaces",
+        canonical.display()
+    );
+    Ok(canonical)
+}
+
+/// Resolve an existing readable file inside `allowed_roots` (or explicitly OS-dropped
+/// / allowlisted settings / bot markdown files when enabled) and open it with `O_NOFOLLOW`.
+pub fn open_confined_read_in(
+    path: &Path,
+    allowed_roots: &[PathBuf],
+    allow_explicit: bool,
+    allow_settings: bool,
+) -> Result<(PathBuf, std::fs::File)> {
+    let canonical = path
+        .canonical()
+        .map_err(|error| anyhow::anyhow!("File {} is unavailable: {error}", path.display()))?;
+    let root = if let Some(root) = find_containing_root(&canonical, allowed_roots) {
+        root.clone()
+    } else if (allow_explicit && is_explicitly_allowed_file(&canonical))
+        || (allow_settings && (is_allowed_settings_file(&canonical) || is_allowed_bot_markdown(&canonical)))
+    {
+        canonical
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("File {} has no parent directory", canonical.display()))?
+            .to_path_buf()
+    } else {
+        anyhow::bail!("Path {} is outside registered workspaces and attachments", canonical.display());
+    };
+    let file = crate::workspace_file::open(&root, &canonical)?;
+    anyhow::ensure!(file.metadata()?.is_file(), "{} is not a regular file", canonical.display());
+    Ok((canonical, file))
+}
+
+pub fn open_confined_read(path: &Path) -> Result<(PathBuf, std::fs::File)> {
+    open_confined_read_in(path, &allowed_read_roots(), true, true)
+}
+
+/// Resolve a file read strictly for media streaming (`open_media_file`):
+/// `root` must be inside registered workspaces/attachments, OR `(root, rel)` must
+/// resolve to an explicitly OS-dropped file.
+pub fn resolve_confined_media_root_in(
+    root: &Path,
+    rel: &str,
+    allowed_roots: &[PathBuf],
+    allow_explicit: bool,
+) -> Result<(PathBuf, String)> {
+    let rel_path = Path::new(rel);
+    anyhow::ensure!(
+        !rel.is_empty() && rel_path.components().all(|c| matches!(c, std::path::Component::Normal(_))),
+        "Media path must be relative to the selected workspace"
+    );
+    let canonical_root = root
+        .canonical()
+        .map_err(|error| anyhow::anyhow!("Media root {} is unavailable: {error}", root.display()))?;
+    let canonical_target = canonical_root
+        .join(rel_path)
+        .canonical()
+        .map_err(|error| anyhow::anyhow!("Media file {} is unavailable: {error}", rel))?;
+    anyhow::ensure!(
+        canonical_target.starts_with(&canonical_root),
+        "Media path is outside the selected workspace"
+    );
+    if find_containing_root(&canonical_target, allowed_roots).is_some()
+        || (allow_explicit && is_explicitly_allowed_file(&canonical_target))
+    {
+        return Ok((canonical_root, rel.to_string()));
+    }
+    anyhow::bail!("Media path {} is outside registered workspaces and attachments", canonical_target.display())
+}
+
+pub fn resolve_confined_media_root(root: &Path, rel: &str) -> Result<(PathBuf, String)> {
+    resolve_confined_media_root_in(root, rel, &allowed_read_roots(), true)
+}
+
+/// Resolve a writable path inside `allowed_roots` (existing or not-yet-created).
+/// Rejects `..`, non-normal trailing components, and live or dangling symlinks.
+fn resolve_write_target_in(path: &Path, allowed_roots: &[PathBuf]) -> Result<(PathBuf, PathBuf)> {
+    anyhow::ensure!(path.is_absolute(), "Write target must be an absolute path");
+    anyhow::ensure!(
+        !path.components().any(|c| matches!(c, std::path::Component::ParentDir)),
+        "Write target cannot contain parent traversal"
+    );
+    let mut missing: Vec<std::ffi::OsString> = Vec::new();
+    let mut cursor = path.to_path_buf();
+    loop {
+        match std::fs::symlink_metadata(&cursor) {
+            Ok(meta) => {
+                anyhow::ensure!(
+                    !meta.file_type().is_symlink(),
+                    "Refusing to write through symbolic link {}",
+                    cursor.display()
+                );
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        let name = cursor
+            .file_name()
+            .ok_or_else(|| anyhow::anyhow!("Write target {} has no existing parent", path.display()))?
+            .to_os_string();
+        missing.push(name);
+        cursor = cursor
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("Write target {} has no existing parent", path.display()))?
+            .to_path_buf();
+    }
+    let canonical_existing = cursor.canonical()?;
+    let root = find_containing_root(&canonical_existing, allowed_roots)
+        .ok_or_else(|| anyhow::anyhow!("Path {} is outside registered workspaces", canonical_existing.display()))?
+        .clone();
+    let mut target = canonical_existing;
+    for segment in missing.into_iter().rev() {
+        let seg_path = Path::new(&segment);
+        anyhow::ensure!(
+            seg_path.components().count() == 1
+                && matches!(seg_path.components().next(), Some(std::path::Component::Normal(_))),
+            "Invalid path segment in write target"
+        );
+        target.push(segment);
+    }
+    anyhow::ensure!(target.starts_with(&root), "Write target escapes workspace root");
+    Ok((root, target))
+}
+
+/// Write `bytes` to `target` inside `root` without following symlinks in any
+/// ancestor or the leaf file (`O_NOFOLLOW` on Unix; final-path handle check on Windows).
+pub fn write_bytes_in_root(root: &Path, target: &Path, bytes: &[u8], create_new: bool) -> Result<u64> {
+    use std::io::Write;
+    let relative = target
+        .strip_prefix(root)
+        .map_err(|_| anyhow::anyhow!("Write target escapes workspace root"))?;
+    let mut components: Vec<&std::ffi::OsStr> = Vec::new();
+    for component in relative.components() {
+        let std::path::Component::Normal(name) = component else {
+            anyhow::bail!("Invalid write target path");
+        };
+        components.push(name);
+    }
+    let (&leaf, parents) = components
+        .split_last()
+        .ok_or_else(|| anyhow::anyhow!("Write target cannot be the workspace root itself"))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::fd::{AsRawFd, FromRawFd};
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::MetadataExt;
+        let before = root.metadata()?;
+        let mut dir = crate::workspace_file::open_relative(
+            std::fs::File::open("/")?,
+            root.strip_prefix("/")?,
+        )?;
+        let opened = dir.metadata()?;
+        anyhow::ensure!(before.dev() == opened.dev() && before.ino() == opened.ino(), "Workspace directory changed.");
+        for parent in parents {
+            let c_name = std::ffi::CString::new(parent.as_bytes())?;
+            let rc = unsafe { libc::mkdirat(dir.as_raw_fd(), c_name.as_ptr(), 0o755) };
+            if rc < 0 {
+                let err = std::io::Error::last_os_error();
+                if err.kind() != std::io::ErrorKind::AlreadyExists {
+                    return Err(err.into());
+                }
+            }
+            let fd = unsafe {
+                libc::openat(
+                    dir.as_raw_fd(),
+                    c_name.as_ptr(),
+                    libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_DIRECTORY,
+                )
+            };
+            if fd < 0 {
+                return Err(std::io::Error::last_os_error().into());
+            }
+            dir = unsafe { std::fs::File::from_raw_fd(fd) };
+        }
+        let c_leaf = std::ffi::CString::new(leaf.as_bytes())?;
+        let mut flags = libc::O_WRONLY | libc::O_CREAT | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+        if create_new {
+            flags |= libc::O_EXCL;
+        } else {
+            flags |= libc::O_TRUNC;
+        }
+        let fd = unsafe { libc::openat(dir.as_raw_fd(), c_leaf.as_ptr(), flags, 0o644 as libc::c_uint) };
+        if fd < 0 {
+            let error = std::io::Error::last_os_error();
+            if create_new && error.kind() == std::io::ErrorKind::AlreadyExists {
+                anyhow::bail!("A file with that name already exists.");
+            }
+            return Err(error.into());
+        }
+        let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+        anyhow::ensure!(file.metadata()?.is_file(), "Write target is not a regular file");
+        file.write_all(bytes)?;
+        Ok(mtime_ms(&file.metadata()?))
+    }
+
+    #[cfg(windows)]
+    {
+        let mut dir = root.to_path_buf();
+        for parent in parents {
+            dir.push(parent);
+            match std::fs::symlink_metadata(&dir) {
+                Ok(meta) => {
+                    anyhow::ensure!(!meta.file_type().is_symlink(), "Refusing to traverse symbolic link {}", dir.display());
+                    anyhow::ensure!(meta.is_dir(), "{} is not a directory", dir.display());
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    std::fs::create_dir(&dir)?;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+        if let Ok(meta) = std::fs::symlink_metadata(target) {
+            anyhow::ensure!(!meta.file_type().is_symlink(), "Refusing to write through symbolic link {}", target.display());
+        }
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true);
+        if create_new {
+            opts.create_new(true);
+        } else {
+            // Do not truncate before `final_path` confirms confinement inside `root`.
+            opts.create(true);
+        }
+        let mut file = match opts.open(target) {
+            Ok(file) => file,
+            Err(error) if create_new && error.kind() == std::io::ErrorKind::AlreadyExists => {
+                anyhow::bail!("A file with that name already exists.");
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let actual = crate::win::fs::final_path(&file)?;
+        let actual = crate::paths::simplified(&actual);
+        anyhow::ensure!(
+            actual.starts_with(crate::paths::simplified(root)),
+            "Write target escaped workspace root"
+        );
+        if !create_new {
+            file.set_len(0)?;
+        }
+        file.write_all(bytes)?;
+        Ok(mtime_ms(&file.metadata()?))
+    }
+}
+
+/// Ensure a user-chosen export/save destination is not inside `$TERMINALX_HOME`
+/// and is opened without following a symlink at the leaf (`O_NOFOLLOW`).
+pub fn open_export_destination(to: &Path) -> Result<std::fs::File> {
+    anyhow::ensure!(to.is_absolute(), "The download location must be an absolute path");
+    anyhow::ensure!(!to.is_dir(), "{} is a folder", to.display());
+    if let Ok(home) = crate::store::root() {
+        if let Ok(canonical_home) = home.canonical() {
+            let parent_canon = to.parent().and_then(|p| p.canonical().ok());
+            if to.starts_with(&canonical_home) || parent_canon.as_ref().is_some_and(|p| p.starts_with(&canonical_home)) {
+                anyhow::bail!("Cannot export files into TerminalX's internal data directory");
+            }
+        }
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(to)?;
+        anyhow::ensure!(file.metadata()?.is_file(), "{} is not a regular file", to.display());
+        Ok(file)
+    }
+    #[cfg(not(unix))]
+    {
+        if let Ok(meta) = std::fs::symlink_metadata(to) {
+            anyhow::ensure!(!meta.file_type().is_symlink(), "Refusing to export through symbolic link {}", to.display());
+        }
+        let file = std::fs::OpenOptions::new().write(true).create(true).truncate(true).open(to)?;
+        anyhow::ensure!(file.metadata()?.is_file(), "{} is not a regular file", to.display());
+        Ok(file)
+    }
+}
+
+fn read_text_from_file(mut file: std::fs::File) -> Result<TextFile> {
+    use std::io::Read;
+    let meta = file.metadata()?;
+    anyhow::ensure!(meta.is_file(), "Not a regular file");
+    let size = meta.len();
+    let mut bytes = Vec::with_capacity((size.min(MAX_TEXT)) as usize);
+    file.by_ref().take(MAX_TEXT).read_to_end(&mut bytes)?;
+    let binary = bytes.iter().take(8192).any(|&b| b == 0);
+    let content = if binary { String::new() } else { String::from_utf8_lossy(&bytes).into_owned() };
+    Ok(TextFile { content, mtime_ms: mtime_ms(&meta), size, binary, truncated: size > MAX_TEXT })
+}
+
+fn read_whole_text_from_file(mut file: std::fs::File) -> Result<String> {
+    use std::io::Read;
+    let meta = file.metadata()?;
+    anyhow::ensure!(meta.is_file(), "Not a regular file");
+    let size = meta.len();
+    anyhow::ensure!(
+        size <= MAX_WHOLE_TEXT,
+        "This file is too large to copy ({} MB); the limit is {} MB.",
+        size / (1024 * 1024),
+        MAX_WHOLE_TEXT / (1024 * 1024)
+    );
+    let mut bytes = Vec::new();
+    file.by_ref().take(MAX_WHOLE_TEXT + 1).read_to_end(&mut bytes)?;
+    anyhow::ensure!(
+        bytes.len() as u64 <= MAX_WHOLE_TEXT,
+        "This file is too large to copy; the limit is {} MB.",
+        MAX_WHOLE_TEXT / (1024 * 1024)
+    );
+    anyhow::ensure!(!bytes.iter().take(8192).any(|&b| b == 0), "This file is binary; it cannot be copied as text.");
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+pub fn list_dir_confined(root: &Path, rel: &str) -> Result<Vec<DirEntry>> {
+    let canonical = require_root_in(root, &allowed_read_roots())?;
+    list_dir(&canonical, rel)
+}
+
+pub fn list_all_confined(root: &Path, limit: usize) -> Result<FileList> {
+    let canonical = require_root_in(root, &allowed_read_roots())?;
+    list_all(&canonical, limit)
+}
+
+pub fn search_confined(root: &Path, query: &str, limit: usize, include_ignored: bool) -> Result<Vec<FileHit>> {
+    let canonical = require_root_in(root, &allowed_read_roots())?;
+    search(&canonical, query, limit, include_ignored)
+}
+
+pub fn count_confined(root: &Path, include_ignored: bool) -> Result<FileCount> {
+    let canonical = require_root_in(root, &allowed_read_roots())?;
+    Ok(count(&canonical, include_ignored))
+}
+
+pub fn read_text_confined_in(path: &Path, allowed_roots: &[PathBuf]) -> Result<TextFile> {
+    let (_, file) = open_confined_read_in(path, allowed_roots, true, true)?;
+    read_text_from_file(file)
+}
+
+pub fn read_text_confined(path: &Path) -> Result<TextFile> {
+    read_text_confined_in(path, &allowed_read_roots())
+}
+
+pub fn read_whole_text_confined_in(path: &Path, allowed_roots: &[PathBuf]) -> Result<String> {
+    let (_, file) = open_confined_read_in(path, allowed_roots, true, true)?;
+    read_whole_text_from_file(file)
+}
+
+pub fn read_whole_text_confined(path: &Path) -> Result<String> {
+    read_whole_text_confined_in(path, &allowed_read_roots())
+}
+
+pub fn write_text_confined_in(path: &Path, content: &str, allowed_roots: &[PathBuf]) -> Result<u64> {
+    anyhow::ensure!(crate::media_types::media_type(path).is_none(), "Media files are read-only in the file pane");
+    let (root, target) = resolve_write_target_in(path, allowed_roots)?;
+    write_bytes_in_root(&root, &target, content.as_bytes(), false)
+}
+
+pub fn write_text_confined(path: &Path, content: &str) -> Result<u64> {
+    write_text_confined_in(path, content, &registered_workspace_roots())
+}
+
+pub fn create_text_confined_in(path: &Path, content: &str, allowed_roots: &[PathBuf]) -> Result<u64> {
+    anyhow::ensure!(crate::media_types::media_type(path).is_none(), "Media files are read-only in the file pane");
+    let (root, target) = resolve_write_target_in(path, allowed_roots)?;
+    write_bytes_in_root(&root, &target, content.as_bytes(), true)
+}
+
+pub fn create_text_confined(path: &Path, content: &str) -> Result<u64> {
+    create_text_confined_in(path, content, &registered_workspace_roots())
+}
+
+pub fn stat_mtime_confined(path: &Path) -> Option<u64> {
+    let (_, file) = open_confined_read(path).ok()?;
+    file.metadata().ok().map(|m| mtime_ms(&m))
+}
+
+pub fn inspect_local_path_confined(base: &Path, requested: &Path) -> Result<LocalPathInfo> {
+    let roots = allowed_read_roots();
+    let canonical_base = require_root_in(base, &roots)?;
+    inspect_local_path_in_roots(&canonical_base, requested, &roots)
+}
+
+pub fn export_file_confined_in(to: &Path, from: Option<&Path>, content: Option<&str>, allowed_roots: &[PathBuf]) -> Result<u64> {
+    use std::io::Write;
+    match (from, content) {
+        (Some(from), None) => {
+            let (canonical_from, mut src) = open_confined_read_in(from, allowed_roots, true, false)?;
+            if let Ok(canonical_to) = to.canonical() {
+                if canonical_from == canonical_to {
+                    return Ok(src.metadata()?.len());
+                }
+            }
+            let mut dst = open_export_destination(to)?;
+            Ok(std::io::copy(&mut src, &mut dst)?)
+        }
+        (None, Some(content)) => {
+            let mut dst = open_export_destination(to)?;
+            dst.write_all(content.as_bytes())?;
+            Ok(content.len() as u64)
+        }
+        _ => anyhow::bail!("Download needs either a file or its contents"),
+    }
+}
+
+pub fn export_file_confined(to: &Path, from: Option<&Path>, content: Option<&str>) -> Result<u64> {
+    export_file_confined_in(to, from, content, &allowed_read_roots())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn search_text_confined(
+    root: &Path,
+    query: &str,
+    regex: bool,
+    case_sensitive: bool,
+    whole_word: bool,
+    limit: usize,
+    replacement: Option<&str>,
+) -> Result<TextSearch> {
+    let canonical = require_root_in(root, &allowed_read_roots())?;
+    search_text(&canonical, query, regex, case_sensitive, whole_word, limit, replacement)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn replace_text_confined(
+    root: &Path,
+    query: &str,
+    replacement: &str,
+    regex: bool,
+    case_sensitive: bool,
+    whole_word: bool,
+    targets: Option<Vec<ReplaceTarget>>,
+    skip: &[String],
+) -> Result<ReplaceReport> {
+    let canonical = require_root_in(root, &registered_workspace_roots())?;
+    replace_text(&canonical, query, replacement, regex, case_sensitive, whole_word, targets, skip)
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -636,12 +1434,22 @@ fn rel_of(root: &Path, path: &Path) -> String {
 }
 
 /// The bytes of a file worth searching: small enough, and not binary.
-fn searchable_bytes(path: &Path) -> Option<Vec<u8>> {
-    let bytes = std::fs::read(path).ok()?;
+fn searchable_bytes_from_file(file: std::fs::File) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let meta = file.metadata().ok()?;
+    if !meta.is_file() || meta.len() > MAX_TEXT {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity((meta.len() as usize).min(MAX_TEXT as usize));
+    file.take(MAX_TEXT + 1).read_to_end(&mut bytes).ok()?;
     if bytes.len() > MAX_TEXT as usize || bytes.iter().take(8192).any(|&b| b == 0) {
         return None;
     }
     Some(bytes)
+}
+
+fn searchable_bytes(path: &Path) -> Option<Vec<u8>> {
+    searchable_bytes_from_file(std::fs::File::open(path).ok()?)
 }
 
 /// Replacement templates are written the way editors expect them: `$1`, `$&`
@@ -890,13 +1698,14 @@ pub fn replace_text(
     };
     let mut report = ReplaceReport { files: 0, replacements: 0 };
     for (path, lines) in jobs {
-        let Some(bytes) = searchable_bytes(&path) else { continue };
+        let Ok(file) = crate::workspace_file::open(&root, &path) else { continue };
+        let Some(bytes) = searchable_bytes_from_file(file) else { continue };
         let Ok(text) = String::from_utf8(bytes) else { continue };
         let (next, n) = rewrite_text(&rw, &text, lines.as_deref());
         if n == 0 {
             continue;
         }
-        write_text(&path, &next)?;
+        write_bytes_in_root(&root, &path, next.as_bytes(), false)?;
         report.files += 1;
         report.replacements += n;
     }
@@ -1009,7 +1818,7 @@ mod tree_tests {
     }
 
     #[test]
-    fn link_paths_resolve_inside_and_outside_the_workspace() {
+    fn link_paths_resolve_inside_workspace_and_reject_outside_targets() {
         let workspace = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(workspace.path().join("src")).unwrap();
@@ -1022,15 +1831,19 @@ mod tree_tests {
         assert_eq!(inside.rel, "src/main.rs");
         assert!(inside.text);
 
-        let external = inspect_local_path(workspace.path(), &outside.path().join("report.pdf")).unwrap();
+        // S-25: out-of-workspace files and directories must never synthesize arbitrary roots.
+        let err = inspect_local_path(workspace.path(), &outside.path().join("report.pdf")).unwrap_err();
+        assert!(err.to_string().contains("outside"), "{err}");
+        assert!(inspect_local_path(workspace.path(), outside.path()).is_err());
+        assert!(inspect_local_path(workspace.path(), Path::new("../outside")).is_err());
+
+        // An explicitly registered extra root (e.g. attachments) resolves under that root.
+        let allowed_extra = vec![outside.path().canonical().unwrap()];
+        let external = inspect_local_path_in_roots(workspace.path(), &outside.path().join("report.pdf"), &allowed_extra).unwrap();
         assert_eq!(external.root, outside.path().canonical().unwrap().to_string_lossy());
         assert_eq!(external.rel, "report.pdf");
         assert!(!external.text);
-        assert_eq!(inspect_local_path(workspace.path(), outside.path()).unwrap().kind, LocalPathKind::Directory);
-        let filesystem_root = workspace.path().canonical().unwrap().ancestors().last().unwrap().to_path_buf();
-        let root_folder = inspect_local_path(workspace.path(), &filesystem_root).unwrap();
-        assert_eq!(root_folder.kind, LocalPathKind::Directory);
-        assert_eq!(root_folder.path, filesystem_root.to_string_lossy());
+
         assert!(inspect_local_path(workspace.path(), Path::new("missing.txt")).unwrap_err().to_string().contains("unavailable"));
 
         let mut boundary = vec![b'a'; 8191];
@@ -1044,6 +1857,131 @@ mod tree_tests {
         assert!(!inspect_local_path(workspace.path(), Path::new("incomplete.txt")).unwrap().text);
         assert_eq!(existing_local_path(&workspace.path().join("src/main.rs")).unwrap(), workspace.path().canonical().unwrap().join("src/main.rs"));
         assert!(existing_local_path(&workspace.path().join("not-there")).is_err());
+    }
+
+    #[test]
+    fn open_local_path_blocks_executables_scripts_bundles_html_svg_and_outside_roots() {
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let ws_root = workspace.path().canonical().unwrap();
+        let roots = vec![ws_root.clone()];
+
+        // Safe document & directory inside workspace are allowed.
+        let safe_pdf = workspace.path().join("docs/report.pdf");
+        std::fs::create_dir_all(safe_pdf.parent().unwrap()).unwrap();
+        std::fs::write(&safe_pdf, b"%PDF-1.7").unwrap();
+        assert_eq!(validate_open_local_path_in(&safe_pdf, &roots, false).unwrap(), safe_pdf.canonical().unwrap());
+        assert_eq!(validate_open_local_path_in(safe_pdf.parent().unwrap(), &roots, false).unwrap(), safe_pdf.parent().unwrap().canonical().unwrap());
+
+        // Outside workspace is refused even for a safe PDF.
+        let outside_pdf = outside.path().join("secret.pdf");
+        std::fs::write(&outside_pdf, b"%PDF-1.7").unwrap();
+        assert!(validate_open_local_path_in(&outside_pdf, &roots, false).is_err());
+
+        // Dangerous executable, script, bundle, shortcut, HTML, and SVG extensions are blocked.
+        for name in [
+            "payload.command", "run.sh", "script.zsh", "evil.bash", "app.exe",
+            "install.bat", "go.cmd", "macro.ps1", "drop.vbs", "setup.msi",
+            "disk.dmg", "pkg.pkg", "link.url", "mac.webloc", "launcher.desktop",
+            "vector.svg", "page.html", "index.htm", "Payload.APP",
+        ] {
+            let file = workspace.path().join(name);
+            std::fs::write(&file, "content").unwrap();
+            let err = validate_open_local_path_in(&file, &roots, false).unwrap_err();
+            assert!(err.to_string().contains("cannot be opened directly"), "{name}: {err}");
+        }
+
+        // Nested files inside a `.app` bundle directory are also blocked.
+        let bundle_inner = workspace.path().join("Evil.app/Contents/Info.plist");
+        std::fs::create_dir_all(bundle_inner.parent().unwrap()).unwrap();
+        std::fs::write(&bundle_inner, "plist").unwrap();
+        assert!(validate_open_local_path_in(&bundle_inner, &roots, false).is_err());
+        assert!(validate_open_local_path_in(&workspace.path().join("Evil.app"), &roots, false).is_err());
+
+        // Extensionless Unix executable binary is blocked.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let bin = workspace.path().join("runme");
+            std::fs::write(&bin, "#!/bin/sh\nid\n").unwrap();
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+            assert!(validate_open_local_path_in(&bin, &roots, false).is_err());
+        }
+    }
+
+    #[test]
+    fn confined_fs_operations_enforce_roots_and_block_traversal_and_symlinks() {
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let ws_root = workspace.path().canonical().unwrap();
+        let roots = vec![ws_root.clone()];
+
+        let inside_file = workspace.path().join("notes.txt");
+        let outside_file = outside.path().join("secret.txt");
+        std::fs::write(&inside_file, "inside").unwrap();
+        std::fs::write(&outside_file, "secret").unwrap();
+
+        // list_dir rejects parent traversal.
+        assert!(list_dir(workspace.path(), "../").is_err());
+        assert!(list_dir(workspace.path(), "/etc").is_err());
+
+        // Confined read/write/create allow inside workspace and reject outside.
+        assert_eq!(read_text_confined_in(&inside_file, &roots).unwrap().content, "inside");
+        assert!(read_text_confined_in(&outside_file, &roots).is_err());
+        assert!(write_text_confined_in(&outside_file, "pwn", &roots).is_err());
+        assert!(create_text_confined_in(&outside.path().join("new.txt"), "pwn", &roots).is_err());
+        write_text_confined_in(&workspace.path().join("sub/created.txt"), "ok", &roots).unwrap();
+        assert_eq!(std::fs::read_to_string(workspace.path().join("sub/created.txt")).unwrap(), "ok");
+        assert!(create_text_confined_in(&workspace.path().join("sub/created.txt"), "dup", &roots).is_err());
+
+        // Export refuses outside source and refuses writing into TERMINALX_HOME.
+        let _home = crate::store::temp_home();
+        let dest = outside.path().join("exported.txt");
+        assert!(export_file_confined_in(&dest, Some(&outside_file), None, &roots).is_err());
+        assert_eq!(export_file_confined_in(&dest, Some(&inside_file), None, &roots).unwrap(), 6);
+        let internal_dest = crate::store::root().unwrap().join("settings.json");
+        assert!(export_file_confined_in(&internal_dest, None, Some("{}"), &roots).is_err());
+
+        // Media root confinement rejects out-of-workspace roots and `..` escapes.
+        let outside_img = outside.path().join("pic.png");
+        std::fs::write(&outside_img, "png").unwrap();
+        assert!(resolve_confined_media_root_in(outside.path(), "pic.png", &roots, false).is_err());
+        assert!(resolve_confined_media_root_in(workspace.path(), "../pic.png", &roots, false).is_err());
+        let inside_img = workspace.path().join("pic.png");
+        std::fs::write(&inside_img, "png").unwrap();
+        assert!(resolve_confined_media_root_in(workspace.path(), "pic.png", &roots, false).is_ok());
+
+        #[cfg(unix)]
+        {
+            let link = workspace.path().join("escape.txt");
+            std::os::unix::fs::symlink(&outside_file, &link).unwrap();
+            assert!(read_text_confined_in(&link, &roots).is_err());
+            assert!(write_text_confined_in(&link, "pwn", &roots).is_err());
+            let dir_link = workspace.path().join("dir_escape");
+            std::os::unix::fs::symlink(outside.path(), &dir_link).unwrap();
+            assert!(write_text_confined_in(&dir_link.join("evil.txt"), "pwn", &roots).is_err());
+            let symlink_dest = outside.path().join("sym_dest.txt");
+            std::os::unix::fs::symlink(&outside_file, &symlink_dest).unwrap();
+            assert!(export_file_confined_in(&symlink_dest, None, Some("overwrite"), &roots).is_err());
+            assert_eq!(std::fs::read_to_string(&outside_file).unwrap(), "secret");
+
+            // Dangling symlink pointing outside the workspace must be refused by both
+            // write_text_confined_in and create_text_confined_in without creating the outside target.
+            let outside_missing = outside.path().join("dangling_created.txt");
+            let dangling_link = workspace.path().join("dangling.txt");
+            std::os::unix::fs::symlink(&outside_missing, &dangling_link).unwrap();
+            assert!(write_text_confined_in(&dangling_link, "pwn", &roots).is_err());
+            assert!(create_text_confined_in(&dangling_link, "pwn", &roots).is_err());
+            assert!(!outside_missing.exists(), "dangling symlink write must not create outside target");
+
+            // Dangling directory symlink must also be refused for nested writes.
+            let outside_missing_dir = outside.path().join("missing_dir");
+            let dangling_dir = workspace.path().join("dangling_dir");
+            std::os::unix::fs::symlink(&outside_missing_dir, &dangling_dir).unwrap();
+            assert!(write_text_confined_in(&dangling_dir.join("child.txt"), "pwn", &roots).is_err());
+            assert!(create_text_confined_in(&dangling_dir.join("child.txt"), "pwn", &roots).is_err());
+            assert!(!outside_missing_dir.exists(), "dangling dir symlink must not create outside dir");
+        }
     }
 
     #[test]

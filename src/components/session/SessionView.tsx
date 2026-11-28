@@ -1,13 +1,12 @@
 import { RunStrip } from "@/components/orchestration/RunStrip";
 import { RunPill, RunViewHint } from "@/components/orchestration/RunPill";
-import { RunView } from "@/components/orchestration/RunView";
 import { useExperimentalSettings } from "@/lib/experimentalSettings";
 import { showRunView, useRun, useRunViewShown } from "@/lib/orchestration";
 import { openWorkspaceRestore } from "@/lib/dialogs";
 import { EnvironmentNotice } from "@/components/terminal/EnvironmentNotice";
 import { LocalShareButton } from "./ShareSessionDialog";
 import { PanelPresence } from "@/components/layout/PanelPresence";
-import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { lazy, memo, Suspense, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { CalendarClock, ChevronRight, CircleDot, Cloud, FolderOpen, GitBranch, Globe, Laptop, LogoGitlab, MessageSquare, PanelLeft, PanelRight, Server, SessionContinue, SquareTerminal } from "@/icons";
 import { describeGithubIdentity, refreshGithubIdentity, useGithubIdentity } from "@/lib/githubIdentity";
 import type { GithubIdentity } from "@/lib/api";
@@ -25,32 +24,27 @@ import { checkoutLabel, rootCheckout, worktreeCheckout } from "@/lib/checkout";
 import { openAutomations, renameWorkspace, selectSession, useSessionStore } from "@/lib/sessions";
 import { cn } from "@/lib/cn";
 import type { SessionEntry } from "@/types/session";
-import { ContinuationDialog } from "./ContinuationDialog";
 import { followedLayout, layoutOf, tabKey, useTabState, workspaceKey } from "@/lib/tabLayouts";
 import { TabView } from "./TabView";
 import { useRemoteTabRow } from "@/lib/remoteTabRow";
-import { WorkspacePanes, useWorkspacePaneLayout } from "./WorkspacePanes";
+import { LazyTabBody, WorkspacePanes, useWorkspacePaneLayout } from "./WorkspacePanes";
 import { EmptySession } from "./EmptySession";
 import { TabAccountLabel, TabActions } from "./TabStrip";
 import { tabNodeId, tabPanelId } from "@/lib/sessionTabs";
 import { activateLatestTerminal, selectSessionTab, useTerminals, type SelectedSessionTab } from "@/lib/terminal";
 import { TerminalChatProvider } from "@/components/terminal/TerminalChat";
 import { TerminalView } from "@/components/terminal/TerminalView";
-import { BrowserView } from "@/components/browser/BrowserView";
 import { bootBrowser, pagesFor, useBrowser } from "@/lib/browser";
 import { isFileTab, isTabEditor, setLastFocused, useEditors } from "@/lib/editors";
-import { EditorSplit, useFileTabShortcuts } from "@/components/editor/EditorSplit";
-import { QuickOpen } from "@/components/editor/QuickOpen";
-import { ProjectSearch } from "@/components/editor/ProjectSearch";
+import { useFileTabShortcuts } from "@/components/editor/useFileTabShortcuts";
 import { RightPanel } from "@/components/layout/RightPanel";
-import { useTabLog } from "@/lib/agentEvents";
+import { useTabLogEvents } from "@/lib/agentEvents";
 import type { TabEntry } from "@/types/session";
 import { WorkspaceNameEditor } from "./WorkspaceNameEditor";
 import { workspaceName } from "@/lib/dashboard";
 import { localSessionBackend, terminalViewOf } from "@/lib/sessionBackend";
 import type { CloudSessionModel } from "@/lib/cloudSession";
 import { cloudAgentLabel } from "@/lib/cloudRowState";
-import { CloudTerminalPane } from "@/components/cloud/CloudTerminalPane";
 import { AccessChip, NotSharedNotice, PresenceAvatars } from "@/components/cloud/CloudCollab";
 import { CloudResourceNotice } from "@/components/cloud/CloudResourceNotice";
 import { CloudHeaderActions } from "./CloudHeaderActions";
@@ -64,13 +58,11 @@ import { lastSavedText } from "@/lib/cloudLifecycle";
 import { findCloudWorkspace, useCloudCatalog } from "@/lib/cloudCatalog";
 import { CloudDiagnosticsDialog, CloudDiagnosticsMenuItem, offersCloudDiagnostics } from "@/components/cloud/CloudDiagnosticsDialog";
 import { CloudMirrorChip, CloudMirrorDialog, CloudMirrorMenuItem } from "@/components/cloud/CloudMirrorDialog";
-import { CloudPortsView } from "@/components/cloud/CloudPorts";
 import { PortForwardChip } from "@/components/cloud/PortForwardChip";
 import { PortToasts } from "@/components/cloud/PortToast";
 import { openForwardCount, usePortForwards } from "@/lib/portForwards";
 import { MachineSessionChip, MachineSessionStrips, MachineTerminalDock } from "@/components/machines/MachineSession";
 import { MachineRunMenu } from "@/components/machines/MachineRunPanes";
-import { MachineContinueDialog } from "@/components/machines/MachineContinueDialog";
 import { selectCloudTerminal } from "@/lib/cloudTerminals";
 import { showPanelTab } from "@/lib/panelTab";
 import { useAccount } from "@/lib/account";
@@ -87,6 +79,43 @@ import { SessionCost } from "./SessionCost";
 import { RunMenu, RunRestartOffer, offersRunMenu } from "./RunMenu";
 import { WindowControls } from "@/components/layout/WindowControls";
 import { AppMenu } from "@/components/layout/AppMenu";
+import { CloudTerminalPane } from "@/components/cloud/CloudTerminalPane";
+import { registerProjectSearch } from "@/lib/projectSearch";
+import type { FileSource } from "@/lib/workspaceFiles";
+
+const RunView = lazy(() => import("@/components/orchestration/RunView").then((m) => ({ default: m.RunView })));
+const BrowserView = lazy(() => import("@/components/browser/BrowserView").then((m) => ({ default: m.BrowserView })));
+const EditorSplit = lazy(() => import("@/components/editor/EditorSplit").then((m) => ({ default: m.EditorSplit })));
+const QuickOpen = lazy(() => import("@/components/editor/QuickOpen").then((m) => ({ default: m.QuickOpen })));
+const ProjectSearch = lazy(() => import("@/components/editor/ProjectSearch").then((m) => ({ default: m.ProjectSearch })));
+const CloudPortsView = lazy(() => import("@/components/cloud/CloudPorts").then((m) => ({ default: m.CloudPortsView })));
+const MachineContinueDialog = lazy(() => import("@/components/machines/MachineContinueDialog").then((m) => ({ default: m.MachineContinueDialog })));
+const ContinuationDialog = lazy(() => import("./ContinuationDialog").then((m) => ({ default: m.ContinuationDialog })));
+
+/**
+ * Registers ⌘P / ⇧⌘F / ⇧⌘H synchronously on session mount so first-press shortcuts
+ * are never dropped while lazy dialog chunks load, and fetches each chunk only on first use.
+ */
+function SessionFileDialogs({ sessionId, root, source, branch }: { sessionId: string; root: string; source?: FileSource; branch?: string | null }) {
+  const [quickOpenMounted, setQuickOpenMounted] = useState(false);
+  const [searchRequest, setSearchRequest] = useState<{ mode: "find" | "replace"; query?: string } | null>(null);
+  const canRewrite = !source || (!!source.replaceText && !source.readOnly);
+
+  useShortcut("files.quickOpen", () => setQuickOpenMounted(true), { enabled: !quickOpenMounted });
+  useShortcut("files.search", () => setSearchRequest({ mode: "find" }), { enabled: !searchRequest });
+  useShortcut("files.replace", () => { if (canRewrite) setSearchRequest({ mode: "replace" }); }, { enabled: !searchRequest });
+  useEffect(() => {
+    if (searchRequest) return;
+    return registerProjectSearch((query) => setSearchRequest({ mode: "find", query }));
+  }, [searchRequest]);
+
+  return (
+    <Suspense fallback={null}>
+      {quickOpenMounted && <QuickOpen sessionId={sessionId} root={root} source={source} branch={branch} initialOpen />}
+      {searchRequest && <ProjectSearch sessionId={sessionId} root={root} source={source} initialOpen={searchRequest} />}
+    </Suspense>
+  );
+}
 
 /** Why a quick chat's panel has no Changes, Repo or PR. */
 const NO_REPOSITORY = "No repository here: Changes, Repo and PR need one. Point this chat at a repository, or move it to a project, to use them.";
@@ -120,10 +149,10 @@ function managedWorkspaceFor(session: SessionEntry) {
   return { projectPath: session.projectPath, name: session.worktreeName };
 }
 
-/** The right panel reads the active tab's log for the changes range. */
+/** The right panel reads the active tab's committed events for the changes range (ignoring 60fps stream deltas). */
 function PanelHost({ session, tab, checkFix }: { session: SessionEntry; tab: TabEntry; checkFix: ReturnType<typeof useFixCheckErrors> }) {
   const isGit = useSessionIsGit(session);
-  const log = useTabLog(session.id, tab.id);
+  const log = useTabLogEvents(session.id, tab.id);
   const live = tab.status === "in_progress" || tab.status === "waiting";
   const workspace = managedWorkspaceFor(session);
   return (
@@ -160,12 +189,14 @@ function PanelHost({ session, tab, checkFix }: { session: SessionEntry; tab: Tab
  * and sent on the machine (PRO-408); a cloud workspace's PR panel offers none.
  */
 function CloudPanelHost({ session, cloud, tab, checkFix }: { session: SessionEntry; cloud: CloudSessionModel; tab?: TabEntry; checkFix?: ReturnType<typeof useFixCheckErrors> }) {
-  const log = useTabLog(cloud.backend.logSessionId, tab?.id ?? "");
+  const log = useTabLogEvents(cloud.backend.logSessionId, tab?.id ?? "");
   const live = tab?.status === "in_progress" || tab?.status === "waiting";
   // PRO-28: only for someone who may use previews; it never connects or wakes the workspace.
   const ports = cloud.ports.offered
     ? (active: boolean) => (
-        <CloudPortsView workspaceKey={cloud.workspaceKey} client={cloud.client} state={cloud.ports.state} connectionId={cloud.ports.connectionId} mayOpen active={active} />
+        <Suspense fallback={null}>
+          <CloudPortsView workspaceKey={cloud.workspaceKey} client={cloud.client} state={cloud.ports.state} connectionId={cloud.ports.connectionId} mayOpen active={active} />
+        </Suspense>
       )
     : null;
   // The tab says how many ports are forwarded here now ("Ports 3", 14.11; "Ports 1", 21.08).
@@ -507,7 +538,7 @@ function CloudLocation({
  * full-height body, and the right panel. A local session runs on this
  * computer; a cloud one (`cloud`) in a workspace VM, through its backend.
  */
-export function SessionView({
+export const SessionView = memo(function SessionView({
   session,
   sidebarOpen,
   onToggleSidebar,
@@ -1043,7 +1074,11 @@ export function SessionView({
         </header>
         {/* Only a session that leads a run, or has its Run view open, has the two views: one with no run looks like any other (#1404). */}
         {runOffered && (!!run || runShown) && <RunStrip runShown={runShown} waiting={run?.state === "awaitingApproval"} paused={run?.state === "needsYou"} onChange={(shown) => showRunView(session.id, shown)} />}
-        {runShown && <RunView session={session} pieceColumn={pieceColumn} onShowChat={() => showRunView(session.id, false)} />}
+        {runShown && (
+          <Suspense fallback={<div className="flex min-h-0 flex-1 items-center justify-center text-xs text-faint">Loading run view…</div>}>
+            <RunView session={session} pieceColumn={pieceColumn} onShowChat={() => showRunView(session.id, false)} />
+          </Suspense>
+        )}
         {machine && cloud && !compact && (
           <MachineSessionStrips
             session={session}
@@ -1071,9 +1106,13 @@ export function SessionView({
         {cloud && !cloud.locked && !machine && <CloudResourceNotice workspaceKey={cloud.workspaceKey} turn={session.tabs.some((t) => t.status === "in_progress")} manage={cloud.manage} />}
 
         {((local && !cloud) || (machine && cloud)) && <RunRestartOffer session={session} />}
-        {continuationSource && (machine && cloud
-          ? <MachineContinueDialog cloud={cloud} source={continuationSource} onClose={() => setContinuationSource(null)} />
-          : <ContinuationDialog session={session} source={continuationSource} onClose={() => setContinuationSource(null)} />)}
+        {continuationSource && (
+          <Suspense fallback={null}>
+            {machine && cloud
+              ? <MachineContinueDialog cloud={cloud} source={continuationSource} onClose={() => setContinuationSource(null)} />
+              : <ContinuationDialog session={session} source={continuationSource} onClose={() => setContinuationSource(null)} />}
+          </Suspense>
+        )}
         {/* Fix errors at work, or what it sent. A failure is a toast with Try again (PRO-394, design 05.17). */}
         {(checkFix.busy || checkFix.notice) && <div className="flex items-center gap-2 border-b border-hairline px-3 py-2 text-xs" role="status">
           <span className="min-w-0 flex-1 text-muted-foreground">{checkFix.busy ? "Collecting failed check logs…" : checkFix.notice}</span>
@@ -1102,27 +1141,32 @@ export function SessionView({
                   } : undefined}
                 />
               ) : <>
-              {session.tabs.map((t) => (
+              {session.tabs.map((t) => {
+                const isActive = selected?.kind === "agent" && t.id === selected.id;
+                return (
                 <div
                   key={t.id}
                   id={tabPanelId({ kind: "agent", id: t.id })}
                   role="tabpanel"
                   aria-labelledby={labelledBy({ kind: "agent", id: t.id })}
-                  aria-hidden={selected?.kind !== "agent" || t.id !== selected.id}
-                  className={cn("flex min-h-0 flex-1 flex-col", (selected?.kind !== "agent" || t.id !== selected.id) && "hidden")}
+                  aria-hidden={!isActive}
+                  className={cn("flex min-h-0 flex-1 flex-col", !isActive && "hidden")}
                 >
-                  {!cloud && <EnvironmentNotice id={t.pane ?? `tab:${t.id}`} active={selected?.kind === "agent" && t.id === selected.id && !activeInTerminal} />}
-                  <TabView
-                    session={session}
-                    tab={t}
-                    continuationOpen={!!continuationSource}
-                    active={selected?.kind === "agent" && t.id === selected.id}
-                    backend={cloud ? backend : undefined}
-                    gitSource={cloud?.gitSource}
-                    workspace={cloud ? cloud.removableWorkspace : localWorkspace}
-                  />
+                  <LazyTabBody active={isActive}>
+                    {!cloud && <EnvironmentNotice id={t.pane ?? `tab:${t.id}`} active={isActive && !activeInTerminal} />}
+                    <TabView
+                      session={session}
+                      tab={t}
+                      continuationOpen={!!continuationSource}
+                      active={isActive}
+                      backend={cloud ? backend : undefined}
+                      gitSource={cloud?.gitSource}
+                      workspace={cloud ? cloud.removableWorkspace : localWorkspace}
+                    />
+                  </LazyTabBody>
                 </div>
-              ))}
+                );
+              })}
               {shellPanes.map((pane) => (
                 <div
                   key={pane.id}
@@ -1163,18 +1207,21 @@ export function SessionView({
                   )}
                 </div>
               ))}
-              {browserPages.map((page) => (
+              {browserPages.map((page) => {
+                const isActive = selected?.kind === "browser" && page.id === selected.id;
+                return (
                 <div
                   key={page.id}
                   id={tabPanelId({ kind: "browser", id: page.id })}
                   role="tabpanel"
                   aria-labelledby={labelledBy({ kind: "browser", id: page.id })}
-                  aria-hidden={selected?.kind !== "browser" || page.id !== selected.id}
-                  className={cn("absolute inset-0", (selected?.kind !== "browser" || page.id !== selected.id) && "invisible")}
+                  aria-hidden={!isActive}
+                  className={cn("absolute inset-0", !isActive && "invisible")}
                 >
-                  <BrowserView session={session} page={page} active={selected?.kind === "browser" && page.id === selected.id} />
+                  {isActive && <Suspense fallback={null}><BrowserView session={session} page={page} active /></Suspense>}
                 </div>
-              ))}
+                );
+              })}
               {/* A local session with no tabs of its own on screen has a page of its own; a cloud one says what state its workspace is in.
                   A browser page belongs to the folder, so one another session there opened is listed in this row too, but it is
                   shown only when picked: until then this session's page is, with its closed tabs (#721). */}
@@ -1182,7 +1229,7 @@ export function SessionView({
               {!session.tabs.length && !cloudTerminals.length && cloud && <CloudSessionEmpty cloud={cloud} />}
               </>}
             </div>
-            {hasEditors && <EditorSplit sessionId={session.id} active selectedTab={selected} />}
+            {hasEditors && <Suspense fallback={null}><EditorSplit sessionId={session.id} active selectedTab={selected} /></Suspense>}
           </div>
         </section>
       </div>
@@ -1214,19 +1261,11 @@ export function SessionView({
         ))}
       </PanelPresence>
       {cloud ? (
-        cloud.fileSource && (
-          <>
-            <QuickOpen sessionId={session.id} root={session.cwd} source={cloud.fileSource} />
-            <ProjectSearch sessionId={session.id} root={session.cwd} source={cloud.fileSource} />
-          </>
-        )
+        cloud.fileSource && <SessionFileDialogs sessionId={session.id} root={session.cwd} source={cloud.fileSource} />
       ) : (
-        <>
-          <QuickOpen sessionId={session.id} root={session.cwd} branch={session.branch} />
-          <ProjectSearch sessionId={session.id} root={session.cwd} />
-        </>
+        <SessionFileDialogs sessionId={session.id} root={session.cwd} branch={session.branch} />
       )}
     </div>
     </TerminalChatProvider>
   );
-}
+});

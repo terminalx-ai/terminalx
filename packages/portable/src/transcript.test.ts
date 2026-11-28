@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { AgentEvent, Goal, Payload, Question } from "./events";
 import { buildTranscript, compactionStatus, ConversationView, conversationEvents, questionAnswers, questionsLabel, toggleQuestionChoice, TranscriptReducer, type QuestionChoices } from "./transcript";
 
@@ -511,5 +511,22 @@ describe("a question the agent's CLI drew in its own terminal (PRO-460)", () => 
     const compacted = event(1, { type: "context_compacted" });
     const asked = buildTranscript([compacted, event(2, { type: "terminal_prompt", prompt: offer }), summary], false);
     expect(asked.turns).toEqual(buildTranscript([compacted, summary], false).turns);
+  });
+});
+
+describe("messageTime formatter cache (P-11)", () => {
+  it("reuses cached Intl.DateTimeFormat instances across repeated calls", async () => {
+    const { messageTime } = await import("./transcript");
+    const spy = vi.spyOn(Intl, "DateTimeFormat");
+    try {
+      const first = messageTime("2026-11-27T12:34:00Z", "en-US", "UTC");
+      const callsAfterFirst = spy.mock.calls.length;
+      const second = messageTime("2026-11-27T15:45:00Z", "en-US", "UTC");
+      expect(first?.iso).toBe("2026-11-27T12:34:00.000Z");
+      expect(second?.iso).toBe("2026-11-27T15:45:00.000Z");
+      expect(spy.mock.calls.length).toBe(callsAfterFirst);
+    } finally {
+      spy.mockRestore();
+    }
   });
 });

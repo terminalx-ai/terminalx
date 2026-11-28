@@ -569,14 +569,30 @@ fn run_check_in(key: &str, bot_id: &str, precheck: &AutomationPrecheck, events: 
     automations::precheck::run_in_folder(&dir, &set, precheck)
 }
 
+/// Whether an imported duty still carries quarantined shell commands awaiting
+/// explicit local owner review/save (S-17).
+pub fn is_shell_quarantined(automation: &Automation) -> bool {
+    automation
+        .unknown
+        .get(super::moving::QUARANTINED_SHELL_KEY)
+        .and_then(Value::as_bool)
+        == Some(true)
+}
+
 /// A duty's first check, for its run (`precheck::check`), given the events a read would wake it on.
 pub fn run_check(automation: &Automation, precheck: &AutomationPrecheck, events: Option<&Value>) -> Result<automations::precheck::PrecheckTrial> {
+    if is_shell_quarantined(automation) {
+        return Err(refused("This imported duty's shell precheck is quarantined and requires explicit local owner approval before running."));
+    }
     let bot_id = owner_id(automation).context("the duty names no bot")?;
     run_check_in(&automation.id, bot_id, precheck, events)
 }
 
 /// A "wait until" duty's command (PRO-472), run as its first check is: as the owner, in a folder of its own.
 pub fn run_watch(automation: &Automation, precheck: &AutomationPrecheck) -> Result<automations::precheck::PrecheckTrial> {
+    if is_shell_quarantined(automation) {
+        return Err(refused("This imported duty's watch command is quarantined and requires explicit local owner approval before running."));
+    }
     let bot_id = owner_id(automation).context("the duty names no bot")?;
     run_check_in(&format!("watch-{}", automation.id), bot_id, precheck, None)
 }
@@ -1046,6 +1062,10 @@ fn save(sink: &dyn EventSink, bot: &Bot, existing: Option<&Automation>, mut inpu
             stored.project_path = automation.project_path;
             stored.run_timeout_minutes = stored.run_timeout_minutes.or(automation.run_timeout_minutes);
             stored.modified = automation.modified;
+            // Local owner review/save explicitly approves the duty configuration (S-17).
+            stored.unknown.remove(super::moving::QUARANTINED_SHELL_KEY);
+            stored.unknown.remove(super::moving::QUARANTINED_PRECHECK_KEY);
+            stored.unknown.remove(super::moving::QUARANTINED_WATCH_COMMAND_KEY);
             set_owner(stored, &stored_owner);
             Ok(())
         })

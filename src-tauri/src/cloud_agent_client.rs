@@ -178,6 +178,9 @@ impl KeyStore for KeychainKeys {
 
 #[cfg(not(target_os = "macos"))]
 fn secret_file(organization_id: &str, workspace_id: &str) -> Result<PathBuf> {
+    if !valid_id(organization_id) || !valid_id(workspace_id) {
+        return Err(anyhow!("invalid cloud agent identifier"));
+    }
     let dir = crate::store::root()?.join("cloud-agent-keys");
     crate::cloud_bootstrap::ensure_private_dir(&dir)?;
     Ok(dir.join(format!("{organization_id}--{workspace_id}.json")))
@@ -498,7 +501,15 @@ enum Reply {
 }
 
 fn valid_id(value: &str) -> bool {
-    (1..=128).contains(&value.len()) && value.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b':' | b'-'))
+    if !(1..=128).contains(&value.len())
+        || value == "."
+        || value == ".."
+        || !value.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b':' | b'-'))
+    {
+        return false;
+    }
+    let mut components = Path::new(value).components();
+    matches!((components.next(), components.next()), (Some(std::path::Component::Normal(_)), None))
 }
 
 use crate::cloud_agents::now_ms;
@@ -562,12 +573,23 @@ impl CloudAgentClient {
 
     /// Whether a workspace directory (`<root>/<user>/<org>/<workspace>`) still
     /// belongs to the signed-in user and a reachable organization. Checked
-    /// under `self.lock` right before a write, the lock a purge holds.
+    /// under `self.lock` right before a write or purge, verifying strictly
+    /// three `Component::Normal` segments under `self.root`.
     fn writable(&self, dir: &Path) -> bool {
         let Ok(relative) = dir.strip_prefix(&self.root) else { return false };
-        let mut parts = relative.components().map(|part| part.as_os_str().to_string_lossy().into_owned());
-        match (parts.next(), parts.next()) {
-            (Some(user), Some(org)) => self.accounts.still_allowed(&user, &org),
+        let mut parts = relative.components();
+        match (parts.next(), parts.next(), parts.next(), parts.next()) {
+            (
+                Some(std::path::Component::Normal(user)),
+                Some(std::path::Component::Normal(org)),
+                Some(std::path::Component::Normal(workspace)),
+                None,
+            ) => {
+                let (Some(user), Some(org), Some(workspace)) = (user.to_str(), org.to_str(), workspace.to_str()) else {
+                    return false;
+                };
+                valid_id(user) && valid_id(org) && valid_id(workspace) && self.accounts.still_allowed(user, org)
+            }
             _ => false,
         }
     }
@@ -1082,6 +1104,9 @@ impl CloudAgentClient {
         let send = self.send_lock(&dir);
         let _send = send.lock().unwrap();
         let _guard = self.lock.lock().unwrap();
+        if !self.writable(&dir) {
+            return Err("cloud_remote_organization_mismatch".into());
+        }
         if !dir.exists() {
             return Ok(Purged::default());
         }
@@ -1311,3 +1336,73 @@ pub async fn cloud_agent_purge_workspace(client: Client<'_>, organization_id: St
 #[cfg(test)]
 #[path = "cloud_agent_client_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod s14_path_traversal_tests {
+    use super::*;
+
+    struct StaticAccount {
+        user_id: String,
+        org_id: String,
+    }
+
+    impl AccountSource for StaticAccount {
+        fn context_in(&self, organization_id: &str) -> Result<Ctx, String> {
+            if organization_id != self.org_id {
+                return Err("cloud_remote_organization_mismatch".into());
+            }
+            Ok(Ctx {
+                user_id: self.user_id.clone(),
+                organization_id: self.org_id.clone(),
+                access_token: Zeroizing::new("tok".into()),
+            })
+        }
+
+        fn account_key(&self) -> Option<String> {
+            Some(self.user_id.clone())
+        }
+    }
+
+    #[test]
+    fn valid_id_rejects_dot_dotdot_empty_and_non_normal_segments() {
+        for bad in ["", ".", "..", "../other", "./ws", "a/b", "a\\b", "ws\0id", &"a".repeat(129)] {
+            assert!(!valid_id(bad), "must reject {bad:?}");
+        }
+        for good in ["ws_1", "org-1", "key.v1", "a:b", "user.name"] {
+            assert!(valid_id(good), "must accept {good:?}");
+        }
+    }
+
+    #[test]
+    fn writable_requires_strictly_three_normal_segments_and_purge_blocks_traversal() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("cloud-agent");
+        let account = Arc::new(StaticAccount { user_id: "user_1".into(), org_id: "org_1".into() });
+        let client = CloudAgentClient::with(account, Arc::new(MemoryKeys::default()), Url::parse("http://127.0.0.1:1/").unwrap(), root.clone());
+
+        // Seed a legitimate sibling workspace under the org directory.
+        let sibling = root.join("user_1").join("org_1").join("ws_keep");
+        std::fs::create_dir_all(&sibling).unwrap();
+        std::fs::write(sibling.join("cache.json"), b"{}").unwrap();
+
+        assert!(client.writable(&sibling));
+        assert!(!client.writable(&root.join("user_1").join("org_1")));
+        assert!(!client.writable(&root.join("user_1").join("org_1").join(".")));
+        assert!(!client.writable(&root.join("user_1").join("org_1").join("..")));
+        assert!(!client.writable(&root.join("user_1").join("org_1").join("ws_keep").join("nested")));
+        assert!(!client.writable(&root.join("user_1").join("..").join("user_1").join("org_1").join("ws_keep")));
+
+        // Attempting to purge "." or ".." must fail and leave sibling intact.
+        assert_eq!(client.purge_workspace("org_1", ".").unwrap_err(), "cloud_agent_request_invalid");
+        assert_eq!(client.purge_workspace("org_1", "..").unwrap_err(), "cloud_agent_request_invalid");
+        assert!(sibling.join("cache.json").exists(), "parent org/user directories must never be deleted");
+
+        // All other workspace-scoped operations also reject "." and "..".
+        assert_eq!(client.has_key("org_1", ".").unwrap_err(), "cloud_agent_request_invalid");
+        assert_eq!(client.has_key("org_1", "..").unwrap_err(), "cloud_agent_request_invalid");
+        assert_eq!(client.outbox("org_1", "..", None).unwrap_err(), "cloud_agent_request_invalid");
+        assert_eq!(client.cache_load("user_1", "org_1", "..").unwrap_err(), "cloud_agent_request_invalid");
+        assert_eq!(client.cache_save("user_1", "org_1", ".", "tab_1", Some(json!({}))).unwrap_err(), "cloud_agent_request_invalid");
+        assert!(client.store_keys("user_1", "org_1", "..", &json!({"keys": []})).is_err());
+    }
+}

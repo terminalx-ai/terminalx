@@ -38,14 +38,14 @@ const LIMIT = 500;
  * written another way. `openProjectSearch` (lib/projectSearch) opens
  * it from elsewhere with a query filled in.
  */
-export function ProjectSearch({ sessionId, root, source }: { sessionId: string; root: string; source?: FileSource }) {
+export function ProjectSearch({ sessionId, root, source, initialOpen }: { sessionId: string; root: string; source?: FileSource; initialOpen?: { mode: "find" | "replace"; query?: string } }) {
   const reader = useMemo(() => source ?? localFileSource(root), [source, root]);
   const cloudKey = reader.kind === "cloud" ? reader.key : undefined;
   const canRewrite = !!reader.replaceText && !reader.readOnly;
-  const [open, setOpen] = useState(false);
-  const [q, setQ] = useState("");
+  const [open, setOpen] = useState(!!initialOpen);
+  const [q, setQ] = useState(initialOpen?.query ?? "");
   const [replacement, setReplacement] = useState("");
-  const [replaceShown, setReplaceOpen] = useState(false);
+  const [replaceShown, setReplaceOpen] = useState(initialOpen?.mode === "replace");
   const replaceOpen = replaceShown && canRewrite;
   const [initialToggles] = useState(loadSearchToggles);
   const [regex, setRegex] = useState(initialToggles.regex);
@@ -63,7 +63,7 @@ export function ProjectSearch({ sessionId, root, source }: { sessionId: string; 
   const [near, setNear] = useState<{ text: string; byToggles: boolean } | null>(null);
   const input = useRef<HTMLInputElement>(null);
   const replaceInput = useRef<HTMLInputElement>(null);
-  const focusNext = useRef<"find" | "replace">("find");
+  const focusNext = useRef<"find" | "replace">(initialOpen?.mode ?? "find");
 
   useShortcut("files.search", () => {
     focusNext.current = "find";

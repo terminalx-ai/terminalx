@@ -315,7 +315,10 @@ fn no_level_lets_a_bot_change_its_own_record_or_the_settings() {
     let memory = home.join("MEMORY.md").to_string_lossy().into_owned();
     assert_eq!(gate(&BotAccess::Full, &edit(&memory)), Gate::Leave);
     assert_eq!(gate(&BotAccess::Full, &edit("/work/app/.vscode/settings.json")), Gate::Leave);
-    assert_eq!(gate(&BotAccess::Full, &tool("Read", json!({"file_path": bots}))), Gate::Leave);
+    // S-21: Reading `$TERMINALX_HOME/bots.json` outside workspace roots is now refused;
+    // reading the bot's own memory inside `$TERMINALX_HOME/bots/<id>/` remains allowed.
+    assert!(is_refused(&gate(&BotAccess::Full, &tool("Read", json!({"file_path": bots})))));
+    assert_eq!(gate(&BotAccess::Full, &tool("Read", json!({"file_path": memory}))), Gate::Leave);
     assert_eq!(gate(&BotAccess::Full, &shell("cat ~/.claude/settings.json", &home.to_string_lossy())), Gate::Leave);
     let _ = std::fs::remove_file(&link);
 }
@@ -326,7 +329,9 @@ fn no_level_lets_a_bot_change_its_own_record_or_the_settings() {
 #[test]
 fn only_known_reads_go_unasked() {
     let (_home, _sink) = bots_on();
-    let cwd = std::fs::canonicalize(crate::store::root().unwrap()).unwrap().to_string_lossy().into_owned();
+    let workspace = tempfile::tempdir().unwrap();
+    let cwd = std::fs::canonicalize(workspace.path()).unwrap().to_string_lossy().into_owned();
+    crate::store::projects::add(&cwd).unwrap();
     let ask = BotAccess::AskOutward;
     let read = BotAccess::ReadReport;
     let acting = [
@@ -353,7 +358,8 @@ fn only_known_reads_go_unasked() {
         assert!(is_ask(&gate(&ask, &call)), "{name} at ask");
         assert!(is_refused(&gate(&read, &call)), "{name} at read and report");
     }
-    let mut reads = vec![tool("Grep", json!({"pattern": "x"})), tool("Read", json!({"file_path": "/tmp/x"})), tool("WebSearch", json!({"query": "tauri updater"})), shell("terminalx sessions list --json", &cwd), shell("terminalx runs show r1", &cwd)];
+    let workspace_file = workspace.path().join("x").to_string_lossy().into_owned();
+    let mut reads = vec![tool("Grep", json!({"pattern": "x"})), tool("Read", json!({"file_path": workspace_file})), tool("WebSearch", json!({"query": "tauri updater"})), shell("terminalx sessions list --json", &cwd), shell("terminalx runs show r1", &cwd)];
     if cfg!(unix) {
         reads.push(shell("ls", &cwd));
     }
@@ -654,5 +660,105 @@ fn the_gates_copies_of_the_command_lines_lists_are_the_same() {
     for words in [vec!["--fn", "x"], vec!["s1", "--selector=#a"], vec!["s1"], vec!["--function"], vec!["--fnx=1"]] {
         let owned: Vec<String> = words.iter().map(|word| word.to_string()).collect();
         assert_eq!(browser_wait(&words), crate::browser::cli::is_browser_wait(&owned), "{words:?}");
+    }
+}
+
+/// S-02 & S-21: Bots cannot read or write `$TERMINALX_HOME` secret/runtime paths
+/// (`settings.json`, `bot-chat-logins.json`, `account/`, `run/`, `runtime/`) or
+/// user credential directories (`~/.ssh`, `~/.aws`, `~/.gnupg`), and `READ_TOOLS`
+/// are confined to explicitly assigned workspace roots or the bot's own home.
+#[cfg(unix)]
+#[test]
+fn bot_read_tools_are_confined_and_secret_paths_are_denied_s02_s21() {
+    let (_home, sink) = bots_on();
+    let bot = super::super::create(sink.as_ref(), "cto", "Atlas").unwrap();
+    let other_bot = super::super::create(sink.as_ref(), "watcher", "Argus").unwrap();
+    set_access(sink.as_ref(), &bot.id, "readReport");
+    let chat = chat_of(&bot.id, "plan");
+
+    let root = crate::paths::canonicalize(crate::store::root().unwrap()).unwrap();
+    let bot_home = crate::paths::canonicalize(crate::store::bots::home_dir(&bot.id).unwrap()).unwrap();
+    let other_home = crate::paths::canonicalize(crate::store::bots::home_dir(&other_bot.id).unwrap()).unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let project_path = crate::paths::canonicalize(workspace.path()).unwrap();
+    crate::store::projects::add(project_path.to_str().unwrap()).unwrap();
+
+    // Create secret/runtime targets and a symlink escape inside the workspace.
+    std::fs::create_dir_all(root.join("account")).unwrap();
+    std::fs::create_dir_all(root.join("run")).unwrap();
+    std::fs::create_dir_all(root.join("runtime/abc123")).unwrap();
+    std::fs::write(root.join("bot-chat-logins.json"), r#"{"bots":{}}"#).unwrap();
+    std::fs::write(root.join("run/control.token"), "master-secret").unwrap();
+    std::fs::write(root.join("runtime/abc123/terminalx-serve"), "bin").unwrap();
+    let symlink_escape = project_path.join("sneaky.json");
+    std::os::unix::fs::symlink(root.join("bot-chat-logins.json"), &symlink_escape).unwrap();
+
+    let cwd = project_path.to_string_lossy().into_owned();
+    let denied_paths = [
+        root.join("settings.json").to_string_lossy().into_owned(),
+        root.join("bot-chat-logins.json").to_string_lossy().into_owned(),
+        root.join("account/session.json").to_string_lossy().into_owned(),
+        root.join("run/control.token").to_string_lossy().into_owned(),
+        root.join("runtime/abc123/terminalx-serve").to_string_lossy().into_owned(),
+        symlink_escape.to_string_lossy().into_owned(),
+        "~/.ssh/id_rsa".to_string(),
+        "~/.aws/credentials".to_string(),
+        "~/.gnupg/secring.gpg".to_string(),
+        "/etc/passwd".to_string(),
+        other_home.join("MEMORY.md").to_string_lossy().into_owned(),
+    ];
+
+    for path in &denied_paths {
+        for (tool_name, key) in [
+            ("Read", "file_path"),
+            ("Grep", "path"),
+            ("Glob", "path"),
+            ("LS", "path"),
+            ("view_image", "path"),
+        ] {
+            let payload = json!({
+                "hook_event_name": "PreToolUse",
+                "tool_name": tool_name,
+                "tool_input": { key: path },
+                "cwd": cwd,
+            });
+            assert!(is_refused(&gate_of(&chat.id, &payload)), "expected {tool_name}({path}) to be refused for ReadReport bot");
+        }
+    }
+
+    // S-02: Writing or running shell commands against `<home>/runtime` is refused even at Full access!
+    set_access(sink.as_ref(), &bot.id, "full");
+    let runtime_bin = root.join("runtime/abc123/terminalx-serve").to_string_lossy().into_owned();
+    assert!(is_refused(&gate_of(&chat.id, &tool("Write", json!({"file_path": runtime_bin, "content": "#!/bin/sh"})))));
+    assert!(is_refused(&gate_of(&chat.id, &shell(&format!("cp /tmp/evil {runtime_bin}"), &cwd))));
+    assert!(is_refused(&gate_of(&chat.id, &json!({"tool_name": "Read", "tool_input": {"file_path": root.join("bot-chat-logins.json").to_string_lossy()}, "cwd": cwd}))));
+
+    // Legitimate reads inside the assigned project workspace and the bot's own home succeed!
+    set_access(sink.as_ref(), &bot.id, "readReport");
+    let ok_project_file = project_path.join("README.md").to_string_lossy().into_owned();
+    let ok_bot_file = bot_home.join("MEMORY.md").to_string_lossy().into_owned();
+    for path in [ok_project_file, ok_bot_file] {
+        let payload = json!({"tool_name": "Read", "tool_input": {"file_path": path}, "cwd": cwd});
+        assert_eq!(gate_of(&chat.id, &payload), Gate::Leave, "allowed read {path}");
+    }
+}
+
+/// S-20: Fail-closed shell checks in `bots::access` block bypasses of `unsigned_post`
+/// and `own_settings` via `sh -xc`, `sh -c --`, depth > 4, heredocs, and here-strings.
+#[test]
+fn opaque_shell_bypasses_are_refused_in_bot_gate_s20() {
+    let _home = crate::store::temp_home();
+    let cwd = crate::store::root().unwrap().to_string_lossy().into_owned();
+    for bypass in [
+        "sh -xc 'gh pr comment 12 --body hi'",
+        "sh -c -- 'gh pr comment 12 --body hi'",
+        "bash -euxc -- 'gh pr review 12 --approve'",
+        "sh <<EOF\ngh pr comment 12 --body hi\nEOF",
+        "sh <<< 'gh pr comment 12 --body hi'",
+        "eval 'eval \"eval \\\"eval \\\\\\\"eval \\\\\\\\\\\\\\\"gh pr comment 12 -b hi\\\\\\\\\\\\\\\"\\\\\\\"\\\"\"'",
+    ] {
+        for access in [BotAccess::Full, BotAccess::AskOutward, BotAccess::ReadReport] {
+            assert!(is_refused(&gate(&access, &shell(bypass, &cwd))), "{bypass} at {access:?}");
+        }
     }
 }

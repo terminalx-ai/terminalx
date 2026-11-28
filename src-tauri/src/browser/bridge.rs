@@ -181,6 +181,7 @@ impl Ctx<'_> {
     /// envelope. `args` are the command and its own arguments; the session,
     /// launch options and `--json` are added here.
     pub fn run(&mut self, args: &[&str], options: ExecOptions) -> BrowserResult<Value> {
+        validate_command_args(args)?;
         let binary = self.bridge.binary()?;
         let mut argv: Vec<&str> = vec!["--session", &self.session.name];
         let profile_dir = self.session.profile_dir.to_string_lossy().into_owned();
@@ -212,6 +213,7 @@ impl Ctx<'_> {
 
     /// Make `tab_id` the daemon's current page, unless it already is.
     pub fn ensure_tab(&mut self, tab_id: &str) -> BrowserResult<()> {
+        reject_leading_dash("tab_id", tab_id)?;
         if self.lane.active_tab.as_deref() == Some(tab_id) {
             return Ok(());
         }
@@ -342,30 +344,296 @@ pub fn parse_shell_args(input: &str) -> Vec<String> {
     args
 }
 
-/// Options only the app may set: they decide which daemon, which browser and
-/// which profile a command reaches.
-const OWNER_OPTIONS: [&str; 8] = ["--session", "--cdp", "--profile", "--executable-path", "--config", "--args", "--extension", "--init-script"];
-/// Commands that address the daemon or the machine rather than a page.
-const OWNER_COMMANDS: [&str; 12] = ["close", "connect", "install", "upgrade", "dashboard", "chat", "session", "doctor", "skills", "auth", "confirm", "deny"];
+/// Options only the app may set or that expand browser/host capabilities:
+/// they decide which daemon, browser binary, profile, download path, scripts,
+/// or proxy a command reaches. Blocked unconditionally in every position.
+const BLOCKED_OPTIONS: &[&str] = &[
+    "--session",
+    "--session-name",
+    "--cdp",
+    "--profile",
+    "--executable-path",
+    "--config",
+    "--args",
+    "--extension",
+    "--init-script",
+    "--download-path",
+    "--allow-file-access",
+    "--user-data-dir",
+    "--proxy-server",
+    "--proxy",
+    "--proxy-bypass",
+    "--ignore-https-errors",
+    "--auto-connect",
+    "--provider",
+    "--socket",
+    "--daemon",
+    "--headed",
+    "--headless",
+    "--native",
+    "--headers",
+    "--user-agent",
+    "--color-scheme",
+    "--debug",
+    "--json",
+];
 
-/// Refuse passthrough arguments that would re-target or re-own the session.
+/// Commands that address the daemon or the machine rather than a page.
+const OWNER_COMMANDS: &[&str] = &[
+    "close",
+    "connect",
+    "install",
+    "upgrade",
+    "dashboard",
+    "chat",
+    "session",
+    "doctor",
+    "skills",
+    "auth",
+    "confirm",
+    "deny",
+    "state",
+    "record",
+    "trace",
+    "profiler",
+    "diff",
+];
+
+/// Strict allowlist of safe page-level `agent-browser` subcommands.
+const ALLOWED_COMMANDS: &[&str] = &[
+    "open",
+    "back",
+    "forward",
+    "reload",
+    "snapshot",
+    "screenshot",
+    "pdf",
+    "eval",
+    "wait",
+    "scroll",
+    "scrollintoview",
+    "click",
+    "dblclick",
+    "hover",
+    "focus",
+    "check",
+    "uncheck",
+    "highlight",
+    "fill",
+    "type",
+    "keyboard",
+    "select",
+    "press",
+    "drag",
+    "upload",
+    "download",
+    "mouse",
+    "find",
+    "get",
+    "is",
+    "tab",
+    "cookies",
+    "console",
+    "network",
+    "set",
+    "clipboard",
+    "dialog",
+    "storage",
+    "frame",
+    "errors",
+];
+
+/// Per-subcommand allowlist of safe flags as `(flag_name, takes_value)`.
+fn allowed_flags_for(command: &str) -> &'static [(&'static str, bool)] {
+    match command {
+        "snapshot" => &[
+            ("-i", false),
+            ("--interactive", false),
+            ("-c", false),
+            ("--compact", false),
+            ("-d", true),
+            ("--depth", true),
+            ("-s", true),
+            ("--selector", true),
+        ],
+        "screenshot" => &[
+            ("--full", false),
+            ("--annotate", false),
+            ("--screenshot-format", true),
+        ],
+        "eval" => &[("--stdin", false)],
+        "scroll" => &[("--selector", true)],
+        "wait" => &[
+            ("--text", true),
+            ("--url", true),
+            ("--load", true),
+            ("--fn", true),
+            ("--download", true),
+            ("--state", true),
+            ("--timeout", true),
+        ],
+        "click" | "dblclick" | "hover" | "focus" | "check" | "uncheck" | "highlight" | "scrollintoview" => &[
+            ("--force", false),
+            ("--button", true),
+            ("--count", true),
+            ("--new-tab", false),
+        ],
+        "cookies" => &[
+            ("--url", true),
+            ("--domain", true),
+            ("--path", true),
+            ("--sameSite", true),
+            ("--expires", true),
+            ("--secure", false),
+            ("--httpOnly", false),
+        ],
+        "console" => &[("--clear", false)],
+        "network" => &[
+            ("--filter", true),
+            ("--type", true),
+            ("--method", true),
+            ("--status", true),
+            ("--clear", false),
+            ("--abort", false),
+            ("--body", true),
+        ],
+        "find" => &[
+            ("--exact", false),
+            ("--nth", true),
+            ("--first", false),
+            ("--last", false),
+        ],
+        _ => &[],
+    }
+}
+
+fn allows_negative_number_arg(command: &str, args: &[&str]) -> bool {
+    command == "mouse" || (command == "set" && args.get(1) == Some(&"geo"))
+}
+
+/// Reject untrusted positional or option-value arguments that start with `-`
+/// so they can never be parsed as CLI flags by `agent-browser`.
+pub fn reject_leading_dash(field: &str, value: &str) -> BrowserResult<()> {
+    if value.starts_with('-') || value.trim_start().starts_with('-') {
+        return Err(BrowserError::new(
+            "invalid_arguments",
+            format!("{field} may not start with '-'."),
+        ));
+    }
+    Ok(())
+}
+
+/// Centralized strict command and option validation enforced on every
+/// `agent-browser` invocation (`Ctx::run` and `guard_exec_args`).
+///
+/// Prevents:
+/// - Leading flags shifting owner commands past `args[0]` (e.g. `--json close`)
+/// - Unallowlisted subcommands or options anywhere in `args`
+/// - Dangerous browser launch/runtime options in `--flag val` or `--flag=val` form
+/// - Leading-`-` option injection inside positional or flag-value tokens
+pub fn validate_command_args(args: &[&str]) -> BrowserResult<()> {
+    if args.is_empty() {
+        return Err(BrowserError::new(
+            "invalid_arguments",
+            "browser command requires a non-empty subcommand.",
+        ));
+    }
+    let command = args[0];
+    let command_trimmed = command.trim();
+    if command_trimmed.is_empty() || command != command_trimmed {
+        return Err(BrowserError::new(
+            "invalid_arguments",
+            "browser subcommand must not be empty or contain surrounding whitespace.",
+        ));
+    }
+    if command.starts_with('-') {
+        let name = command.split('=').next().unwrap_or(command);
+        return Err(BrowserError::new(
+            "invalid_arguments",
+            format!("browser command may not start with option {name}; a safe subcommand is required first."),
+        ));
+    }
+    if OWNER_COMMANDS.contains(&command) {
+        return Err(BrowserError::new(
+            "invalid_arguments",
+            format!("exec may not run `{command}`; use the typed tab, profile and settings commands instead."),
+        ));
+    }
+    if !ALLOWED_COMMANDS.contains(&command) {
+        return Err(BrowserError::new(
+            "invalid_arguments",
+            format!("browser subcommand `{command}` is not allowed."),
+        ));
+    }
+
+    let allowed_flags = allowed_flags_for(command);
+    let allow_negative_number = allows_negative_number_arg(command, args);
+    let mut index = 1;
+    while index < args.len() {
+        let token = args[index];
+        let trimmed = token.trim_start();
+        let flag_head = trimmed.split('=').next().unwrap_or(trimmed).to_ascii_lowercase();
+        if BLOCKED_OPTIONS.contains(&flag_head.as_str()) || (flag_head == "--state" && command != "wait") {
+            return Err(BrowserError::new(
+                "invalid_arguments",
+                format!("browser command may not pass {flag_head}; the app owns session and launch options."),
+            ));
+        }
+
+        if token.starts_with('-') || trimmed.starts_with('-') {
+            if allow_negative_number && token.parse::<f64>().is_ok_and(|n| n.is_finite()) {
+                index += 1;
+                continue;
+            }
+            let (raw_flag, inline_value) = match token.split_once('=') {
+                Some((flag, value)) => (flag, Some(value)),
+                None => (token, None),
+            };
+            let Some(&(_, takes_value)) = allowed_flags.iter().find(|(flag, _)| *flag == raw_flag) else {
+                return Err(BrowserError::new(
+                    "invalid_arguments",
+                    format!("option `{raw_flag}` is not allowed for browser subcommand `{command}`."),
+                ));
+            };
+            if let Some(value) = inline_value {
+                if !takes_value {
+                    return Err(BrowserError::new(
+                        "invalid_arguments",
+                        format!("option `{raw_flag}` does not accept an inline value."),
+                    ));
+                }
+                reject_leading_dash(raw_flag, value)?;
+            } else if takes_value {
+                let Some(next) = args.get(index + 1) else {
+                    return Err(BrowserError::new(
+                        "invalid_arguments",
+                        format!("option `{raw_flag}` requires a value."),
+                    ));
+                };
+                let next_head = next.trim_start().split('=').next().unwrap_or(next).to_ascii_lowercase();
+                if BLOCKED_OPTIONS.contains(&next_head.as_str()) || (next_head == "--state" && command != "wait") {
+                    return Err(BrowserError::new(
+                        "invalid_arguments",
+                        format!("browser command may not pass {next_head}; the app owns session and launch options."),
+                    ));
+                }
+                reject_leading_dash(raw_flag, next)?;
+                index += 1;
+            }
+        }
+        index += 1;
+    }
+    Ok(())
+}
+
+/// Refuse passthrough arguments that would re-target, re-own, or inject options
+/// into the session.
 pub fn guard_exec_args(args: &[String]) -> BrowserResult<()> {
     if args.is_empty() {
         return Err(BrowserError::new("invalid_arguments", "exec needs a non-empty agent-browser command."));
     }
-    if OWNER_COMMANDS.contains(&args[0].as_str()) {
-        return Err(BrowserError::new(
-            "invalid_arguments",
-            format!("exec may not run `{}`; use the typed tab, profile and settings commands instead.", args[0]),
-        ));
-    }
-    for arg in args {
-        let name = arg.split('=').next().unwrap_or(arg);
-        if OWNER_OPTIONS.contains(&name) {
-            return Err(BrowserError::new("invalid_arguments", format!("exec may not pass {name}; the app owns session targeting.")));
-        }
-    }
-    Ok(())
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    validate_command_args(&refs)
 }
 
 pub fn check_text_argument(name: &str, value: &str) -> BrowserResult<()> {
@@ -421,13 +689,90 @@ mod tests {
     fn exec_guard_refuses_retargeting_and_owner_commands() {
         let owned = |args: &[&str]| guard_exec_args(&args.iter().map(|s| s.to_string()).collect::<Vec<_>>());
         assert!(owned(&["click", "@e1"]).is_ok());
+        assert!(owned(&["click", "#main button", "--force"]).is_ok());
         assert!(owned(&["get", "text", "@e1"]).is_ok());
+        assert!(owned(&["snapshot", "-i", "-c", "-d", "4", "-s", "#app"]).is_ok());
+        assert!(owned(&["wait", "--state", "visible", "--timeout", "5000"]).is_ok());
+        assert!(owned(&["mouse", "wheel", "-120"]).is_ok());
+        assert!(owned(&["set", "geo", "-33.8", "151.2"]).is_ok());
+        assert!(owned(&["cookies", "set", "tok", "val", "--secure", "--httpOnly"]).is_ok());
+        assert!(owned(&["eval", "--stdin"]).is_ok());
+
+        // Classic owner options & commands
         assert_eq!(owned(&["click", "--session", "other"]).unwrap_err().code, "invalid_arguments");
         assert_eq!(owned(&["click", "--cdp=9222"]).unwrap_err().code, "invalid_arguments");
         assert_eq!(owned(&["snapshot", "--profile", "/tmp/x"]).unwrap_err().code, "invalid_arguments");
         assert_eq!(owned(&["close"]).unwrap_err().code, "invalid_arguments");
         assert_eq!(owned(&["install"]).unwrap_err().code, "invalid_arguments");
         assert_eq!(owned(&[]).unwrap_err().code, "invalid_arguments");
+
+        // S-19: leading flag shifting owner command past args[0]
+        for bypass in [
+            &["--json", "close"][..],
+            &["-i", "install"][..],
+            &["--headed", "connect", "http://127.0.0.1:9222"][..],
+            &["--force", "close"][..],
+            &["--unknown", "auth"][..],
+            &["--", "close"][..],
+        ] {
+            assert_eq!(owned(bypass).unwrap_err().code, "invalid_arguments", "{bypass:?}");
+        }
+
+        // S-19: dangerous flags in both `--flag val` and `--flag=val` forms
+        for dangerous in [
+            &["open", "https://example.com", "--download-path", "/tmp/evil"][..],
+            &["open", "https://example.com", "--download-path=/tmp/evil"][..],
+            &["open", "https://example.com", "--allow-file-access"][..],
+            &["click", "@e1", "--executable-path", "/bin/sh"][..],
+            &["click", "@e1", "--executable-path=/bin/sh"][..],
+            &["click", "@e1", "--init-script", "/tmp/pwn.js"][..],
+            &["click", "@e1", "--init-script=/tmp/pwn.js"][..],
+            &["click", "@e1", "--args=--no-sandbox"][..],
+            &["click", "@e1", "--user-data-dir", "/tmp/u"][..],
+            &["click", "@e1", "--extension=/tmp/ext"][..],
+            &["click", "@e1", "--proxy-server=http://evil:8080"][..],
+            &["open", "https://example.com", "--state", "/tmp/s.json"][..],
+            &["snapshot", "-s", "--executable-path=/bin/sh"][..],
+            &["wait", "--url=--init-script=/tmp/pwn.js"][..],
+            &["click", "--unknown-flag", "@e1"][..],
+            &["click", "-e", "@e1"][..],
+            &["record", "/tmp/out.webm"][..],
+            &["trace", "start"][..],
+            &["state", "save", "/tmp/s.json"][..],
+        ] {
+            assert_eq!(owned(dangerous).unwrap_err().code, "invalid_arguments", "{dangerous:?}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ctx_run_enforces_centralized_validation_before_spawning_binary() {
+        let tmp = tempfile::tempdir().unwrap();
+        let marker = tmp.path().join("invoked");
+        let fake = tmp.path().join("agent-browser");
+        std::fs::write(
+            &fake,
+            format!("#!/bin/sh\ntouch {}\necho '{{\"success\":true,\"data\":{{}}}}'\n", marker.display()),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let env = ProcessEnvironment { vars: Vec::new(), socket_dir: None, owns_socket_directory: false };
+        let bridge = Bridge::with_binary(env, fake);
+        let session = bridge.session("default", tmp.path().join("profile"), tmp.path().join("downloads"));
+        let err = bridge
+            .with_session(&session, |ctx| {
+                ctx.run(&["click", "--executable-path=/bin/sh"], ExecOptions::default())
+            })
+            .unwrap_err();
+        assert_eq!(err.code, "invalid_arguments");
+        assert!(!marker.exists(), "blocked command must never spawn agent-browser");
+
+        let tab_err = bridge
+            .with_session(&session, |ctx| ctx.ensure_tab("--executable-path=/bin/sh"))
+            .unwrap_err();
+        assert_eq!(tab_err.code, "invalid_arguments");
+        assert!(!marker.exists());
     }
 
     #[test]

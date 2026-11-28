@@ -133,7 +133,7 @@ export function IssueCommentItem({
             </Button>
           </MarkdownEditor>
         ) : comment.body.trim() ? (
-          <Markdown text={comment.body} className="mt-0.5 text-[13px]" />
+          <Markdown text={comment.body} className="mt-0.5 text-[13px]" webLinksOnly remoteImages={false} />
         ) : (
           <div className="mt-0.5 text-[13px] text-faint">No text.</div>
         )}

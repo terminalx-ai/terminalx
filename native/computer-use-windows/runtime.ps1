@@ -14,7 +14,7 @@ Add-Type -AssemblyName UIAutomationTypes
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName System.Windows.Forms
 
-Add-Type -TypeDefinition @"
+$script:TerminalXWin32TypeSource = @"
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
@@ -85,6 +85,51 @@ public static class TerminalXDesktopWin32 {
     [DllImport("user32.dll")]
     public static extern IntPtr GetForegroundWindow();
 
+    public const uint GA_ROOT = 2;
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr WindowFromPoint(POINT point);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetAncestor(IntPtr hwnd, uint gaFlags);
+
+    [DllImport("user32.dll")]
+    public static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint processId);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    public static extern int GetClassName(IntPtr hwnd, System.Text.StringBuilder className, int maxCount);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    public static extern int GetWindowText(IntPtr hwnd, System.Text.StringBuilder text, int maxCount);
+
+    public static IntPtr GetTopLevelWindowAtPoint(int x, int y) {
+        var hwnd = WindowFromPoint(new POINT { X = x, Y = y });
+        if (hwnd == IntPtr.Zero) return IntPtr.Zero;
+        var root = GetAncestor(hwnd, GA_ROOT);
+        return root != IntPtr.Zero ? root : hwnd;
+    }
+
+    public static uint GetWindowProcessId(IntPtr hwnd) {
+        if (hwnd == IntPtr.Zero) return 0;
+        uint pid = 0;
+        GetWindowThreadProcessId(hwnd, out pid);
+        return pid;
+    }
+
+    public static string GetWindowClassName(IntPtr hwnd) {
+        if (hwnd == IntPtr.Zero) return "";
+        var sb = new System.Text.StringBuilder(256);
+        int len = GetClassName(hwnd, sb, sb.Capacity);
+        return len > 0 ? sb.ToString(0, len) : "";
+    }
+
+    public static string GetWindowTitleText(IntPtr hwnd) {
+        if (hwnd == IntPtr.Zero) return "";
+        var sb = new System.Text.StringBuilder(512);
+        int len = GetWindowText(hwnd, sb, sb.Capacity);
+        return len > 0 ? sb.ToString(0, len) : "";
+    }
+
     [DllImport("user32.dll")]
     public static extern bool SetCursorPos(int x, int y);
 
@@ -141,6 +186,112 @@ public static class TerminalXDesktopWin32 {
 }
 "@
 
+function Get-TerminalXWin32CacheKey([string]$Source = $script:TerminalXWin32TypeSource) {
+    $framework = try {
+        [System.Runtime.InteropServices.RuntimeInformation]::FrameworkDescription
+    } catch {
+        [System.Environment]::Version.ToString()
+    }
+    $psEdition = if ($null -ne $PSVersionTable.PSEdition) { [string]$PSVersionTable.PSEdition } else { "Desktop" }
+    $psVersion = [string]$PSVersionTable.PSVersion
+    $bitness = [string][IntPtr]::Size
+    $material = "$framework|$psEdition|$psVersion|$bitness|$Source"
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $hashBytes = $sha256.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($material))
+        return (([BitConverter]::ToString($hashBytes) -replace "-", "").ToLowerInvariant().Substring(0, 32))
+    } finally {
+        $sha256.Dispose()
+    }
+}
+
+function Get-TerminalXWin32CacheDirectory {
+    if (-not [string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
+        return (Join-Path (Join-Path $env:LOCALAPPDATA "TerminalX") "computer-use-cache")
+    }
+    Join-Path ([System.IO.Path]::GetTempPath()) "terminalx-computer-use-cache"
+}
+
+function Get-TerminalXWin32CachePath([string]$CacheDirectory = "", [string]$Source = $script:TerminalXWin32TypeSource) {
+    $directory = if ([string]::IsNullOrWhiteSpace($CacheDirectory)) { Get-TerminalXWin32CacheDirectory } else { $CacheDirectory }
+    $key = Get-TerminalXWin32CacheKey $Source
+    Join-Path $directory "TerminalXDesktopWin32-$key.dll"
+}
+
+function Initialize-TerminalXWin32Type([string]$CacheDirectory = "", [string]$Source = $script:TerminalXWin32TypeSource) {
+    if ($null -ne ("TerminalXDesktopWin32" -as [type])) { return }
+
+    $key = Get-TerminalXWin32CacheKey $Source
+    $dllPath = Get-TerminalXWin32CachePath $CacheDirectory $Source
+    $cacheDir = [System.IO.Path]::GetDirectoryName($dllPath)
+
+    if ([System.IO.File]::Exists($dllPath)) {
+        try {
+            Add-Type -Path $dllPath
+            if ($null -ne ("TerminalXDesktopWin32" -as [type])) { return }
+        } catch {
+            # Rebuild below if the cached assembly cannot be loaded by this runtime.
+        }
+    }
+
+    $mutex = $null
+    $hasLock = $false
+    $tempDllPath = $null
+    try {
+        [void][System.IO.Directory]::CreateDirectory($cacheDir)
+        try {
+            $mutex = New-Object System.Threading.Mutex($false, "Local\TerminalXDesktopWin32-$key")
+            try {
+                $hasLock = $mutex.WaitOne(15000)
+            } catch [System.Threading.AbandonedMutexException] {
+                $hasLock = $true
+            }
+        } catch {
+            $mutex = $null
+            $hasLock = $false
+        }
+
+        if ([System.IO.File]::Exists($dllPath)) {
+            try {
+                Add-Type -Path $dllPath
+                if ($null -ne ("TerminalXDesktopWin32" -as [type])) { return }
+            } catch {
+                try { [System.IO.File]::Delete($dllPath) } catch {}
+            }
+        }
+
+        $tempDllPath = Join-Path $cacheDir ("TerminalXDesktopWin32-$key-" + [Guid]::NewGuid().ToString("N") + ".tmp.dll")
+        Add-Type -TypeDefinition $Source -OutputAssembly $tempDllPath -OutputType Library
+        if (-not [System.IO.File]::Exists($dllPath)) {
+            try {
+                [System.IO.File]::Move($tempDllPath, $dllPath)
+            } catch {
+                if (-not [System.IO.File]::Exists($dllPath)) { throw }
+            }
+        }
+        Add-Type -Path $dllPath
+        if ($null -ne ("TerminalXDesktopWin32" -as [type])) { return }
+    } catch {
+        # Fall back to in-memory compilation if the disk cache is unavailable.
+    } finally {
+        if ($null -ne $tempDllPath -and [System.IO.File]::Exists($tempDllPath)) {
+            try { [System.IO.File]::Delete($tempDllPath) } catch {}
+        }
+        if ($hasLock -and $null -ne $mutex) {
+            try { $mutex.ReleaseMutex() } catch {}
+        }
+        if ($null -ne $mutex) {
+            try { $mutex.Dispose() } catch {}
+        }
+    }
+
+    if ($null -eq ("TerminalXDesktopWin32" -as [type])) {
+        Add-Type -TypeDefinition $Source
+    }
+}
+
+Initialize-TerminalXWin32Type
+
 $MaxNodes = 1200
 $MaxDepth = 64
 $TextLimit = 500
@@ -155,6 +306,23 @@ $BlockedAppFragments = @(
     "lastpass",
     "nordpass",
     "proton pass"
+)
+$OwnAppReleaseBundleId = "com.terminalx.next"
+$OwnAppFragments = @(
+    "terminalx",
+    "terminal-x",
+    "terminal x",
+    "com.terminalx",
+    "raccoon"
+)
+$GenericInterpreterNames = @(
+    "powershell",
+    "pwsh",
+    "cmd",
+    "conhost",
+    "python",
+    "python3",
+    "node"
 )
 
 $WindowsMessages = @{
@@ -207,12 +375,146 @@ function Get-TerminalXWindowProcesses {
     @(Get-Process | Where-Object { $_.MainWindowHandle -ne 0 } | Sort-Object ProcessName, Id)
 }
 
-function Find-TerminalXProcess([string]$Query) {
+function Get-TerminalXProcessParentId([int]$ProcessId) {
+    if ($ProcessId -le 0) { return 0 }
+    try {
+        $proc = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId = $ProcessId" -ErrorAction SilentlyContinue
+        if ($null -ne $proc -and $null -ne $proc.ParentProcessId) {
+            return [int]$proc.ParentProcessId
+        }
+    } catch {}
+    0
+}
+
+function Test-TerminalXDescendantProcess([int]$TargetPid, [int]$AncestorPid, [int]$MaxDepth = 32) {
+    if ($TargetPid -le 0 -or $AncestorPid -le 0) { return $false }
+    if ($TargetPid -eq $AncestorPid) { return $true }
+    $seen = New-Object System.Collections.Generic.HashSet[int]
+    [void]$seen.Add($TargetPid)
+    $current = $TargetPid
+    for ($depth = 0; $depth -lt $MaxDepth; $depth++) {
+        $parent = Get-TerminalXProcessParentId $current
+        if ($parent -le 0 -or -not $seen.Add($parent)) { return $false }
+        if ($parent -eq $AncestorPid) { return $true }
+        $current = $parent
+    }
+    $false
+}
+
+function Get-TerminalXProcessExecutablePath($Process) {
+    if ($null -eq $Process) { return "" }
+    try {
+        if (-not [string]::IsNullOrWhiteSpace($Process.Path)) { return [string]$Process.Path }
+    } catch {}
+    try {
+        if ($null -ne $Process.MainModule -and -not [string]::IsNullOrWhiteSpace($Process.MainModule.FileName)) {
+            return [string]$Process.MainModule.FileName
+        }
+    } catch {}
+    ""
+}
+
+function Test-TerminalXOwnAppIdentity([int]$TargetPid = 0, [string[]]$Names = @(), [string]$ExecutablePath = "", $OwnApp = $null) {
+    $normalizedNames = New-Object System.Collections.Generic.List[string]
+    foreach ($entry in @($Names)) {
+        if (-not [string]::IsNullOrWhiteSpace([string]$entry)) {
+            $normalizedNames.Add(([string]$entry).Trim().ToLowerInvariant())
+        }
+    }
+    if (-not [string]::IsNullOrWhiteSpace($ExecutablePath)) {
+        $normalizedNames.Add([System.IO.Path]::GetFileNameWithoutExtension($ExecutablePath).ToLowerInvariant())
+        $normalizedNames.Add([System.IO.Path]::GetFileName($ExecutablePath).ToLowerInvariant())
+    }
+
+    $releaseId = $OwnAppReleaseBundleId
+    if ($null -ne $OwnApp -and -not [string]::IsNullOrWhiteSpace([string]$OwnApp.releaseBundleId)) {
+        $releaseId = ([string]$OwnApp.releaseBundleId).Trim().ToLowerInvariant()
+    }
+    foreach ($value in $normalizedNames) {
+        if ($value.Contains($releaseId)) { return $true }
+    }
+
+    if ($null -ne $OwnApp -and [bool]$OwnApp.allowOwnWindowsForTests) {
+        return $false
+    }
+
+    foreach ($fragment in $OwnAppFragments) {
+        foreach ($value in $normalizedNames) {
+            if ($value.Contains($fragment)) { return $true }
+        }
+    }
+
+    if ($null -ne $OwnApp) {
+        $ownerPid = 0
+        try { if ($null -ne $OwnApp.pid) { $ownerPid = [int]$OwnApp.pid } } catch {}
+        if ($ownerPid -gt 0 -and $TargetPid -gt 0) {
+            if ($TargetPid -eq $ownerPid -or (Test-TerminalXDescendantProcess $TargetPid $ownerPid)) {
+                return $true
+            }
+        }
+        $ownerExe = if ($null -ne $OwnApp.executablePath) { ([string]$OwnApp.executablePath).Trim() } else { "" }
+        if (-not [string]::IsNullOrWhiteSpace($ownerExe) -and -not [string]::IsNullOrWhiteSpace($ExecutablePath)) {
+            try {
+                if ([System.IO.Path]::GetFullPath($ExecutablePath).Equals([System.IO.Path]::GetFullPath($ownerExe), [System.StringComparison]::OrdinalIgnoreCase)) {
+                    return $true
+                }
+            } catch {}
+        }
+        $ownerExeName = if ($null -ne $OwnApp.executableName) { ([string]$OwnApp.executableName).Trim().ToLowerInvariant() } else { "" }
+        if (-not [string]::IsNullOrWhiteSpace($ownerExeName) -and ($GenericInterpreterNames -notcontains $ownerExeName)) {
+            foreach ($value in $normalizedNames) {
+                if ($value -eq $ownerExeName) { return $true }
+            }
+        }
+        $appId = if ($null -ne $OwnApp.appIdentifier) { ([string]$OwnApp.appIdentifier).Trim().ToLowerInvariant() } else { "" }
+        if (-not [string]::IsNullOrWhiteSpace($appId)) {
+            foreach ($value in $normalizedNames) {
+                if ($value.Contains($appId)) { return $true }
+            }
+        }
+        foreach ($extra in @($OwnApp.appNames) + @($OwnApp.windowClasses)) {
+            $token = ([string]$extra).Trim().ToLowerInvariant()
+            if ([string]::IsNullOrWhiteSpace($token)) { continue }
+            foreach ($value in $normalizedNames) {
+                if ($value.Contains($token)) { return $true }
+            }
+        }
+    }
+    $false
+}
+
+function Test-TerminalXBlockedAppIdentity([string[]]$Names = @()) {
+    foreach ($entry in @($Names)) {
+        if ([string]::IsNullOrWhiteSpace([string]$entry)) { continue }
+        $value = ([string]$entry).ToLowerInvariant()
+        foreach ($fragment in $BlockedAppFragments) {
+            if ($value.Contains($fragment)) { return $true }
+        }
+    }
+    $false
+}
+
+function Assert-TerminalXQueryAllowed([string]$Query, $OwnApp = $null) {
+    if ([string]::IsNullOrWhiteSpace($Query)) { return }
+    $trimmed = $Query.Trim()
+    $queryPid = 0
+    $pidText = if ($trimmed.StartsWith("pid:", [System.StringComparison]::OrdinalIgnoreCase)) { $trimmed.Substring(4).Trim() } else { $trimmed }
+    [void][int]::TryParse($pidText, [ref]$queryPid)
+    if (Test-TerminalXOwnAppIdentity -TargetPid $queryPid -Names @($trimmed) -OwnApp $OwnApp) {
+        throw "own_app_protected: computer use cannot observe or operate TerminalX ($trimmed)"
+    }
+    if (Test-TerminalXBlockedAppIdentity -Names @($trimmed)) {
+        throw "appBlocked(`"$trimmed`")"
+    }
+}
+
+function Find-TerminalXProcess([string]$Query, $OwnApp = $null) {
     $needle = ""
     if ($null -ne $Query) { $needle = $Query.Trim() }
     if ([string]::IsNullOrWhiteSpace($needle)) { throw 'appNotFound("")' }
+    Assert-TerminalXQueryAllowed $needle $OwnApp
     if ($needle.StartsWith("pid:", [System.StringComparison]::OrdinalIgnoreCase)) {
-        $needle = $needle.Substring(4)
+        $needle = $needle.Substring(4).Trim()
     }
 
     $parsedProcessId = 0
@@ -220,7 +522,7 @@ function Find-TerminalXProcess([string]$Query) {
     if ([int]::TryParse($needle, [ref]$parsedProcessId)) {
         $match = $processes | Where-Object { $_.Id -eq $parsedProcessId } | Select-Object -First 1
         if ($null -ne $match) {
-            Assert-TerminalXProcessAllowed $match
+            Assert-TerminalXProcessAllowed $match $OwnApp
             return $match
         }
     }
@@ -237,21 +539,44 @@ function Find-TerminalXProcess([string]$Query) {
         $_.MainWindowTitle -ilike "*$needle*"
     } | Select-Object -First 1
     if ($null -ne $match) {
-        Assert-TerminalXProcessAllowed $match
+        Assert-TerminalXProcessAllowed $match $OwnApp
         return $match
     }
 
     throw "appNotFound(`"$Query`")"
 }
 
-function Assert-TerminalXProcessAllowed($Process) {
-    $values = @($Process.ProcessName, $Process.MainWindowTitle) | ForEach-Object { ([string]$_).ToLowerInvariant() }
-    foreach ($fragment in $BlockedAppFragments) {
-        foreach ($value in $values) {
-            if ($value.Contains($fragment)) {
-                throw "appBlocked(`"$($Process.ProcessName)`")"
-            }
+function Assert-TerminalXProcessAllowed($Process, $OwnApp = $null) {
+    $windowClass = ""
+    try {
+        if ($Process.MainWindowHandle -ne 0) {
+            $windowClass = [TerminalXDesktopWin32]::GetWindowClassName([IntPtr]$Process.MainWindowHandle)
         }
+    } catch {}
+    $exePath = Get-TerminalXProcessExecutablePath $Process
+    $names = @([string]$Process.ProcessName, [string]$Process.MainWindowTitle, $windowClass)
+    if (Test-TerminalXOwnAppIdentity -TargetPid ([int]$Process.Id) -Names $names -ExecutablePath $exePath -OwnApp $OwnApp) {
+        throw "own_app_protected: computer use cannot observe or operate $($Process.ProcessName)"
+    }
+    if (Test-TerminalXBlockedAppIdentity -Names $names) {
+        throw "appBlocked(`"$($Process.ProcessName)`")"
+    }
+}
+
+function Assert-TerminalXForegroundAllowed($OwnApp = $null) {
+    $fgHwnd = [TerminalXDesktopWin32]::GetForegroundWindow()
+    if ($fgHwnd -eq [IntPtr]::Zero) { return }
+    $fgPid = [int][TerminalXDesktopWin32]::GetWindowProcessId($fgHwnd)
+    $fgClass = [TerminalXDesktopWin32]::GetWindowClassName($fgHwnd)
+    $fgTitle = [TerminalXDesktopWin32]::GetWindowTitleText($fgHwnd)
+    $fgProc = if ($fgPid -gt 0) { Get-Process -Id $fgPid -ErrorAction SilentlyContinue } else { $null }
+    $fgExe = Get-TerminalXProcessExecutablePath $fgProc
+    $fgNames = @($(if ($null -ne $fgProc) { [string]$fgProc.ProcessName } else { "" }), $fgTitle, $fgClass)
+    if (Test-TerminalXOwnAppIdentity -TargetPid $fgPid -Names $fgNames -ExecutablePath $fgExe -OwnApp $OwnApp) {
+        throw "own_app_protected: keyboard input was stopped because a TerminalX window has the keyboard focus"
+    }
+    if (Test-TerminalXBlockedAppIdentity -Names $fgNames) {
+        throw "appBlocked(`"$(if ($null -ne $fgProc) { $fgProc.ProcessName } else { $fgTitle })`")"
     }
 }
 
@@ -342,10 +667,15 @@ function Wait-TerminalXWindowFocused([IntPtr]$WindowHandle, [int]$TimeoutMillise
     Test-TerminalXWindowFocused $WindowHandle
 }
 
-function Assert-TerminalXKeyboardFocus([IntPtr]$WindowHandle, $Operation) {
+function Assert-TerminalXKeyboardFocus([IntPtr]$WindowHandle, $Operation, $OwnApp = $null) {
+    Assert-TerminalXForegroundAllowed $OwnApp
     if (Test-TerminalXWindowFocused $WindowHandle) { return }
     if ([bool]$Operation.restoreWindow) {
-        if (Wait-TerminalXWindowFocused $WindowHandle 500) { return }
+        if (Wait-TerminalXWindowFocused $WindowHandle 500) {
+            Assert-TerminalXForegroundAllowed $OwnApp
+            return
+        }
+        Assert-TerminalXForegroundAllowed $OwnApp
         throw "window_not_focused: keyboard input requires the target window to be focused; restoreWindow was requested but the target window is still not focused; bring it forward manually or check desktop permissions"
     }
     throw "window_not_focused: keyboard input requires the target window to be focused; retry with --restore-window"
@@ -372,17 +702,28 @@ function Get-TerminalXRuntimeId($Element) {
     try { @($Element.GetRuntimeId()) } catch { @() }
 }
 
-function Test-TerminalXSensitiveElement($Element) {
+function Test-TerminalXSensitiveElement(
+    $Element,
+    $LocalizedControlType = $null,
+    $ControlType = $null,
+    $Name = $null,
+    $AutomationId = $null,
+    $ClassName = $null
+) {
     try {
         if ($Element.Current.IsPassword) { return $true }
     } catch {}
-    $controlType = try { [string]$Element.Current.ControlType.ProgrammaticName } catch { "" }
+    $resolvedControlType = if ($null -ne $ControlType) {
+        [string]$ControlType
+    } else {
+        try { [string]$Element.Current.ControlType.ProgrammaticName } catch { "" }
+    }
     $parts = @(
-        (Get-TerminalXProperty $Element "LocalizedControlType"),
-        $controlType,
-        (Get-TerminalXProperty $Element "Name"),
-        (Get-TerminalXProperty $Element "AutomationId"),
-        (Get-TerminalXProperty $Element "ClassName")
+        $(if ($null -ne $LocalizedControlType) { [string]$LocalizedControlType } else { Get-TerminalXProperty $Element "LocalizedControlType" }),
+        $resolvedControlType,
+        $(if ($null -ne $Name) { [string]$Name } else { Get-TerminalXProperty $Element "Name" }),
+        $(if ($null -ne $AutomationId) { [string]$AutomationId } else { Get-TerminalXProperty $Element "AutomationId" }),
+        $(if ($null -ne $ClassName) { [string]$ClassName } else { Get-TerminalXProperty $Element "ClassName" })
     )
     $haystack = (($parts -join " ") -replace "\s+", " ").ToLowerInvariant()
     foreach ($term in @("password", "passcode", "secret", "one-time code", "verification code")) {
@@ -391,9 +732,16 @@ function Test-TerminalXSensitiveElement($Element) {
     $haystack -match "(^|[^a-z0-9])pin([^a-z0-9]|$)"
 }
 
-function Get-TerminalXValueText($Element) {
+function Get-TerminalXValueText(
+    $Element,
+    $LocalizedControlType = $null,
+    $ControlType = $null,
+    $Name = $null,
+    $AutomationId = $null,
+    $ClassName = $null
+) {
     try {
-        if (Test-TerminalXSensitiveElement $Element) { return "[redacted]" }
+        if (Test-TerminalXSensitiveElement $Element $LocalizedControlType $ControlType $Name $AutomationId $ClassName) { return "[redacted]" }
         $pattern = $Element.GetCurrentPattern([Windows.Automation.ValuePattern]::Pattern)
         $rawValue = $pattern.Current.Value
         $text = if ($null -eq $rawValue) { "" } else { [string]$rawValue }
@@ -452,71 +800,53 @@ function Test-TerminalXSuppressChildren([string]$RoleKey, [string]$Title, [strin
     )
 }
 
-function Get-TerminalXTextSnippets($Element, [int]$Limit = 6, [int]$MaxDepth = 3) {
-    $values = New-Object System.Collections.Generic.List[string]
-    $seen = New-Object System.Collections.Generic.HashSet[string]
+function Get-TerminalXDirectChildren($Node, $Walker = $null, [int]$Limit = 0) {
+    $result = New-Object System.Collections.Generic.List[object]
+    if ($null -eq $Node) { return ,$result.ToArray() }
 
-    function Visit-TerminalXText($Node, [int]$Depth) {
-        if ($values.Count -ge $Limit -or $Depth -gt $MaxDepth) { return }
-        $role = try { [string]$Node.Current.LocalizedControlType } catch { "" }
-        if ($role -match "text|link|label") {
-            foreach ($raw in @((Get-TerminalXProperty $Node "Name"), (Get-TerminalXValueText $Node))) {
-                $value = (($raw -replace "\s+", " ").Trim())
-                if (-not [string]::IsNullOrWhiteSpace($value) -and $seen.Add($value)) {
-                    if ($value.Length -gt 80) { $value = $value.Substring(0, 80) + "..." }
-                    $values.Add($value)
-                    if ($values.Count -ge $Limit) { return }
-                }
+    $activeWalker = $Walker
+    if ($null -eq $activeWalker -and ($Node -is [Windows.Automation.AutomationElement])) {
+        $activeWalker = [Windows.Automation.TreeWalker]::RawViewWalker
+    }
+    if ($null -ne $activeWalker) {
+        try {
+            $child = $activeWalker.GetFirstChild($Node)
+            while ($null -ne $child) {
+                $result.Add($child)
+                if ($Limit -gt 0 -and $result.Count -ge $Limit) { break }
+                $child = $activeWalker.GetNextSibling($child)
             }
+        } catch {}
+        return ,$result.ToArray()
+    }
+
+    try {
+        $collection = $Node.FindAll([Windows.Automation.TreeScope]::Children, [Windows.Automation.Condition]::TrueCondition)
+        $count = $collection.Count
+        if ($Limit -gt 0 -and $count -gt $Limit) { $count = $Limit }
+        for ($i = 0; $i -lt $count; $i++) {
+            $result.Add($collection.Item($i))
         }
-        try {
-            $children = $Node.FindAll([Windows.Automation.TreeScope]::Children, [Windows.Automation.Condition]::TrueCondition)
-            for ($i = 0; $i -lt $children.Count; $i++) {
-                Visit-TerminalXText $children.Item($i) ($Depth + 1)
-                if ($values.Count -ge $Limit) { return }
-            }
-        } catch {}
-    }
-
-    Visit-TerminalXText $Element 0
-    @($values.ToArray())
-}
-
-function Test-TerminalXPlainTextSubtree($Element, [int]$MaxDepth = 4) {
-    $script:sawTerminalXText = $false
-    $allowed = @("pane", "group", "custom", "unknown", "text", "link", "image")
-
-    function Visit-TerminalXPlainText($Node, [int]$Depth) {
-        if ($Depth -gt $MaxDepth) { return $false }
-        $role = try { [string]$Node.Current.LocalizedControlType } catch { "" }
-        $roleKey = $role.ToLowerInvariant()
-        if ($allowed -notcontains $roleKey) { return $false }
-        if ($roleKey -match "text|link") { $script:sawTerminalXText = $true }
-        if (@(Get-TerminalXMeaningfulActions @(Get-TerminalXActions $Node)).Count -gt 0) { return $false }
-        try {
-            $children = $Node.FindAll([Windows.Automation.TreeScope]::Children, [Windows.Automation.Condition]::TrueCondition)
-            for ($i = 0; $i -lt $children.Count; $i++) {
-                if (-not (Visit-TerminalXPlainText $children.Item($i) ($Depth + 1))) { return $false }
-            }
-        } catch {}
-        return $true
-    }
-
-    (Visit-TerminalXPlainText $Element 0) -and $script:sawTerminalXText
+    } catch {}
+    return ,$result.ToArray()
 }
 
 function New-TerminalXElementRecord($Element, [int]$Index, $WindowFrame) {
     $controlType = try { [string]$Element.Current.ControlType.ProgrammaticName } catch { "" }
+    $localizedControlType = Get-TerminalXProperty $Element "LocalizedControlType"
+    $automationId = Get-TerminalXProperty $Element "AutomationId"
+    $name = Get-TerminalXProperty $Element "Name"
+    $className = Get-TerminalXProperty $Element "ClassName"
     $nativeWindowHandle = try { [int64]$Element.Current.NativeWindowHandle } catch { 0 }
     [pscustomobject]@{
         index = $Index
         runtimeId = @(Get-TerminalXRuntimeId $Element)
-        automationId = Get-TerminalXProperty $Element "AutomationId"
-        name = Get-TerminalXProperty $Element "Name"
+        automationId = $automationId
+        name = $name
         controlType = $controlType
-        localizedControlType = Get-TerminalXProperty $Element "LocalizedControlType"
-        className = Get-TerminalXProperty $Element "ClassName"
-        value = Get-TerminalXValueText $Element
+        localizedControlType = $localizedControlType
+        className = $className
+        value = Get-TerminalXValueText $Element $localizedControlType $controlType $name $automationId $className
         isSelected = Test-TerminalXElementSelected $Element
         nativeWindowHandle = $nativeWindowHandle
         frame = Get-TerminalXElementFrame $Element $WindowFrame
@@ -533,15 +863,136 @@ function Test-TerminalXElementSelected($Element) {
     }
 }
 
-function Render-TerminalXTree($RootElement, $WindowFrame, [bool]$CompactBrowserTabs = $false) {
+function Render-TerminalXTree($RootElement, $WindowFrame, [bool]$CompactBrowserTabs = $false, $Walker = $null) {
     $records = New-Object System.Collections.Generic.List[object]
     $lines = New-Object System.Collections.Generic.List[string]
     $seen = New-Object System.Collections.Generic.HashSet[string]
+    $nodeCache = @{}
+    $plainTextRejected = New-Object System.Collections.Generic.HashSet[string]
     $truncation = [pscustomobject]@{
         truncated = $false
         maxNodes = $MaxNodes
         maxDepth = $MaxDepth
         maxDepthReached = $false
+    }
+
+    function Get-TerminalXNodeCacheKey($Node) {
+        $runtimeId = @(Get-TerminalXRuntimeId $Node)
+        if ($runtimeId.Count -gt 0) {
+            return ($runtimeId -join ".")
+        }
+        "obj:" + [System.Runtime.CompilerServices.RuntimeHelpers]::GetHashCode($Node)
+    }
+
+    function Get-TerminalXCachedNode($Node) {
+        $key = Get-TerminalXNodeCacheKey $Node
+        if ($nodeCache.ContainsKey($key)) {
+            return $nodeCache[$key]
+        }
+        $entry = [pscustomobject]@{
+            key = $key
+            node = $Node
+            record = $null
+            meaningfulActions = $null
+            children = $null
+            childrenLoaded = $false
+        }
+        $nodeCache[$key] = $entry
+        $entry
+    }
+
+    function Get-TerminalXCachedRecord($Entry) {
+        if ($null -eq $Entry.record) {
+            $Entry.record = New-TerminalXElementRecord $Entry.node 0 $WindowFrame
+            $Entry.meaningfulActions = @(Get-TerminalXMeaningfulActions $Entry.record.actions)
+        }
+        $Entry.record
+    }
+
+    function Get-TerminalXCachedChildren($Entry) {
+        if (-not $Entry.childrenLoaded) {
+            $Entry.childrenLoaded = $true
+            $Entry.children = Get-TerminalXDirectChildren $Entry.node $Walker
+        }
+        return ,$Entry.children
+    }
+
+    function Get-TerminalXCachedTextSnippets($Entry, [int]$Limit = 6, [int]$MaxDepth = 3) {
+        $values = New-Object System.Collections.Generic.List[string]
+        $seenText = New-Object System.Collections.Generic.HashSet[string]
+
+        function Collect-TerminalXCachedText($CandidateEntry, [int]$Depth) {
+            if ($values.Count -ge $Limit -or $Depth -gt $MaxDepth) { return }
+            $rec = Get-TerminalXCachedRecord $CandidateEntry
+            $role = [string]$rec.localizedControlType
+            if ($role -match "text|link|label") {
+                foreach ($raw in @($rec.name, $rec.value)) {
+                    $value = (($raw -replace "\s+", " ").Trim())
+                    if (-not [string]::IsNullOrWhiteSpace($value) -and $seenText.Add($value)) {
+                        if ($value.Length -gt 80) { $value = $value.Substring(0, 80) + "..." }
+                        $values.Add($value)
+                        if ($values.Count -ge $Limit) { return }
+                    }
+                }
+            }
+            $childNodes = Get-TerminalXCachedChildren $CandidateEntry
+            for ($i = 0; $i -lt $childNodes.Count; $i++) {
+                $childEntry = Get-TerminalXCachedNode $childNodes[$i]
+                Collect-TerminalXCachedText $childEntry ($Depth + 1)
+                if ($values.Count -ge $Limit) { return }
+            }
+        }
+
+        Collect-TerminalXCachedText $Entry 0
+        @($values.ToArray())
+    }
+
+    function Get-TerminalXCachedPlainTextSummary($Entry, [int]$Limit = 8, [int]$MaxDepth = 4) {
+        if ($plainTextRejected.Contains($Entry.key)) { return $null }
+        $allowed = @("pane", "group", "custom", "unknown", "text", "link", "image")
+        $values = New-Object System.Collections.Generic.List[string]
+        $seenText = New-Object System.Collections.Generic.HashSet[string]
+        $state = [pscustomobject]@{ sawText = $false }
+
+        function Visit-TerminalXCachedPlainText($CandidateEntry, [int]$Depth) {
+            if ($Depth -gt $MaxDepth -or $plainTextRejected.Contains($CandidateEntry.key)) { return $false }
+            $rec = Get-TerminalXCachedRecord $CandidateEntry
+            $roleKey = ([string]$rec.localizedControlType).ToLowerInvariant()
+            if ($allowed -notcontains $roleKey) {
+                [void]$plainTextRejected.Add($CandidateEntry.key)
+                return $false
+            }
+            if ($CandidateEntry.meaningfulActions.Count -gt 0) {
+                [void]$plainTextRejected.Add($CandidateEntry.key)
+                return $false
+            }
+            if ($roleKey -match "text|link") {
+                $state.sawText = $true
+            }
+            if ($roleKey -match "text|link|label" -and $values.Count -lt $Limit) {
+                foreach ($raw in @($rec.name, $rec.value)) {
+                    $value = (($raw -replace "\s+", " ").Trim())
+                    if (-not [string]::IsNullOrWhiteSpace($value) -and $seenText.Add($value)) {
+                        if ($value.Length -gt 80) { $value = $value.Substring(0, 80) + "..." }
+                        $values.Add($value)
+                        if ($values.Count -ge $Limit) { break }
+                    }
+                }
+            }
+            $childNodes = Get-TerminalXCachedChildren $CandidateEntry
+            for ($i = 0; $i -lt $childNodes.Count; $i++) {
+                $childEntry = Get-TerminalXCachedNode $childNodes[$i]
+                if (-not (Visit-TerminalXCachedPlainText $childEntry ($Depth + 1))) {
+                    return $false
+                }
+            }
+            return $true
+        }
+
+        if (-not (Visit-TerminalXCachedPlainText $Entry 0) -or -not $state.sawText -or $values.Count -lt 2) {
+            return $null
+        }
+        ($values.ToArray() -join " ")
     }
 
     function Visit-TerminalXNode($Node, [int]$Depth) {
@@ -550,32 +1001,32 @@ function Render-TerminalXTree($RootElement, $WindowFrame, [bool]$CompactBrowserT
             if ($Depth -gt $MaxDepth) { $truncation.maxDepthReached = $true }
             return
         }
-        $identity = try { (@($Node.GetRuntimeId()) -join ".") } catch { [Guid]::NewGuid().ToString() }
-        if (-not $seen.Add($identity)) { return }
+        $entry = Get-TerminalXCachedNode $Node
+        if (-not $seen.Add($entry.key)) { return }
 
-        $record = New-TerminalXElementRecord $Node $records.Count $WindowFrame
-        $children = @()
-        try {
-            $children = @($Node.FindAll([Windows.Automation.TreeScope]::Children, [Windows.Automation.Condition]::TrueCondition))
-        } catch {}
-        $meaningfulActions = @(Get-TerminalXMeaningfulActions $record.actions)
+        $record = Get-TerminalXCachedRecord $entry
+        $meaningfulActions = $entry.meaningfulActions
         $title = if ([string]::IsNullOrWhiteSpace($record.name)) { $record.automationId } else { $record.name }
         $role = if ([string]::IsNullOrWhiteSpace($record.localizedControlType)) { $record.controlType } else { $record.localizedControlType }
         $roleKey = $role.ToLowerInvariant()
         $genericSummary = $null
+        $children = $null
         if (($roleKey -in @("pane", "group", "custom", "unknown")) -and [string]::IsNullOrWhiteSpace($title) -and [string]::IsNullOrWhiteSpace($record.value)) {
-            $snippets = @(Get-TerminalXTextSnippets $Node 8 4)
-            if ($snippets.Count -ge 2 -and (Test-TerminalXPlainTextSubtree $Node)) {
-                $genericSummary = ($snippets -join " ")
+            if ($meaningfulActions.Count -eq 0) {
+                $genericSummary = Get-TerminalXCachedPlainTextSummary $entry 8 4
+                if ($null -eq $genericSummary) {
+                    $children = Get-TerminalXCachedChildren $entry
+                    if ($children.Count -le 1) {
+                        for ($i = 0; $i -lt $children.Count; $i++) {
+                            Visit-TerminalXNode $children[$i] $Depth
+                        }
+                        return
+                    }
+                }
             }
-        }
-        if (($roleKey -in @("pane", "group", "custom", "unknown")) -and [string]::IsNullOrWhiteSpace($title) -and [string]::IsNullOrWhiteSpace($record.value) -and $meaningfulActions.Count -eq 0 -and $null -eq $genericSummary -and $children.Count -le 1) {
-            for ($i = 0; $i -lt $children.Count; $i++) {
-                Visit-TerminalXNode $children.Item($i) $Depth
-            }
-            return
         }
 
+        $record.index = $records.Count
         $records.Add($record)
 
         $line = "$($record.index) $role $(Format-TerminalXSnapshotText $title)".TrimEnd()
@@ -583,7 +1034,7 @@ function Render-TerminalXTree($RootElement, $WindowFrame, [bool]$CompactBrowserT
         if (-not [string]::IsNullOrWhiteSpace($genericSummary) -and $genericSummary -ne $title) {
             $line += ", Text: " + (Format-TerminalXSnapshotText $genericSummary)
         } elseif ($roleKey -in @("row", "data item", "list item")) {
-            $rowSummary = @((Get-TerminalXTextSnippets $Node 6 3)) -join " "
+            $rowSummary = @((Get-TerminalXCachedTextSnippets $entry 6 3)) -join " "
             if (-not [string]::IsNullOrWhiteSpace($rowSummary) -and $rowSummary -ne $title) {
                 $line += ", Text: " + (Format-TerminalXSnapshotText $rowSummary)
             }
@@ -594,9 +1045,12 @@ function Render-TerminalXTree($RootElement, $WindowFrame, [bool]$CompactBrowserT
         $lines.Add(("`t" * $Depth) + $line)
 
         if (-not [string]::IsNullOrWhiteSpace($genericSummary) -or (Test-TerminalXSuppressChildren $roleKey $title $record.value $genericSummary)) { return }
+        if ($null -eq $children) {
+            $children = Get-TerminalXCachedChildren $entry
+        }
         $childLineStart = $lines.Count
         for ($i = 0; $i -lt $children.Count; $i++) {
-            Visit-TerminalXNode $children.Item($i) ($Depth + 1)
+            Visit-TerminalXNode $children[$i] ($Depth + 1)
         }
         if ($CompactBrowserTabs) {
             Compress-TerminalXRenderedBrowserTabs $records $lines $childLineStart ($Depth + 1)
@@ -769,8 +1223,8 @@ function Get-TerminalXScreenshot([bool]$IncludeScreenshot, $WindowFrame) {
     }
 }
 
-function New-TerminalXSnapshot([string]$Query, [bool]$IncludeScreenshot, $WindowId = $null, $WindowIndex = $null, [bool]$RestoreWindow = $false) {
-    $process = Find-TerminalXProcess $Query
+function New-TerminalXSnapshot([string]$Query, [bool]$IncludeScreenshot, $WindowId = $null, $WindowIndex = $null, [bool]$RestoreWindow = $false, $OwnApp = $null) {
+    $process = Find-TerminalXProcess $Query $OwnApp
     if ($RestoreWindow) { Restore-TerminalXWindow $process }
     Assert-TerminalXWindowTarget $process $WindowId $WindowIndex
     $root = Get-TerminalXRootElement $process
@@ -805,8 +1259,8 @@ function Get-TerminalXAppList {
     })
 }
 
-function Get-TerminalXWindowList([string]$Query) {
-    $process = Find-TerminalXProcess $Query
+function Get-TerminalXWindowList([string]$Query, $OwnApp = $null) {
+    $process = Find-TerminalXProcess $Query $OwnApp
     $root = Get-TerminalXRootElement $process
     $windowFrame = Get-TerminalXWindowFrame $process $root
     $x = $null
@@ -873,19 +1327,73 @@ function Test-TerminalXSameRuntimeId($Left, $Right) {
     $true
 }
 
-function Find-TerminalXElement($RootElement, $Record) {
-    if ($null -eq $Record) { return $null }
+function Find-TerminalXElement($RootElement, $Record, $Walker = $null) {
+    if ($null -eq $RootElement -or $null -eq $Record) { return $null }
     if ($Record.index -eq 0) { return $RootElement }
+    $targetRuntimeId = @($Record.runtimeId)
+    if ($targetRuntimeId.Count -eq 0) { return $null }
+    $rootRuntimeId = @(Get-TerminalXRuntimeId $RootElement)
+    if (Test-TerminalXSameRuntimeId $rootRuntimeId $targetRuntimeId) {
+        return $RootElement
+    }
 
-    try {
-        $descendants = $RootElement.FindAll([Windows.Automation.TreeScope]::Descendants, [Windows.Automation.Condition]::TrueCondition)
-        for ($i = 0; $i -lt $descendants.Count; $i++) {
-            $candidate = $descendants.Item($i)
-            if (Test-TerminalXSameRuntimeId @($candidate.GetRuntimeId()) @($Record.runtimeId)) {
-                return $candidate
+    $activeWalker = $Walker
+    if ($null -eq $activeWalker -and ($RootElement -is [Windows.Automation.AutomationElement])) {
+        $activeWalker = [Windows.Automation.TreeWalker]::RawViewWalker
+    }
+
+    $seen = New-Object System.Collections.Generic.HashSet[string]
+    $rootKey = ($rootRuntimeId -join ".")
+    if (-not [string]::IsNullOrEmpty($rootKey)) { [void]$seen.Add($rootKey) }
+
+    $stack = New-Object System.Collections.Generic.Stack[object]
+    $stack.Push([pscustomobject]@{ node = $RootElement; depth = 0 })
+    $visited = 1
+
+    while ($stack.Count -gt 0 -and $visited -lt $MaxNodes) {
+        $entry = $stack.Pop()
+        $node = $entry.node
+        $depth = [int]$entry.depth
+        if ($depth -ge $MaxDepth) { continue }
+
+        $toPush = New-Object System.Collections.Generic.List[object]
+        if ($null -ne $activeWalker) {
+            try {
+                $child = $activeWalker.GetFirstChild($node)
+                while ($null -ne $child -and $visited -lt $MaxNodes) {
+                    $childRuntimeId = @(Get-TerminalXRuntimeId $child)
+                    $visited++
+                    if (Test-TerminalXSameRuntimeId $childRuntimeId $targetRuntimeId) {
+                        return $child
+                    }
+                    $childKey = ($childRuntimeId -join ".")
+                    if ([string]::IsNullOrEmpty($childKey) -or $seen.Add($childKey)) {
+                        $toPush.Add($child)
+                    }
+                    $child = $activeWalker.GetNextSibling($child)
+                }
+            } catch {}
+        } else {
+            $remaining = $MaxNodes - $visited
+            $children = Get-TerminalXDirectChildren $node $null $remaining
+            for ($i = 0; $i -lt $children.Count -and $visited -lt $MaxNodes; $i++) {
+                $child = $children[$i]
+                $childRuntimeId = @(Get-TerminalXRuntimeId $child)
+                $visited++
+                if (Test-TerminalXSameRuntimeId $childRuntimeId $targetRuntimeId) {
+                    return $child
+                }
+                $childKey = ($childRuntimeId -join ".")
+                if ([string]::IsNullOrEmpty($childKey) -or $seen.Add($childKey)) {
+                    $toPush.Add($child)
+                }
             }
         }
-    } catch {}
+
+        for ($i = $toPush.Count - 1; $i -ge 0; $i--) {
+            $stack.Push([pscustomobject]@{ node = $toPush[$i]; depth = ($depth + 1) })
+        }
+    }
     $null
 }
 
@@ -971,34 +1479,101 @@ function Get-TerminalXRequiredString($Value, [string]$Name) {
     $text
 }
 
-function Get-TerminalXScreenPoint($Operation, $WindowFrame) {
-    if ($null -ne $Operation.element) {
+function Assert-TerminalXPointInWindowBounds($WindowFrame, [double]$LocalX, [double]$LocalY, [string]$XName = "x", [string]$YName = "y") {
+    if ($null -eq $WindowFrame -or $WindowFrame.width -le 0 -or $WindowFrame.height -le 0) {
+        throw "coordinate action requires a visible window and coordinates"
+    }
+    if ($LocalX -lt 0 -or $LocalY -lt 0 -or $LocalX -gt $WindowFrame.width -or $LocalY -gt $WindowFrame.height) {
+        throw "invalid_argument: $XName and $YName ($LocalX, $LocalY) are out of window bounds [0, $($WindowFrame.width)] x [0, $($WindowFrame.height)]"
+    }
+}
+
+function Assert-TerminalXScreenPointInWindow($WindowFrame, [double]$ScreenX, [double]$ScreenY) {
+    if ($null -eq $WindowFrame -or $WindowFrame.width -le 0 -or $WindowFrame.height -le 0) {
+        throw "coordinate action requires a visible window and coordinates"
+    }
+    if ($ScreenX -lt $WindowFrame.x -or $ScreenY -lt $WindowFrame.y -or $ScreenX -gt ($WindowFrame.x + $WindowFrame.width) -or $ScreenY -gt ($WindowFrame.y + $WindowFrame.height)) {
+        throw "invalid_argument: target point ($ScreenX, $ScreenY) is out of window bounds"
+    }
+}
+
+function Get-TerminalXTopLevelWindowAtPoint([int]$ScreenX, [int]$ScreenY) {
+    $hwnd = [TerminalXDesktopWin32]::GetTopLevelWindowAtPoint($ScreenX, $ScreenY)
+    if ($hwnd -eq [IntPtr]::Zero) { return $null }
+    $pidValue = [int][TerminalXDesktopWin32]::GetWindowProcessId($hwnd)
+    $className = [TerminalXDesktopWin32]::GetWindowClassName($hwnd)
+    $title = [TerminalXDesktopWin32]::GetWindowTitleText($hwnd)
+    $proc = if ($pidValue -gt 0) { Get-Process -Id $pidValue -ErrorAction SilentlyContinue } else { $null }
+    [pscustomobject]@{
+        hwnd = $hwnd
+        pid = $pidValue
+        processName = if ($null -ne $proc) { [string]$proc.ProcessName } else { "" }
+        executablePath = Get-TerminalXProcessExecutablePath $proc
+        className = $className
+        title = $title
+    }
+}
+
+function Assert-TerminalXScreenPointOwnedByTarget($TargetProcess, [IntPtr]$TargetHandle, $WindowFrame, [int]$ScreenX, [int]$ScreenY, $OwnApp = $null) {
+    Assert-TerminalXScreenPointInWindow $WindowFrame $ScreenX $ScreenY
+    Assert-TerminalXProcessAllowed $TargetProcess $OwnApp
+    $hit = Get-TerminalXTopLevelWindowAtPoint $ScreenX $ScreenY
+    if ($null -eq $hit) {
+        throw "window_not_focused: no visible window owns screen coordinate ($ScreenX, $ScreenY); bring the target window forward and retry"
+    }
+    $hitNames = @([string]$hit.processName, [string]$hit.title, [string]$hit.className)
+    if (Test-TerminalXOwnAppIdentity -TargetPid ([int]$hit.pid) -Names $hitNames -ExecutablePath ([string]$hit.executablePath) -OwnApp $OwnApp) {
+        throw "own_app_protected: pointer input stopped because a TerminalX window owns screen coordinate ($ScreenX, $ScreenY)"
+    }
+    if (Test-TerminalXBlockedAppIdentity -Names $hitNames) {
+        $label = if (-not [string]::IsNullOrWhiteSpace($hit.processName)) { $hit.processName } else { [string]$hit.pid }
+        throw "appBlocked(`"$label`")"
+    }
+    $targetPid = [int]$TargetProcess.Id
+    $hitPid = [int]$hit.pid
+    $sameWindow = ($hit.hwnd -eq $TargetHandle) -or ($hitPid -eq $targetPid) -or (Test-TerminalXDescendantProcess $hitPid $targetPid) -or (Test-TerminalXDescendantProcess $targetPid $hitPid)
+    if (-not $sameWindow) {
+        throw "window_not_focused: screen coordinate ($ScreenX, $ScreenY) is occluded by another window (pid $hitPid, expected pid $targetPid); bring the target window forward and retry"
+    }
+}
+
+function Get-TerminalXScreenPoint($Operation, $WindowFrame, [string]$XKey = "x", [string]$YKey = "y") {
+    if ($XKey -eq "x" -and $null -ne $Operation.element) {
         throw "stale element frame; run get-app-state again and use a fresh element index"
     }
-    $x = Get-TerminalXRequiredNumber $Operation.x "x"
-    $y = Get-TerminalXRequiredNumber $Operation.y "y"
+    $x = Get-TerminalXRequiredNumber $Operation.$XKey $XKey
+    $y = Get-TerminalXRequiredNumber $Operation.$YKey $YKey
+    Assert-TerminalXPointInWindowBounds $WindowFrame $x $y $XKey $YKey
     @{
         x = [int][Math]::Round($WindowFrame.x + $x)
         y = [int][Math]::Round($WindowFrame.y + $y)
     }
 }
 
-function Get-TerminalXElementScreenPoint($Element) {
+function Get-TerminalXElementScreenPoint($Element, $WindowFrame = $null) {
     if ($null -eq $Element) { return $null }
     try {
         $rect = $Element.Current.BoundingRectangle
         if ($rect.Width -gt 0 -and $rect.Height -gt 0) {
+            $px = [int][Math]::Round($rect.X + ($rect.Width / 2))
+            $py = [int][Math]::Round($rect.Y + ($rect.Height / 2))
+            if ($null -ne $WindowFrame) {
+                Assert-TerminalXScreenPointInWindow $WindowFrame $px $py
+            }
             return @{
-                x = [int][Math]::Round($rect.X + ($rect.Width / 2))
-                y = [int][Math]::Round($rect.Y + ($rect.Height / 2))
+                x = $px
+                y = $py
             }
         }
-    } catch {}
+    } catch {
+        if ($_.Exception.Message -like "invalid_argument:*") { throw }
+    }
     $null
 }
 
-function Send-TerminalXMouseClick([IntPtr]$WindowHandle, [int]$ScreenX, [int]$ScreenY, [string]$Button, [int]$Count, [string]$Modifiers) {
+function Send-TerminalXMouseClick($TargetProcess, [IntPtr]$WindowHandle, $WindowFrame, [int]$ScreenX, [int]$ScreenY, [string]$Button, [int]$Count, [string]$Modifiers, $OwnApp = $null) {
     [void][TerminalXDesktopWin32]::SetForegroundWindow($WindowHandle)
+    Assert-TerminalXScreenPointOwnedByTarget $TargetProcess $WindowHandle $WindowFrame $ScreenX $ScreenY $OwnApp
     [void][TerminalXDesktopWin32]::SetCursorPos($ScreenX, $ScreenY)
     $buttonName = if ([string]::IsNullOrWhiteSpace($Button)) { "left" } else { $Button.ToLowerInvariant() }
     switch ($buttonName) {
@@ -1028,12 +1603,14 @@ function Send-TerminalXMouseClick([IntPtr]$WindowHandle, [int]$ScreenX, [int]$Sc
     }
 }
 
-function Send-TerminalXDrag([IntPtr]$WindowHandle, $From, $To) {
+function Send-TerminalXDrag($TargetProcess, [IntPtr]$WindowHandle, $WindowFrame, $From, $To, $OwnApp = $null) {
     [void][TerminalXDesktopWin32]::SetForegroundWindow($WindowHandle)
     $startX = [int]$From.x
     $startY = [int]$From.y
     $endX = [int]$To.x
     $endY = [int]$To.y
+    Assert-TerminalXScreenPointOwnedByTarget $TargetProcess $WindowHandle $WindowFrame $startX $startY $OwnApp
+    Assert-TerminalXScreenPointOwnedByTarget $TargetProcess $WindowHandle $WindowFrame $endX $endY $OwnApp
     [void][TerminalXDesktopWin32]::SetCursorPos($startX, $startY)
     [TerminalXDesktopWin32]::mouse_event($MouseEvents.LeftDown, 0, 0, 0, [UIntPtr]::Zero)
     for ($step = 1; $step -le 12; $step++) {
@@ -1178,6 +1755,7 @@ function Send-TerminalXPasteText([IntPtr]$WindowHandle, [string]$Text) {
 }
 
 function Invoke-TerminalXOperation($Operation) {
+    $ownApp = $Operation.ownApp
     $includeScreenshot = -not [bool]$Operation.noScreenshot
     if ($Operation.tool -eq "handshake") {
         return [pscustomobject]@{ ok = $true; capabilities = Get-TerminalXHandshake }
@@ -1186,24 +1764,24 @@ function Invoke-TerminalXOperation($Operation) {
         return [pscustomobject]@{ ok = $true; apps = @(Get-TerminalXAppList) }
     }
     if ($Operation.tool -eq "list_windows") {
-        $list = Get-TerminalXWindowList $Operation.app
+        $list = Get-TerminalXWindowList $Operation.app $ownApp
         return [pscustomobject]@{ ok = $true; app = $list.app; windows = @($list.windows) }
     }
     if ($Operation.tool -eq "get_app_state") {
-        return [pscustomobject]@{ ok = $true; snapshot = New-TerminalXSnapshot $Operation.app $includeScreenshot $Operation.windowId $Operation.windowIndex ([bool]$Operation.restoreWindow) }
+        return [pscustomobject]@{ ok = $true; snapshot = New-TerminalXSnapshot $Operation.app $includeScreenshot $Operation.windowId $Operation.windowIndex ([bool]$Operation.restoreWindow) $ownApp }
     }
 
-    $process = Find-TerminalXProcess $Operation.app
+    $process = Find-TerminalXProcess $Operation.app $ownApp
     if ([bool]$Operation.restoreWindow) { Restore-TerminalXWindow $process }
     Assert-TerminalXWindowTarget $process $Operation.windowId $Operation.windowIndex
     $root = Get-TerminalXRootElement $process
-    $windowFrame = if ($null -ne $Operation.windowBounds) { $Operation.windowBounds } else { Get-TerminalXWindowFrame $process $root }
+    $windowFrame = Get-TerminalXWindowFrame $process $root
     $element = Find-TerminalXElement $root $Operation.element
     $fromElement = Find-TerminalXElement $root $Operation.fromElement
     $toElement = Find-TerminalXElement $root $Operation.toElement
     $handle = [IntPtr]$process.MainWindowHandle
     if ($Operation.tool -in @("type_text", "press_key", "hotkey", "paste_text")) {
-        Assert-TerminalXKeyboardFocus $handle $Operation
+        Assert-TerminalXKeyboardFocus $handle $Operation $ownApp
     }
     $action = $null
 
@@ -1219,9 +1797,9 @@ function Invoke-TerminalXOperation($Operation) {
                 $handledByPattern = Invoke-TerminalXPrimaryAction $element
             }
             if (-not $handledByPattern) {
-                $point = Get-TerminalXElementScreenPoint $element
+                $point = Get-TerminalXElementScreenPoint $element $windowFrame
                 if ($null -eq $point) { $point = Get-TerminalXScreenPoint $Operation $windowFrame }
-                Send-TerminalXMouseClick $handle $point.x $point.y $Operation.mouse_button $clickCount $Operation.modifiers
+                Send-TerminalXMouseClick $process $handle $windowFrame $point.x $point.y $Operation.mouse_button $clickCount $Operation.modifiers $ownApp
                 $action = [pscustomobject]@{ path = "synthetic"; actionName = $null; fallbackReason = "actionUnsupported" }
             } else {
                 $action = [pscustomobject]@{ path = "accessibility"; actionName = "primaryAction"; fallbackReason = $null }
@@ -1247,31 +1825,26 @@ function Invoke-TerminalXOperation($Operation) {
             } elseif ($Operation.direction -ne "up") {
                 throw "unsupported scroll direction: $($Operation.direction)"
             }
-            $point = Get-TerminalXElementScreenPoint $element
+            $point = Get-TerminalXElementScreenPoint $element $windowFrame
             if ($null -eq $point) { $point = Get-TerminalXScreenPoint $Operation $windowFrame }
             [void][TerminalXDesktopWin32]::SetForegroundWindow($handle)
+            Assert-TerminalXScreenPointOwnedByTarget $process $handle $windowFrame ([int]$point.x) ([int]$point.y) $ownApp
             [void][TerminalXDesktopWin32]::SetCursorPos([int]$point.x, [int]$point.y)
             [TerminalXDesktopWin32]::mouse_event($mouseEvent, 0, 0, $delta, [UIntPtr]::Zero)
             $action = [pscustomobject]@{ path = "synthetic"; actionName = "scroll"; fallbackReason = $null }
         }
         "drag" {
-            $from = Get-TerminalXElementScreenPoint $fromElement
+            $from = Get-TerminalXElementScreenPoint $fromElement $windowFrame
             if ($null -eq $from -and $null -ne $Operation.fromElement) { throw "stale element frame; run get-app-state again and use a fresh element index" }
             if ($null -eq $from) {
-                $from = @{
-                    x = $windowFrame.x + (Get-TerminalXRequiredNumber $Operation.from_x "from_x")
-                    y = $windowFrame.y + (Get-TerminalXRequiredNumber $Operation.from_y "from_y")
-                }
+                $from = Get-TerminalXScreenPoint $Operation $windowFrame "from_x" "from_y"
             }
-            $to = Get-TerminalXElementScreenPoint $toElement
+            $to = Get-TerminalXElementScreenPoint $toElement $windowFrame
             if ($null -eq $to -and $null -ne $Operation.toElement) { throw "stale element frame; run get-app-state again and use a fresh element index" }
             if ($null -eq $to) {
-                $to = @{
-                    x = $windowFrame.x + (Get-TerminalXRequiredNumber $Operation.to_x "to_x")
-                    y = $windowFrame.y + (Get-TerminalXRequiredNumber $Operation.to_y "to_y")
-                }
+                $to = Get-TerminalXScreenPoint $Operation $windowFrame "to_x" "to_y"
             }
-            Send-TerminalXDrag $handle $from $to
+            Send-TerminalXDrag $process $handle $windowFrame $from $to $ownApp
             $action = [pscustomobject]@{ path = "synthetic"; actionName = "drag"; fallbackReason = $null }
         }
         "type_text" {
@@ -1302,13 +1875,13 @@ function Invoke-TerminalXOperation($Operation) {
     }
 
     try {
-        $snapshot = New-TerminalXSnapshot $Operation.app $includeScreenshot $Operation.windowId $Operation.windowIndex
+        $snapshot = New-TerminalXSnapshot $Operation.app $includeScreenshot $Operation.windowId $Operation.windowIndex $false $ownApp
     } catch {
         if ($null -eq $Operation.windowId -and $null -eq $Operation.windowIndex) { throw }
         if ($null -eq $action.verification) {
             $action | Add-Member -NotePropertyName verification -NotePropertyValue ([pscustomobject]@{ state = "unverified"; reason = "window_changed" })
         }
-        $snapshot = New-TerminalXSnapshot $Operation.app $includeScreenshot $null $null
+        $snapshot = New-TerminalXSnapshot $Operation.app $includeScreenshot $null $null $false $ownApp
     }
     [pscustomobject]@{ ok = $true; action = $action; snapshot = $snapshot }
 }

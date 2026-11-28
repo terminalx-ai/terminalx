@@ -1,10 +1,11 @@
 //! Message chronology, separate from mutable session metadata. The sidecar holds
 //! message presence, verified times and scan progress, never message contents.
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, Condvar, LazyLock, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use super::index::{self, SessionEntry};
 use crate::events::{AgentEvent, Delta, Payload};
@@ -12,21 +13,22 @@ use crate::sink::EventSink;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-static LOCK: Mutex<()> = Mutex::new(());
 static SCANNING: LazyLock<Mutex<HashSet<PathBuf>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
 const FIELD: &str = "lastMessageAt";
 const PRESENCE_FIELD: &str = "hasMessages";
 const BATCH: usize = 128;
 // Yield after this many bytes, at a record boundary (never split a message).
 const BATCH_BYTES: u64 = 256 * 1024;
+const FLUSH_DEBOUNCE: Duration = Duration::from_millis(500);
+const MAX_CACHE_ENTRIES: usize = 256;
 
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Default, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Activity {
     last_message_at: Option<String>,
     tabs: BTreeMap<String, TabActivity>,
 }
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Default, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct TabActivity {
     #[serde(default)]
@@ -41,9 +43,215 @@ struct TabActivity {
     history: Flow,
     offset: u64,
 }
-#[derive(Default, Serialize, Deserialize, PartialEq)]
+#[derive(Default, Clone, Serialize, Deserialize, PartialEq)]
 struct Flow {
     assistant: bool,
+}
+
+struct CachedActivity {
+    activity: Activity,
+    disk_stamp: Option<super::FileStamp>,
+    dirty: bool,
+    dirty_since: Option<Instant>,
+    generation: u64,
+    last_used: u64,
+}
+
+#[derive(Default)]
+struct ActivityCache {
+    tick: u64,
+    entries: HashMap<PathBuf, CachedActivity>,
+}
+
+impl ActivityCache {
+    fn next_tick(&mut self) -> u64 {
+        self.tick = self.tick.wrapping_add(1);
+        self.tick
+    }
+
+    fn evict_if_needed(&mut self, incoming: &Path) {
+        if self.entries.contains_key(incoming) || self.entries.len() < MAX_CACHE_ENTRIES {
+            return;
+        }
+        if let Some(oldest) = self
+            .entries
+            .iter()
+            .filter(|(_, entry)| !entry.dirty)
+            .min_by_key(|(_, entry)| entry.last_used)
+            .map(|(path, _)| path.clone())
+        {
+            self.entries.remove(&oldest);
+        }
+    }
+}
+
+static CACHE: LazyLock<Mutex<ActivityCache>> = LazyLock::new(Default::default);
+static FLUSH_NOTIFY: LazyLock<(Mutex<u64>, Condvar)> =
+    LazyLock::new(|| (Mutex::new(0), Condvar::new()));
+static FLUSHER: OnceLock<()> = OnceLock::new();
+
+#[cfg(test)]
+thread_local! {
+    static TEST_DISK_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+fn read_disk_activity(sidecar: &Path) -> Result<(Activity, Option<super::FileStamp>)> {
+    #[cfg(test)]
+    TEST_DISK_READS.with(|count| count.set(count.get() + 1));
+    let stamp = super::file_stamp(sidecar)?;
+    let activity = match stamp {
+        Some(_) => super::read_json(sidecar)?.unwrap_or_default(),
+        None => Activity::default(),
+    };
+    Ok((activity, stamp))
+}
+
+/// Read a session's activity from the in-memory cache, refreshing from disk
+/// only on a cold miss or when the on-disk file changed externally.
+fn read_cached(sidecar: &Path) -> Result<Activity> {
+    let cached = {
+        let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        let tick = cache.next_tick();
+        if let Some(entry) = cache.entries.get_mut(sidecar) {
+            entry.last_used = tick;
+            if entry.dirty {
+                return Ok(entry.activity.clone());
+            }
+            Some((entry.disk_stamp, entry.activity.clone()))
+        } else {
+            None
+        }
+    };
+    if let Some((saved_stamp, activity)) = cached {
+        if super::file_stamp(sidecar)? == saved_stamp {
+            return Ok(activity);
+        }
+    }
+    let (activity, stamp) = read_disk_activity(sidecar)?;
+    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    let tick = cache.next_tick();
+    if let Some(existing) = cache.entries.get_mut(sidecar) {
+        if existing.dirty {
+            existing.last_used = tick;
+            return Ok(existing.activity.clone());
+        }
+        existing.activity = activity.clone();
+        existing.disk_stamp = stamp;
+        existing.last_used = tick;
+    } else {
+        cache.evict_if_needed(sidecar);
+        cache.entries.insert(
+            sidecar.to_path_buf(),
+            CachedActivity {
+                activity: activity.clone(),
+                disk_stamp: stamp,
+                dirty: false,
+                dirty_since: None,
+                generation: 0,
+                last_used: tick,
+            },
+        );
+    }
+    Ok(activity)
+}
+
+fn write_sidecar(sidecar: &Path, activity: &Activity) -> Result<Option<super::FileStamp>> {
+    // Guard against background flushes resurrecting a removed TempDir in tests.
+    let home = sidecar.parent().and_then(Path::parent).and_then(Path::parent);
+    if home.is_some_and(|dir| !dir.exists()) {
+        return Ok(None);
+    }
+    if let Some(parent) = sidecar.parent() {
+        super::ensure_dir(parent.to_path_buf())?;
+    }
+    super::write_json_nosync(sidecar, activity)?;
+    Ok(super::file_stamp(sidecar)?)
+}
+
+fn ensure_flusher() {
+    FLUSHER.get_or_init(|| {
+        let _ = std::thread::Builder::new()
+            .name("message-activity-flush".into())
+            .spawn(flusher_loop);
+    });
+}
+
+fn notify_flusher() {
+    ensure_flusher();
+    let (lock, cvar) = &*FLUSH_NOTIFY;
+    let mut seq = lock.lock().unwrap_or_else(|e| e.into_inner());
+    *seq = seq.wrapping_add(1);
+    cvar.notify_one();
+}
+
+fn flush_entries(only_due: bool) -> Option<Duration> {
+    let now = Instant::now();
+    let mut to_write = Vec::new();
+    let mut next_wait: Option<Duration> = None;
+    {
+        let cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        for (path, entry) in &cache.entries {
+            if !entry.dirty {
+                continue;
+            }
+            if only_due {
+                let elapsed = entry.dirty_since.map_or(FLUSH_DEBOUNCE, |t| now.saturating_duration_since(t));
+                if elapsed < FLUSH_DEBOUNCE {
+                    let rem = FLUSH_DEBOUNCE - elapsed;
+                    next_wait = Some(next_wait.map_or(rem, |cur| cur.min(rem)));
+                    continue;
+                }
+            }
+            to_write.push((path.clone(), entry.activity.clone(), entry.generation));
+        }
+    }
+    for (path, activity, gen) in to_write {
+        match write_sidecar(&path, &activity) {
+            Ok(stamp) => {
+                let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(entry) = cache.entries.get_mut(&path) {
+                    if entry.generation == gen {
+                        entry.dirty = false;
+                        entry.dirty_since = None;
+                        entry.disk_stamp = stamp;
+                    }
+                }
+            }
+            Err(error) => {
+                log::warn!("flush message activity {}: {error:#}", path.display());
+            }
+        }
+    }
+    next_wait
+}
+
+fn flusher_loop() {
+    let (lock, cvar) = &*FLUSH_NOTIFY;
+    let mut seen = *lock.lock().unwrap_or_else(|e| e.into_inner());
+    loop {
+        let wait = flush_entries(true);
+        let seq = lock.lock().unwrap_or_else(|e| e.into_inner());
+        if *seq != seen {
+            seen = *seq;
+            continue;
+        }
+        match wait {
+            Some(duration) => {
+                let (guard, _) = cvar.wait_timeout(seq, duration).unwrap_or_else(|e| e.into_inner());
+                seen = *guard;
+            }
+            None => {
+                let guard = cvar.wait(seq).unwrap_or_else(|e| e.into_inner());
+                seen = *guard;
+            }
+        }
+    }
+}
+
+/// Flush all pending in-memory message activity updates to disk immediately.
+#[allow(dead_code)]
+pub fn flush() {
+    let _ = flush_entries(false);
 }
 
 fn select_log(tab: &mut TabActivity, path: &Path) {
@@ -111,15 +319,13 @@ fn activity_path(root: &Path, session: &str) -> PathBuf {
         .join(session)
         .join("message-activity.json")
 }
+#[cfg(test)]
 fn path(session: &str) -> Result<PathBuf> {
     Ok(activity_path(&super::root()?, session))
 }
+#[cfg(test)]
 fn read(session: &str) -> Result<Activity> {
     Ok(super::read_json(&path(session)?)?.unwrap_or_default())
-}
-fn write(session: &str, activity: &Activity) -> Result<()> {
-    super::session_dir(session)?;
-    super::write_json(&path(session)?, activity)
 }
 
 /// Use the index's forward-compatible metadata map, so older writers preserve
@@ -129,8 +335,7 @@ pub fn project(sessions: &mut [SessionEntry]) -> Result<()> {
 }
 fn project_at(root: &Path, sessions: &mut [SessionEntry]) -> Result<()> {
     for session in sessions {
-        let activity: Activity =
-            super::read_json(&activity_path(root, &session.id))?.unwrap_or_default();
+        let activity = read_cached(&activity_path(root, &session.id))?;
         let matches = |tab: &index::TabEntry, saved: &TabActivity| {
             let expected = tab.unknown.get("resetLogId").and_then(serde_json::Value::as_str)
                 .map(|id| format!("{}.reset-{id}.jsonl", tab.id));
@@ -205,11 +410,57 @@ pub fn record(event: &AgentEvent) -> Result<Option<SessionEntry>> {
     {
         return Ok(None);
     }
-    let changed = {
-        let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let mut activity = read(&event.session_id)?;
-        let tab = activity.tabs.entry(event.tab_id.clone()).or_default();
-        let log = super::log_path_in(&super::root()?, &event.session_id, &event.tab_id)?;
+    let root = super::root()?;
+    let sidecar = activity_path(&root, &event.session_id);
+    let log = super::log_path_in(&root, &event.session_id, &event.tab_id)?;
+
+    // Ensure the session's activity is warm in memory (never holding CACHE across disk I/O).
+    // Retry if a clean entry is evicted by another thread between the stamp check and re-lock.
+    let (publish, should_flush) = loop {
+        let needs_load = {
+            let cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+            match cache.entries.get(&sidecar) {
+                Some(entry) if entry.dirty => None,
+                Some(entry) => Some(Some(entry.disk_stamp)),
+                None => Some(None),
+            }
+        };
+        let loaded = match needs_load {
+            None => None,
+            Some(Some(saved_stamp)) if super::file_stamp(&sidecar)? == saved_stamp => None,
+            Some(_) => Some(read_disk_activity(&sidecar)?),
+        };
+
+        let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        let tick = cache.next_tick();
+        if let Some((disk_activity, disk_stamp)) = loaded {
+            match cache.entries.get_mut(&sidecar) {
+                Some(entry) if !entry.dirty => {
+                    entry.activity = disk_activity;
+                    entry.disk_stamp = disk_stamp;
+                }
+                Some(_) => {}
+                None => {
+                    cache.evict_if_needed(&sidecar);
+                    cache.entries.insert(
+                        sidecar.clone(),
+                        CachedActivity {
+                            activity: disk_activity,
+                            disk_stamp,
+                            dirty: false,
+                            dirty_since: None,
+                            generation: 0,
+                            last_used: tick,
+                        },
+                    );
+                }
+            }
+        }
+        let Some(entry) = cache.entries.get_mut(&sidecar) else {
+            continue;
+        };
+        entry.last_used = tick;
+        let tab = entry.activity.tabs.entry(event.tab_id.clone()).or_default();
         select_log(tab, &log);
         let before = tab.live.assistant;
         let message = tab.live.message(event);
@@ -220,13 +471,19 @@ pub fn record(event: &AgentEvent) -> Result<Option<SessionEntry>> {
         tab.has_messages |= message;
         let tab_changed = advance(&mut tab.last_message_at, time.clone()) || presence_changed;
         let flow_changed = before != tab.live.assistant;
-        let changed = advance(&mut activity.last_message_at, time);
-        if changed || tab_changed || flow_changed {
-            write(&event.session_id, &activity)?;
+        let changed = advance(&mut entry.activity.last_message_at, time);
+        let mutated = changed || tab_changed || flow_changed;
+        if mutated {
+            entry.dirty = true;
+            entry.dirty_since.get_or_insert_with(Instant::now);
+            entry.generation = entry.generation.wrapping_add(1);
         }
-        changed || tab_changed
+        break (changed || tab_changed, mutated);
     };
-    if changed {
+    if should_flush {
+        notify_flusher();
+    }
+    if publish {
         Ok(Some(index::get(&event.session_id)?))
     } else {
         Ok(None)
@@ -236,8 +493,8 @@ pub fn record(event: &AgentEvent) -> Result<Option<SessionEntry>> {
 /// A reset selected a complete new log. Rebuild its small projection in one
 /// write; a crash before this completes is detected by the log generation.
 pub(crate) fn replaced(session: &str, tab_id: &str, events: &[AgentEvent]) -> Result<()> {
-    let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let mut activity = read(session)?;
+    let root = super::root()?;
+    let sidecar = activity_path(&root, session);
     let log = super::log_path(session, tab_id)?;
     let mut tab = TabActivity::default();
     select_log(&mut tab, &log);
@@ -249,9 +506,26 @@ pub(crate) fn replaced(session: &str, tab_id: &str, events: &[AgentEvent]) -> Re
         }
     }
     tab.offset = std::fs::metadata(log)?.len();
+    let mut activity = read_cached(&sidecar)?;
     activity.tabs.insert(tab_id.into(), tab);
     activity.last_message_at = activity.tabs.values().filter_map(|tab| tab.last_message_at.clone()).max();
-    write(session, &activity)
+    let stamp = write_sidecar(&sidecar, &activity)?;
+    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    let tick = cache.next_tick();
+    cache.evict_if_needed(&sidecar);
+    let gen = cache.entries.get(&sidecar).map_or(1, |e| e.generation.wrapping_add(1));
+    cache.entries.insert(
+        sidecar,
+        CachedActivity {
+            activity,
+            disk_stamp: stamp,
+            dirty: false,
+            dirty_since: None,
+            generation: gen,
+            last_used: tick,
+        },
+    );
+    Ok(())
 }
 
 /// One bounded batch per tab; persistent offsets make later launches idempotent.
@@ -262,9 +536,8 @@ fn scan(session: &str, tab_id: &str) -> Result<(bool, bool)> {
     scan_at(&super::root()?, session, tab_id)
 }
 fn scan_at(root: &Path, session: &str, tab_id: &str) -> Result<(bool, bool)> {
-    let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let sidecar = activity_path(root, session);
-    let mut activity: Activity = super::read_json(&sidecar)?.unwrap_or_default();
+    let mut activity = read_cached(&sidecar)?;
     let tab = activity.tabs.entry(tab_id.into()).or_default();
     let log = super::log_path_in(root, session, tab_id)?;
     select_log(tab, &log);
@@ -282,7 +555,22 @@ fn scan_at(root: &Path, session: &str, tab_id: &str) -> Result<(bool, bool)> {
     }
     if tab.offset == length {
         if migrate_presence {
-            super::write_json(&sidecar, &activity)?;
+            let stamp = write_sidecar(&sidecar, &activity)?;
+            let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+            let tick = cache.next_tick();
+            let gen = cache.entries.get(&sidecar).map_or(1, |e| e.generation.wrapping_add(1));
+            cache.evict_if_needed(&sidecar);
+            cache.entries.insert(
+                sidecar,
+                CachedActivity {
+                    activity,
+                    disk_stamp: stamp,
+                    dirty: false,
+                    dirty_since: None,
+                    generation: gen,
+                    last_used: tick,
+                },
+            );
         }
         return Ok((false, false));
     }
@@ -318,10 +606,56 @@ fn scan_at(root: &Path, session: &str, tab_id: &str) -> Result<(bool, bool)> {
             changed |= advance(&mut tab.last_message_at, time);
         }
     }
-    let time = tab.last_message_at.clone();
-    let more = tab.offset < length && line.ends_with('\n');
-    changed |= advance(&mut activity.last_message_at, time);
-    super::write_json(&sidecar, &activity)?;
+    let scanned_tab = tab.clone();
+    let more = scanned_tab.offset < length && line.ends_with('\n');
+    // Merge scanned history fields back into the latest cached entry so concurrent
+    // live `record()` updates to `live` or newer `last_message_at` are never lost.
+    let (merged, gen) = {
+        let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        let tick = cache.next_tick();
+        if let Some(entry) = cache.entries.get_mut(&sidecar) {
+            entry.last_used = tick;
+            let live_tab = entry.activity.tabs.entry(tab_id.into()).or_default();
+            if live_tab.log_file == scanned_tab.log_file {
+                live_tab.history = scanned_tab.history;
+                live_tab.offset = scanned_tab.offset;
+                live_tab.presence_scanned = scanned_tab.presence_scanned;
+                live_tab.has_messages |= scanned_tab.has_messages;
+                advance(&mut live_tab.last_message_at, scanned_tab.last_message_at);
+            } else {
+                *live_tab = scanned_tab;
+            }
+            let tab_time = live_tab.last_message_at.clone();
+            changed |= advance(&mut entry.activity.last_message_at, tab_time);
+            entry.generation = entry.generation.wrapping_add(1);
+            (entry.activity.clone(), entry.generation)
+        } else {
+            let tab_time = scanned_tab.last_message_at.clone();
+            changed |= advance(&mut activity.last_message_at, tab_time);
+            cache.evict_if_needed(&sidecar);
+            cache.entries.insert(
+                sidecar.clone(),
+                CachedActivity {
+                    activity: activity.clone(),
+                    disk_stamp: None,
+                    dirty: true,
+                    dirty_since: Some(Instant::now()),
+                    generation: 1,
+                    last_used: tick,
+                },
+            );
+            (activity, 1)
+        }
+    };
+    let stamp = write_sidecar(&sidecar, &merged)?;
+    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(entry) = cache.entries.get_mut(&sidecar) {
+        if entry.generation == gen {
+            entry.dirty = false;
+            entry.dirty_since = None;
+            entry.disk_stamp = stamp;
+        }
+    }
     Ok((changed, more))
 }
 
@@ -518,6 +852,7 @@ mod tests {
         assert_eq!(published.tabs[0].unknown[PRESENCE_FIELD], true);
         assert!(!published.unknown.contains_key(FIELD));
         assert!(record(&message).unwrap().is_none());
+        flush();
         let saved = std::fs::read_to_string(path("synthetic").unwrap()).unwrap();
         assert!(!saved.contains("Legacy prompt"));
     }
@@ -561,7 +896,8 @@ mod tests {
         .unwrap();
         assert!(record(&prompt(3, 3)).unwrap().is_none());
         assert_eq!(index::get("synthetic").unwrap().unknown[FIELD], at(4));
-        // No process cache: a fresh disk read projects the same time.
+        // After flush, a fresh disk read projects the same time.
+        flush();
         assert_eq!(read("synthetic").unwrap().last_message_at, Some(at(4)));
         let saved = std::fs::read_to_string(path("synthetic").unwrap()).unwrap();
         assert!(!saved.contains("Synthetic prompt"));
@@ -625,12 +961,14 @@ mod tests {
         assert!(record(&event(2, Some(&at(2)), delta.clone()))
             .unwrap()
             .is_some());
+        flush();
         let saved = std::fs::read(path("synthetic").unwrap()).unwrap();
         for seq in 3..20 {
             assert!(record(&event(seq, Some(&at(2)), delta.clone()))
                 .unwrap()
                 .is_none());
         }
+        flush();
         assert_eq!(std::fs::read(path("synthetic").unwrap()).unwrap(), saved);
         assert!(record(&reply(20, 2)).unwrap().is_none());
         let completed =
@@ -720,5 +1058,84 @@ mod tests {
         .is_none());
         assert!(!index::get("synthetic").unwrap().unknown.contains_key(FIELD));
         assert_eq!(canonical("2026-10-02T04:00:00+04:00"), Some(at(2)));
+    }
+
+    #[test]
+    fn streaming_deltas_hit_in_memory_cache_and_index_get_reads_only_requested_session() {
+        let _home = super::super::temp_home();
+        // Seed multiple sessions to verify index::get only projects the requested one.
+        let sessions: Vec<SessionEntry> = ["s1", "s2", "s3", "s4"].iter().map(|id| {
+            serde_json::from_value(json!({
+                "id": id, "projectPath": "/synthetic", "cwd": "/synthetic", "title": id,
+                "created": "2026-10-01T00:00:00Z", "modified": "2026-10-01T00:00:00Z",
+                "tabs": [{"id": "tab", "harness": "claude", "created": "2026-10-01T00:00:00Z"}]
+            })).unwrap()
+        }).collect();
+        index::save(&sessions).unwrap();
+
+        TEST_DISK_READS.with(|c| c.set(0));
+        let _ = index::get("s1").unwrap();
+        assert_eq!(TEST_DISK_READS.with(|c| c.get()), 1, "index::get must only read the requested session's sidecar");
+
+        // Record a prompt + 100 streaming text deltas: zero additional sidecar reads and no sync write storm.
+        let mut p = prompt(1, 5);
+        p.session_id = "s1".into();
+        assert!(record(&p).unwrap().is_some());
+        let delta = json!({"type":"delta","delta":"text_delta","block":{"messageId":"m","index":0},"text":"chunk"});
+        let mut first_delta = event(2, Some(&at(6)), delta.clone());
+        first_delta.session_id = "s1".into();
+        assert!(record(&first_delta).unwrap().is_some());
+
+        TEST_DISK_READS.with(|c| c.set(0));
+        super::super::TEST_LOG_PATH_PARSES.with(|c| c.set(0));
+        for seq in 3..103 {
+            let mut ev = event(seq, Some(&at(6)), delta.clone());
+            ev.session_id = "s1".into();
+            assert!(record(&ev).unwrap().is_none());
+        }
+        assert_eq!(TEST_DISK_READS.with(|c| c.get()), 0, "streaming deltas must not re-read message-activity.json");
+        assert_eq!(super::super::TEST_LOG_PATH_PARSES.with(|c| c.get()), 0, "streaming deltas must not re-parse index.json");
+
+        // In-memory projection is immediately visible before flush.
+        assert_eq!(index::get("s1").unwrap().unknown[FIELD], at(6));
+        flush();
+        assert_eq!(read("s1").unwrap().last_message_at, Some(at(6)));
+    }
+
+    #[test]
+    fn record_handles_eviction_under_cache_pressure_without_panicking() {
+        let _home = super::super::temp_home();
+        seed();
+        assert!(record(&prompt(1, 2)).unwrap().is_some());
+        flush();
+
+        // Populate more than MAX_CACHE_ENTRIES clean sessions so "synthetic" is evicted,
+        // and race concurrent cache evictions against repeated record() calls.
+        let root = super::super::root().unwrap();
+        let pressure_root = root.clone();
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop_evictor = Arc::clone(&stop);
+        let evictor = std::thread::spawn(move || {
+            let mut i = 0usize;
+            while !stop_evictor.load(std::sync::atomic::Ordering::Relaxed) {
+                let sidecar = activity_path(&pressure_root, &format!("evict-{i}"));
+                let _ = read_cached(&sidecar);
+                i = (i + 1) % (MAX_CACHE_ENTRIES + 64);
+            }
+        });
+
+        for i in 0..(MAX_CACHE_ENTRIES + 32) {
+            let _ = read_cached(&activity_path(&root, &format!("fill-{i}")));
+        }
+        for seq in 2..40 {
+            let _ = record(&reply(seq, 3 + (seq as u32 % 5))).unwrap();
+            flush();
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        evictor.join().unwrap();
+
+        flush();
+        assert_eq!(index::get("synthetic").unwrap().unknown[FIELD], at(7));
+        assert_eq!(read("synthetic").unwrap().last_message_at, Some(at(7)));
     }
 }

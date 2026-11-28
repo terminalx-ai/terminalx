@@ -3,9 +3,10 @@
 //! permission to set it. No scripts are executed by this module: [`scripts`]
 //! only says which setup and archive commands a repository's hooks may run.
 use crate::paths::Canonical;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::sync::{LazyLock, Mutex};
+use std::time::{Duration, Instant};
 use anyhow::{bail, ensure, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -114,6 +115,7 @@ pub struct Trust {
     pub keys: Vec<String>,
 }
 
+#[derive(Clone)]
 pub struct Repository {
     pub root: PathBuf,
     identity: String,
@@ -121,14 +123,34 @@ pub struct Repository {
     project: PathBuf,
 }
 
+const MAX_REPO_CACHE: usize = 128;
+const REPO_CACHE_TTL: Duration = Duration::from_secs(30);
+
+struct CachedRepo {
+    repo: Repository,
+    dot_git: PathBuf,
+    dot_git_stamp: Option<super::FileStamp>,
+    cached_at: Instant,
+    last_used: u64,
+}
+
+#[derive(Default)]
+struct RepoCache {
+    tick: u64,
+    entries: HashMap<PathBuf, CachedRepo>,
+}
+
+static REPO_CACHE: LazyLock<Mutex<RepoCache>> = LazyLock::new(Default::default);
+
+#[cfg(test)]
+thread_local! {
+    static TEST_REPO_GIT_SPAWNS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 /// No hooks, fsmonitor, inherited Git discovery variables or shell are used to
 /// discover the checkout. All workspaces inherit the primary checkout's files.
 fn git(root: &Path, args: &[&str]) -> Result<String> {
     Ok(git_output(root, args)?.trim().into())
-}
-/// A path Git printed, without only its line ending (see `git::path_line`).
-fn git_path(root: &Path, args: &[&str]) -> Result<PathBuf> {
-    Ok(PathBuf::from(crate::git::path_line(&git_output(root, args)?)))
 }
 fn git_output(root: &Path, args: &[&str]) -> Result<String> {
     let output = std::process::Command::new(crate::binpath::resolve("git").unwrap_or_else(|| PathBuf::from("git")))
@@ -139,15 +161,74 @@ fn git_output(root: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8(output.stdout)?)
 }
 pub fn repository(path: &Path) -> Result<Repository> {
-    let checkout = git_path(path, &["rev-parse", "--show-toplevel"])?.canonical()?;
-    let common = git_path(&checkout, &["rev-parse", "--path-format=absolute", "--git-common-dir"])?.canonical()?;
+    let project = path.canonical().unwrap_or_else(|_| path.to_path_buf());
+    let cached = {
+        let mut cache = REPO_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        cache.tick = cache.tick.wrapping_add(1);
+        let tick = cache.tick;
+        cache.entries.get_mut(&project).and_then(|entry| {
+            if entry.cached_at.elapsed() < REPO_CACHE_TTL {
+                entry.last_used = tick;
+                Some((entry.repo.clone(), entry.dot_git.clone(), entry.dot_git_stamp))
+            } else {
+                None
+            }
+        })
+    };
+    if let Some((repo, dot_git, saved_stamp)) = cached {
+        if saved_stamp.is_some()
+            && super::file_stamp(&dot_git).ok().flatten() == saved_stamp
+            && repo.root.exists()
+        {
+            return Ok(repo);
+        }
+    }
+
+    #[cfg(test)]
+    TEST_REPO_GIT_SPAWNS.with(|c| c.set(c.get() + 1));
+    let rev_parse = git_output(path, &["rev-parse", "--path-format=absolute", "--show-toplevel", "--git-common-dir"])?;
+    let mut lines = rev_parse.split('\n');
+    let checkout_line = lines.next().context("Cannot read repository configuration metadata.")?;
+    let common_line = lines.next().context("Cannot read repository configuration metadata.")?;
+    let checkout = PathBuf::from(crate::git::path_line(checkout_line)).canonical()?;
+    let common = PathBuf::from(crate::git::path_line(common_line)).canonical()?;
+    let dot_git = checkout.join(".git");
     // Configuration belongs to the primary checkout, including local overrides.
     // A linked workspace must not silently lose ignored local values or adopt
     // executable settings from an arbitrary branch it checks out.
-    let worktrees = git(&checkout, &["worktree", "list", "--porcelain", "-z"])?;
-    let primary = worktrees.split('\0').find_map(|line| line.strip_prefix("worktree ")).context("Repository has no primary checkout.")?;
-    let root = PathBuf::from(primary).canonical()?;
-    Ok(Repository { root, identity: common.to_string_lossy().into_owned(), project: path.canonical().unwrap_or_else(|_| path.to_path_buf()) })
+    let root = if dot_git.is_dir() && dot_git.canonical().ok().as_ref() == Some(&common) {
+        checkout
+    } else {
+        #[cfg(test)]
+        TEST_REPO_GIT_SPAWNS.with(|c| c.set(c.get() + 1));
+        let worktrees = git(&checkout, &["worktree", "list", "--porcelain", "-z"])?;
+        let primary = worktrees.split('\0').find_map(|line| line.strip_prefix("worktree ")).context("Repository has no primary checkout.")?;
+        PathBuf::from(primary).canonical()?
+    };
+    let repo = Repository { root, identity: common.to_string_lossy().into_owned(), project: project.clone() };
+    let dot_git_stamp = super::file_stamp(&dot_git).ok().flatten();
+    if dot_git_stamp.is_some() {
+        let mut cache = REPO_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        cache.tick = cache.tick.wrapping_add(1);
+        let tick = cache.tick;
+        if !cache.entries.contains_key(&project) && cache.entries.len() >= MAX_REPO_CACHE {
+            if let Some(oldest) = cache.entries.iter().min_by_key(|(_, v)| v.last_used).map(|(k, _)| k.clone()) {
+                cache.entries.remove(&oldest);
+            }
+        }
+        cache.entries.insert(project, CachedRepo {
+            repo: repo.clone(),
+            dot_git,
+            dot_git_stamp,
+            cached_at: Instant::now(),
+            last_used: tick,
+        });
+    }
+    Ok(repo)
+}
+
+pub(super) fn repository_identity(path: &Path) -> Option<String> {
+    repository(path).ok().map(|repo| repo.identity)
 }
 fn digest(bytes: &[u8]) -> String { format!("{:x}", Sha256::digest(bytes)) }
 /// What trust is bound to. A file that sets scripts gets a hash no earlier
@@ -157,6 +238,16 @@ fn trust_hash(bytes: &[u8], document: &Map<String, Value>) -> String {
     if document.contains_key(SETUP_SCRIPT) || document.contains_key(ARCHIVE_SCRIPT) {
         digest(&[b"terminalx-trust-scripts-v1\0".as_slice(), bytes].concat())
     } else { digest(bytes) }
+}
+fn local_trust_key(identity: &str) -> String { format!("local:{identity}") }
+fn local_trust_hash(bytes: &[u8]) -> String {
+    digest(&[b"terminalx-trust-local-v1\0".as_slice(), bytes].concat())
+}
+fn combined_trust_hash(shared: &str, local: &str) -> String {
+    digest(format!("terminalx-trust-combined-v1\0{shared}\0{local}").as_bytes())
+}
+fn key_requires_trust(key: &str) -> bool {
+    REGISTRY.iter().any(|r| r.requires_trust && (key == r.key || key.starts_with(&format!("{}.", r.key))))
 }
 fn object(bytes: &[u8]) -> Result<Map<String, Value>> {
     serde_json::from_slice::<Value>(bytes).ok().and_then(|v| v.as_object().cloned())
@@ -264,10 +355,24 @@ impl Store {
         super::managed_configuration::read()
     }
     fn home(&self) -> Result<Directory> { Directory::open(&self.home, false)?.context("Settings directory is missing.") }
-    fn trusted(&self, repository: &Repository, hash: &str) -> bool {
+    fn trusted_key(&self, key: &str, hash: &str) -> bool {
         self.home().and_then(|dir| dir.read(TRUST)).ok().flatten()
             .and_then(|bytes| serde_json::from_slice::<BTreeMap<String, String>>(&bytes).ok())
-            .is_some_and(|trust| trust.get(&repository.identity).is_some_and(|saved| saved == hash))
+            .is_some_and(|trust| trust.get(key).is_some_and(|saved| saved == hash))
+    }
+    fn trusted(&self, repository: &Repository, hash: &str) -> bool {
+        self.trusted_key(&repository.identity, hash)
+    }
+    fn record_trust_entries(&self, entries: &[(&str, &str)]) -> Result<()> {
+        let home = self.home()?;
+        let mut trust: BTreeMap<String, String> = match home.read(TRUST)? {
+            Some(bytes) => serde_json::from_slice(&bytes).context("Cannot read repository trust decisions.")?,
+            None => BTreeMap::new(),
+        };
+        for (key, hash) in entries {
+            trust.insert((*key).to_string(), (*hash).to_string());
+        }
+        home.write(TRUST, &serde_json::to_vec_pretty(&trust)?)
     }
     pub fn resolve(&self, repository: Option<&Repository>) -> Result<Resolution> {
         self.resolve_layers(repository).map(|(resolution, _)| resolution)
@@ -292,7 +397,8 @@ impl Store {
                 Err(_) => record_warning(&mut warnings, Layer::User, "file (malformed)"),
             }
         }
-        let mut trust = None;
+        let mut shared_trust: Option<(String, bool)> = None;
+        let mut local_trust: Option<(String, bool)> = None;
         if let Some(repository) = repository {
             let saved = self.saved_scripts(repository)?;
             let user = [(SETUP_SCRIPT, (!saved.setup.trim().is_empty()).then(|| json!(saved.setup))),
@@ -310,7 +416,8 @@ impl Store {
                     Ok(shared) => {
                         let hash = trust_hash(&bytes, &shared);
                         apply(&mut values, &mut layers, shared, Layer::RepositoryShared, &mut warnings)?;
-                        trust = Some(Trust { required: !self.trusted(repository, &hash), hash, keys: Vec::new() });
+                        let untrusted = !self.trusted(repository, &hash);
+                        shared_trust = Some((hash, untrusted));
                     }
                     Err(_) => record_warning(&mut warnings, Layer::RepositoryShared, "file (malformed)"),
                 }
@@ -319,34 +426,86 @@ impl Store {
                 // An accidentally committed 'local' file is still untrusted input.
                 ensure!(git(&repository.root, &["ls-files", "--", ".terminalx/settings.local.json"])?.is_empty(), "Repository local settings must not be tracked by Git.");
                 ensure!(git(&repository.root, &["check-ignore", "--no-index", ".terminalx/settings.local.json"]).is_ok(), "Repository local settings must be ignored by Git.");
-                apply(&mut values, &mut layers, object(&bytes)?, Layer::RepositoryLocal, &mut warnings)?;
+                let local = object(&bytes)?;
+                let hash = local_trust_hash(&bytes);
+                apply(&mut values, &mut layers, local, Layer::RepositoryLocal, &mut warnings)?;
+                let untrusted = !self.trusted_key(&local_trust_key(&repository.identity), &hash);
+                local_trust = Some((hash, untrusted));
             }
         }
         if let Some(bytes) = self.managed()? {
             apply(&mut values, &mut layers, object(&bytes).context("Invalid managed configuration; refusing to bypass policy.")?, Layer::Managed, &mut warnings)?;
         }
-        if let Some(trust) = &mut trust {
-            trust.keys = values.iter().filter(|(key, value)| value.source == Layer::RepositoryShared && REGISTRY.iter().any(|r| r.requires_trust && (*key == r.key || key.starts_with(&format!("{}.", r.key)))))
-                .map(|(key, _)| key.clone()).collect();
-            trust.required &= !trust.keys.is_empty();
-        }
+        let shared_keys: Vec<String> = values.iter()
+            .filter(|(key, value)| value.source == Layer::RepositoryShared && key_requires_trust(key))
+            .map(|(key, _)| key.clone())
+            .collect();
+        let local_keys: Vec<String> = values.iter()
+            .filter(|(key, value)| value.source == Layer::RepositoryLocal && key_requires_trust(key))
+            .map(|(key, _)| key.clone())
+            .collect();
+        let shared_needs = shared_trust.as_ref().is_some_and(|(_, untrusted)| *untrusted) && !shared_keys.is_empty();
+        let local_needs = local_trust.as_ref().is_some_and(|(_, untrusted)| *untrusted) && !local_keys.is_empty();
+        let trust = match (shared_needs, local_needs) {
+            (true, true) => {
+                let (s_hash, _) = shared_trust.unwrap();
+                let (l_hash, _) = local_trust.unwrap();
+                let mut keys = shared_keys;
+                keys.extend(local_keys);
+                keys.sort();
+                keys.dedup();
+                Some(Trust { hash: combined_trust_hash(&s_hash, &l_hash), required: true, keys })
+            }
+            (true, false) => {
+                let (s_hash, _) = shared_trust.unwrap();
+                Some(Trust { hash: s_hash, required: true, keys: shared_keys })
+            }
+            (false, true) => {
+                let (l_hash, _) = local_trust.unwrap();
+                Some(Trust { hash: l_hash, required: true, keys: local_keys })
+            }
+            (false, false) => {
+                if let Some((s_hash, _)) = shared_trust {
+                    Some(Trust { hash: s_hash, required: false, keys: shared_keys })
+                } else {
+                    local_trust.map(|(l_hash, _)| Trust { hash: l_hash, required: false, keys: local_keys })
+                }
+            }
+        };
         Ok((Resolution { values, registry: REGISTRY, warnings, trust }, layers))
     }
 
     /// Called only after the native consent dialog answered affirmatively.
-    /// Re-read the file: approving yesterday's bytes cannot trust today's commands.
+    /// Re-read the file(s): approving yesterday's bytes cannot trust today's commands.
     pub fn trust(&self, repository: &Repository, expected_hash: &str) -> Result<()> {
         super::transaction::run(&self.home.join("configuration.lock"), Duration::from_secs(10), || {
-            let dir = Directory::open(&repository.root.join(".terminalx"), false)?.context("Shared configuration disappeared.")?;
-            let bytes = dir.read(SHARED)?.context("Shared configuration disappeared.")?;
-            ensure!(trust_hash(&bytes, &object(&bytes)?) == expected_hash, "Shared configuration changed. Review it again.");
-            let home = self.home()?;
-            let mut trust: BTreeMap<String, String> = match home.read(TRUST)? {
-                Some(bytes) => serde_json::from_slice(&bytes).context("Cannot read repository trust decisions.")?,
-                None => BTreeMap::new(),
+            let dir = Directory::open(&repository.root.join(".terminalx"), false)?.context("Repository configuration disappeared.")?;
+            let shared_hash = match dir.read(SHARED)? {
+                Some(bytes) => Some(trust_hash(&bytes, &object(&bytes)?)),
+                None => None,
             };
-            trust.insert(repository.identity.clone(), expected_hash.into());
-            home.write(TRUST, &serde_json::to_vec_pretty(&trust)?)
+            let local_hash = match dir.read(LOCAL)? {
+                Some(bytes) => {
+                    ensure!(git(&repository.root, &["ls-files", "--", ".terminalx/settings.local.json"])?.is_empty(), "Repository local settings must not be tracked by Git.");
+                    ensure!(git(&repository.root, &["check-ignore", "--no-index", ".terminalx/settings.local.json"]).is_ok(), "Repository local settings must be ignored by Git.");
+                    let _ = object(&bytes)?;
+                    Some(local_trust_hash(&bytes))
+                }
+                None => None,
+            };
+            let local_key = local_trust_key(&repository.identity);
+            if let (Some(s), Some(l)) = (shared_hash.as_deref(), local_hash.as_deref()) {
+                if combined_trust_hash(s, l) == expected_hash {
+                    return self.record_trust_entries(&[(&repository.identity, s), (&local_key, l)]);
+                }
+            }
+            if shared_hash.as_deref() == Some(expected_hash) {
+                return self.record_trust_entries(&[(&repository.identity, expected_hash)]);
+            }
+            if local_hash.as_deref() == Some(expected_hash) {
+                return self.record_trust_entries(&[(&local_key, expected_hash)]);
+            }
+            bail!("Repository configuration changed. Review it again.")
         })
     }
 
@@ -370,6 +529,13 @@ impl Store {
                 let dir = Directory::open(&repository.root.join(".terminalx"), true)?.context("Configuration directory is missing.")?;
                 if layer == Layer::RepositoryLocal {
                     ensure!(git(&repository.root, &["ls-files", "--", ".terminalx/settings.local.json"])?.is_empty(), "Local configuration is tracked. Remove it from Git before saving.");
+                    if let Some(existing) = dir.read(LOCAL)? {
+                        let existing_doc = object(&existing)?;
+                        let has_sensitive = existing_doc.keys().any(|k| key_requires_trust(k));
+                        if has_sensitive && !self.trusted_key(&local_trust_key(&repository.identity), &local_trust_hash(&existing)) {
+                            bail!("Local repository settings have unreviewed changes. Review and trust them before saving.");
+                        }
+                    }
                     let mut ignore = String::from_utf8(dir.read(".gitignore")?.unwrap_or_default())?;
                     if !ignore.lines().any(|line| line == "/settings.local.json") {
                         ignore.push_str("\n/settings.local.json\n");
@@ -390,14 +556,29 @@ impl Store {
                 Layer::RepositoryLocal => schema::add_reference(&mut document, schema::REPOSITORY_SCHEMA_REFERENCE),
                 _ => {}
             }
-            dir.write(file, &serde_json::to_vec_pretty(&document)?)
+            let written = serde_json::to_vec_pretty(&document)?;
+            dir.write(file, &written)?;
+            // Explicit Settings UI writes to settings.local.json are user-authored;
+            // bind trust to the exact bytes written so external/agent edits on disk
+            // still invalidate trust and require explicit review.
+            if layer == Layer::RepositoryLocal {
+                if let Some(repository) = repository {
+                    let local_key = local_trust_key(&repository.identity);
+                    let hash = local_trust_hash(&written);
+                    self.record_trust_entries(&[(&local_key, &hash)])?;
+                }
+            }
+            Ok(())
         })
     }
 }
 impl Resolution {
     pub(super) fn refresh_trust(&mut self) {
         if let Some(trust) = &mut self.trust {
-            trust.keys.retain(|key| self.values.get(key).is_some_and(|value| value.source == Layer::RepositoryShared));
+            trust.keys.retain(|key| self.values.get(key).is_some_and(|value| {
+                value.source == Layer::RepositoryShared
+                    || (value.source == Layer::RepositoryLocal && !value.redacted)
+            }));
             trust.required &= !trust.keys.is_empty();
         }
     }
@@ -461,8 +642,9 @@ impl Resolution {
     fn script(&self, key: &str) -> Result<String> {
         let Some(value) = self.values.get(key) else { return Ok(String::new()) };
         let text = value.value.as_str().unwrap_or_default().to_string();
+        let file = if value.source == Layer::RepositoryLocal { ".terminalx/settings.local.json" } else { ".terminalx/settings.json" };
         ensure!(text.trim().is_empty() || !self.trust.as_ref().is_some_and(|trust| trust.required && trust.keys.iter().any(|k| k == key)),
-            "This repository's .terminalx/settings.json sets a {} script that is not trusted yet. Open Settings → Projects → Scripts and choose Review and trust.",
+            "This repository's {file} sets a {} script that is not trusted yet. Open Settings → Projects → Scripts and choose Review and trust.",
             if key == SETUP_SCRIPT { "setup" } else { "archive" });
         Ok(text)
     }
@@ -503,6 +685,93 @@ pub fn branch_prefix(project: &Path) -> Result<String> {
     let resolved = view(Some(project.to_str().context("Repository path must be UTF-8.")?))?;
     resolved.require_trust()?;
     resolved.values["branchPrefix"].value.as_str().map(str::to_owned).context("Invalid branch prefix.")
+}
+
+/// Relative paths inside a checkout whose contents can execute hooks, MCP
+/// servers, or commands when Claude Code or Codex trusts the repository.
+const AGENT_TRUST_FILES: &[&str] = &[
+    ".claude/settings.json",
+    ".claude/settings.local.json",
+    ".mcp.json",
+    ".codex/config.toml",
+    ".codex/hooks.json",
+    ".codex/config.json",
+];
+
+fn agent_trust_identity_and_roots(cwd: &Path) -> (String, Vec<PathBuf>) {
+    let canonical_cwd = cwd.canonical().unwrap_or_else(|_| cwd.to_path_buf());
+    if let Ok(repo) = repository(cwd) {
+        let mut roots = vec![repo.root.clone()];
+        if canonical_cwd != repo.root {
+            roots.push(canonical_cwd);
+        }
+        (format!("agent:{}", repo.identity), roots)
+    } else {
+        (format!("agent:dir:{}", canonical_cwd.to_string_lossy()), vec![canonical_cwd])
+    }
+}
+
+/// Compute a deterministic SHA-256 digest binding repository agent trust to
+/// the exact contents (or absence) of all Claude/Codex repo config files in
+/// the repository root and active checkout.
+pub fn agent_trust_hash(cwd: &Path) -> Result<String> {
+    let (identity, roots) = agent_trust_identity_and_roots(cwd);
+    let mut hasher = Sha256::new();
+    hasher.update(b"terminalx-agent-trust-v1\0");
+    hasher.update((identity.len() as u64).to_le_bytes());
+    hasher.update(identity.as_bytes());
+    for root in &roots {
+        hasher.update(b"\x01root\0");
+        for rel in AGENT_TRUST_FILES {
+            hasher.update(rel.as_bytes());
+            hasher.update(b"\0");
+            let full = root.join(rel);
+            match std::fs::symlink_metadata(&full) {
+                Ok(meta) if meta.file_type().is_symlink() => {
+                    hasher.update(b"S");
+                    let target = std::fs::read_link(&full).unwrap_or_default();
+                    let target_str = target.to_string_lossy();
+                    hasher.update((target_str.len() as u64).to_le_bytes());
+                    hasher.update(target_str.as_bytes());
+                }
+                Ok(meta) if meta.is_file() => {
+                    let bytes = std::fs::read(&full).with_context(|| format!("read {rel} for agent trust hash"))?;
+                    hasher.update(b"F");
+                    hasher.update((bytes.len() as u64).to_le_bytes());
+                    hasher.update(&bytes);
+                }
+                Ok(_) => {
+                    hasher.update(b"O");
+                }
+                Err(_) => {
+                    hasher.update(b"N");
+                }
+            }
+        }
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+/// Whether the user has explicitly granted hash-bound trust for Claude/Codex
+/// agent configuration in `cwd` (and no `.claude/*`, `.mcp.json`, or
+/// `.codex/*` file has changed since approval).
+pub fn is_agent_trusted(cwd: &Path) -> bool {
+    let Ok(store) = Store::current() else { return false };
+    let (key, _) = agent_trust_identity_and_roots(cwd);
+    let Ok(hash) = agent_trust_hash(cwd) else { return false };
+    store.trusted_key(&key, &hash)
+}
+
+/// Record explicit hash-bound user trust for Claude/Codex agent config in `cwd`.
+#[allow(dead_code)]
+pub fn approve_agent_trust(cwd: &Path) -> Result<String> {
+    let store = Store::current()?;
+    super::transaction::run(&store.home.join("configuration.lock"), Duration::from_secs(10), || {
+        let (key, _) = agent_trust_identity_and_roots(cwd);
+        let hash = agent_trust_hash(cwd)?;
+        store.record_trust_entries(&[(&key, &hash)])?;
+        Ok(hash)
+    })
 }
 
 /// A resolved value and every layer that supplies its key, highest first

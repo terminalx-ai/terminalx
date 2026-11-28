@@ -413,6 +413,10 @@ fn check(automation: &Automation, precheck: &AutomationPrecheck) -> PrecheckTria
 
 /// [`check`], with the events a read would wake a bot's duty on, which its check is given (PRO-472).
 fn check_with(automation: &Automation, precheck: &AutomationPrecheck, events: Option<&serde_json::Value>) -> PrecheckTrial {
+    // S-17: Never execute a quarantined shell precheck from an imported bundle.
+    if crate::bots::duties::is_shell_quarantined(automation) {
+        return failed("This imported automation's shell precheck is quarantined and requires explicit local owner approval before running.".into(), 0);
+    }
     // A bot's duty never runs its check in the bot's home, which the bot can write.
     if crate::bots::duties::is_duty(automation) {
         return crate::bots::duties::run_check(automation, precheck, events).unwrap_or_else(|error| failed(format!("The first check could not run: {error:#}"), 0));
