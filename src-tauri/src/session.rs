@@ -1937,6 +1937,11 @@ fn is_checkpoint_boundary(payload: &Payload) -> bool {
     is_checkpoint_turn_start(payload) || matches!(payload, Payload::TurnCompleted { .. })
 }
 
+struct LoadedRuntime {
+    runtime: Arc<Mutex<TabRuntime>>,
+    preloaded: Option<(Vec<AgentEvent>, u64)>,
+}
+
 /// Resolve a tab's log path from its already-loaded `TabEntry` metadata without
 /// re-reading and re-parsing `sessions/index.json`.
 fn log_path_for_tab(session_id: &str, tab: &TabEntry) -> Result<PathBuf> {
@@ -2827,17 +2832,17 @@ impl SessionManager {
     }
 
     fn runtime(&self, session_id: &str, tab_id: &str) -> Result<Arc<Mutex<TabRuntime>>> {
-        Ok(self.runtime_loading(session_id, tab_id)?.0)
+        Ok(self.runtime_loading(session_id, tab_id)?.runtime)
     }
 
     /// Look up or initialize a tab's runtime without holding `self.tabs` across
     /// disk I/O. When newly created, also returns the single-pass parsed log
     /// events and the resulting `seq` so `load_events` can reuse them without
     /// re-reading the JSONL file.
-    fn runtime_loading(&self, session_id: &str, tab_id: &str) -> Result<(Arc<Mutex<TabRuntime>>, Option<(Vec<AgentEvent>, u64)>)> {
+    fn runtime_loading(&self, session_id: &str, tab_id: &str) -> Result<LoadedRuntime> {
         let key = key_of(session_id, tab_id);
-        if let Some(rt) = self.tabs.lock().unwrap_or_else(|e| e.into_inner()).get(&key).cloned() {
-            return Ok((rt, None));
+        if let Some(runtime) = self.tabs.lock().unwrap_or_else(|e| e.into_inner()).get(&key).cloned() {
+            return Ok(LoadedRuntime { runtime, preloaded: None });
         }
         let gate = {
             let mut inits = self.tab_inits.lock().unwrap_or_else(|e| e.into_inner());
@@ -2858,8 +2863,8 @@ impl SessionManager {
         }
         let _cleanup = GateCleanup { inits: &self.tab_inits, key: key.clone(), gate };
         let _init_guard = _cleanup.gate.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(rt) = self.tabs.lock().unwrap_or_else(|e| e.into_inner()).get(&key).cloned() {
-            return Ok((rt, None));
+        if let Some(runtime) = self.tabs.lock().unwrap_or_else(|e| e.into_inner()).get(&key).cloned() {
+            return Ok(LoadedRuntime { runtime, preloaded: None });
         }
         // All disk I/O runs outside `self.tabs` so opening a large tab never
         // stalls unrelated tabs.
@@ -2934,7 +2939,7 @@ impl SessionManager {
             guard.seq
         };
         self.tabs.lock().unwrap_or_else(|e| e.into_inner()).insert(key, rt.clone());
-        Ok((rt, Some((events, init_seq))))
+        Ok(LoadedRuntime { runtime: rt, preloaded: Some((events, init_seq)) })
     }
 
     /// Stamp, persist, emit. The one path every event takes.
@@ -3366,9 +3371,27 @@ impl SessionManager {
     /// retired as lapsed — only the child that asked can answer, and no child
     /// survives a restart, so a replayed card would have dead buttons.
     pub fn load_events(&self, session_id: &str, tab_id: &str) -> Result<Vec<AgentEvent>> {
-        let (rt_arc, preloaded) = self.runtime_loading(session_id, tab_id)?;
+        let path = store::log_path(session_id, tab_id)?;
+        let LoadedRuntime { runtime: rt_arc, preloaded } = match self.runtime_loading(session_id, tab_id) {
+            Ok(loaded) => loaded,
+            Err(error) => {
+                // Closed tabs are evicted from `self.tabs` on `close_tab` and moved
+                // to `closedTabs`, yet their retained conversation history stays readable
+                // without re-creating a live runtime entry.
+                if index::tab_state()
+                    .ok()
+                    .is_some_and(|state| state.closed.iter().any(|c| c.session_id == session_id && c.tab.id == tab_id))
+                {
+                    let mut events: Vec<AgentEvent> = store::read_lines(&path)?;
+                    for event in &mut events {
+                        recovery::sanitize(&mut event.payload);
+                    }
+                    return Ok(events);
+                }
+                return Err(error);
+            }
+        };
         let mut rt = rt_arc.lock().unwrap();
-        let path = rt.log_path.clone();
         // Reuse the single JSONL read from cold runtime initialization whenever
         // no newer event landed between init and acquiring `rt`; otherwise read
         // the log once under `rt`.
@@ -10542,6 +10565,10 @@ mod tests {
         assert!(!manager.screen_prompts.lock().unwrap().contains(&key1));
         assert!(!manager.stopping_ptys.lock().unwrap().contains_key(&key1));
         assert!(!manager.activity_states.lock().unwrap().contains_key(&key1));
+        // Reading history for a retained closed tab still succeeds without leaking a runtime back into `self.tabs`.
+        let retained = manager.load_events("s-perf", "t1").unwrap();
+        assert!(!retained.is_empty(), "closed tab history must remain readable");
+        assert!(!manager.tabs.lock().unwrap().contains_key(&key1), "reading closed tab history must not re-insert into tabs");
 
         let key2 = key_of("s-perf", "t2");
         let pane2 = SessionManager::pane_id("t2");

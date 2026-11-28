@@ -282,7 +282,13 @@ fn a_codex_tab_on_an_added_account_runs_in_its_managed_home() {
     let ran = rig.start("codex");
     assert_eq!(ran["CODEX_HOME"], home.to_string_lossy(), "Codex runs in the account's managed home");
     assert_eq!(std::fs::read_link(home.join("auth.json")).unwrap(), login.join("auth.json"), "signed in as the account");
-    assert_eq!(std::fs::read_link(home.join("sessions")).unwrap(), root.join("codex/sessions"), "its conversations are shared");
+    // On Windows a directory junction resolves 8.3 short names (e.g. RUNNER~1 -> runneradmin)
+    // and normalizes separators, so compare canonical paths.
+    assert_eq!(
+        crate::paths::canonicalize(std::fs::read_link(home.join("sessions")).unwrap()).unwrap(),
+        crate::paths::canonicalize(root.join("codex").join("sessions")).unwrap(),
+        "its conversations are shared"
+    );
     assert_eq!(running_account("codex", rig.session).as_deref(), Some(account.as_str()));
     assert_eq!(field(&rig.tab(), "launchedAccount"), Some(account.as_str()));
     {

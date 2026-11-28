@@ -1161,10 +1161,10 @@ impl WorkspaceRpc {
     /// Tell every connection that was granted `capability`.
     fn notify_granted(&self, capability: &str, event: &str, params: Value) {
         for peer in self.live_peers() {
-            if peer.granted.lock().unwrap().as_ref().is_some_and(|granted| granted.contains(capability)) {
-                if !peer.try_notify(event, params.clone()) {
-                    self.disconnect(&peer);
-                }
+            if peer.granted.lock().unwrap().as_ref().is_some_and(|granted| granted.contains(capability))
+                && !peer.try_notify(event, params.clone())
+            {
+                self.disconnect(&peer);
             }
         }
     }
@@ -1211,10 +1211,11 @@ impl WorkspaceRpc {
             None => pipeline,
         };
         for peer in self.live_peers() {
-            if peer.granted("pipeline/1") && self.access(&peer).can_view() {
-                if !peer.try_notify("pipeline.changed", json!({ "pipeline": pipeline })) {
-                    self.disconnect(&peer);
-                }
+            if peer.granted("pipeline/1")
+                && self.access(&peer).can_view()
+                && !peer.try_notify("pipeline.changed", json!({ "pipeline": pipeline }))
+            {
+                self.disconnect(&peer);
             }
         }
     }

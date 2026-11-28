@@ -174,29 +174,18 @@ pub fn parse_pane(pane: &str) -> Option<(&str, String)> {
 /// on top of the tab's own environment layers and port block.
 #[cfg(windows)]
 fn command_line(command: &str, env: &[(String, String)]) -> String {
-    // The tab's shell is PowerShell, cmd or a POSIX shell; an action's
-    // command is a POSIX script on every platform, so it runs in Git's sh,
-    // started from whichever the tab has. Values are only ever quoted text.
+    // An action's command is a POSIX script on every platform, so on Windows it
+    // runs directly in Git for Windows' `sh.exe` via `pty::direct_program`
+    // (avoiding PowerShell `--%` / `-Command` and `cmd.exe` quoting layers).
+    if let Some(sh) = crate::binpath::posix_sh() {
+        return windows_sh_command_line(&sh, command, env);
+    }
     let shell = crate::pty::shell();
     let name = Path::new(&shell).file_stem().map(|stem| stem.to_string_lossy().to_lowercase()).unwrap_or_default();
     if matches!(name.as_str(), "bash" | "sh" | "zsh") {
-        let assignments: Vec<String> = env.iter().map(|(name, value)| quote(&format!("{name}={value}"))).collect();
-        return format!("env {} {} -c {}", assignments.join(" "), quote(&shell), quote(command));
+        return format!("printf '%s\\n' {} >&2; exit 127", quote(crate::binpath::POSIX_SH_MISSING));
     }
-    // Windows PowerShell does not escape quotes inside a native program's
-    // arguments, so the command never is one: it travels in the environment,
-    // and `--%` hands sh its fixed arguments untouched.
-    let script = match crate::binpath::posix_sh() {
-        Some(sh) => {
-            let mut lines: Vec<String> = env.iter().chain(std::iter::once(&(ACTION_SCRIPT.to_string(), command.to_string())))
-                .map(|(name, value)| format!("[Environment]::SetEnvironmentVariable({}, {})", powershell_quote(name), powershell_quote(value)))
-                .collect();
-            lines.push(format!("& {} --% -c \"eval \\\"${ACTION_SCRIPT}\\\"\"", powershell_quote(&sh.to_string_lossy())));
-            lines.push("exit $LASTEXITCODE".into());
-            lines.join("\n")
-        }
-        None => format!("Write-Error {}\nexit 127", powershell_quote(crate::binpath::POSIX_SH_MISSING)),
-    };
+    let script = format!("Write-Error {}\nexit 127", powershell_quote(crate::binpath::POSIX_SH_MISSING));
     if name == "cmd" {
         // cmd expands %VAR% even inside quotes: the script goes to
         // PowerShell as Base64, so cmd never parses a byte of it.
@@ -207,8 +196,37 @@ fn command_line(command: &str, env: &[(String, String)]) -> String {
     script
 }
 
-/// The variable an action's command reaches Git's sh in on Windows.
-#[cfg(windows)]
+/// Build a `pty::direct_program`-compatible POSIX-quoted invocation of `sh`
+/// that exports `env` from positional parameters, clears `$@`, and `eval`s
+/// `command` so exit status, quotes, `$literal` values, and newlines survive
+/// untouched on Windows without passing through PowerShell or `cmd.exe`.
+#[cfg(any(windows, test))]
+fn windows_sh_command_line(sh: &Path, command: &str, env: &[(String, String)]) -> String {
+    let mut exports = String::new();
+    for (idx, (name, _)) in env.iter().enumerate() {
+        debug_assert!(
+            !name.is_empty() && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_'),
+            "invalid env var name: {name}"
+        );
+        let pos = idx + 1;
+        exports.push_str(&format!("export {name}=\"${{{pos}}}\"; "));
+    }
+    let script_pos = env.len() + 1;
+    let wrapper = format!("{exports}{ACTION_SCRIPT}=\"${{{script_pos}}}\"; set --; eval \"${{{ACTION_SCRIPT}}}\"");
+    let mut parts = Vec::with_capacity(env.len() + 5);
+    parts.push(quote(&sh.to_string_lossy()));
+    parts.push("-c".into());
+    parts.push(quote(&wrapper));
+    parts.push("_".into());
+    for (_, value) in env {
+        parts.push(quote(value));
+    }
+    parts.push(quote(command));
+    parts.join(" ")
+}
+
+/// The shell-local variable holding the action script before `eval`.
+#[cfg(any(windows, test))]
 const ACTION_SCRIPT: &str = "TERMINALX_ACTION_SCRIPT";
 
 /// Single-quoted for PowerShell: nothing inside is expanded or run. Its

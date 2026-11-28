@@ -1457,19 +1457,24 @@ impl From<super::slack::Error> for SendError {
 /// instead of constructing a brand-new TLS client on every outbox send.
 fn slack_client_for(bot: &str, login: &Login) -> Arc<super::slack::Client> {
     use std::hash::{Hash, Hasher};
-    static CLIENTS: std::sync::OnceLock<Mutex<BTreeMap<String, (String, u64, Arc<super::slack::Client>)>>> = std::sync::OnceLock::new();
+    struct CachedSlackClient {
+        saved: String,
+        digest: u64,
+        client: Arc<super::slack::Client>,
+    }
+    static CLIENTS: std::sync::OnceLock<Mutex<BTreeMap<String, CachedSlackClient>>> = std::sync::OnceLock::new();
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     login.token.hash(&mut hasher);
     login.app_token.hash(&mut hasher);
     let fingerprint = hasher.finish();
     let mut cache = CLIENTS.get_or_init(|| Mutex::new(BTreeMap::new())).lock().unwrap_or_else(|error| error.into_inner());
-    if let Some((saved, digest, client)) = cache.get(bot) {
-        if *saved == login.saved && *digest == fingerprint {
-            return client.clone();
+    if let Some(entry) = cache.get(bot) {
+        if entry.saved == login.saved && entry.digest == fingerprint {
+            return entry.client.clone();
         }
     }
     let client = Arc::new(super::slack::Client::new(super::slack::API, &login.token, &login.app_token));
-    cache.insert(bot.to_string(), (login.saved.clone(), fingerprint, client.clone()));
+    cache.insert(bot.to_string(), CachedSlackClient { saved: login.saved.clone(), digest: fingerprint, client: client.clone() });
     client
 }
 
