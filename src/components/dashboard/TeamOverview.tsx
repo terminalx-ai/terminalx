@@ -34,7 +34,13 @@ export function readOwners(key: string | null): string[] {
   if (!key) return [];
   try { const value: unknown = JSON.parse(localStorage.getItem(key) ?? "[]"); return Array.isArray(value) ? [...new Set(value.filter((id): id is string => typeof id === "string" && id.length <= 128))] : []; } catch { return []; }
 }
-export function useTeamOverview<T extends TeamRow>(rows: T[], orgId: string | null, rowOwners: Map<string, string>) {
+export function useTeamOverview<T extends TeamRow>(
+  rows: T[],
+  orgId: string | null,
+  rowOwners: Map<string, string>,
+  options?: { ownerFilter?: "internal" | "external" },
+) {
+  const useExternalOwnerFilter = options?.ownerFilter === "external";
   const { status } = useAccount();
   const privacy = useDataPrivacy();
   const catalog = useCloudCatalog();
@@ -79,7 +85,9 @@ export function useTeamOverview<T extends TeamRow>(rows: T[], orgId: string | nu
     const presence = cloudPresence.snapshot(org);
     return presence.state === "live" && presence.workspaces.some((row) => row.workspaceId === workspace && row.activeMembers.length > 0);
   };
-  const byRows = rows.filter((row) => !selected.length || selected.includes(!row.orgId ? catalog.viewerUserId ?? "local" : row.ownerId ?? ""));
+  const byRows = useExternalOwnerFilter
+    ? rows
+    : rows.filter((row) => !selected.length || selected.includes(!row.orgId ? catalog.viewerUserId ?? "local" : row.ownerId ?? ""));
   const counts = Object.fromEntries(TEAM_VIEWS.map(({ id }) => [id, byRows.filter((row) => teamPredicate(row, id, catalog, active)).length])) as Record<TeamView, number>;
   const filtered = byRows.filter((row) => teamPredicate(row, view, catalog, active));
   const cloudRows = byRows.filter((row) => row.orgId && row.workspaceId);
@@ -111,7 +119,7 @@ export function useTeamOverview<T extends TeamRow>(rows: T[], orgId: string | nu
     </DropdownMenu>
   </>;
   const views = <nav aria-label="Views" className="flex w-full shrink-0 flex-wrap gap-1 border-b border-border px-2 pb-3 @min-[600px]:w-44 @min-[600px]:flex-col @min-[600px]:flex-nowrap @min-[600px]:border-b-0 @min-[600px]:border-r"><span className="w-full px-2 py-2 text-[10px] uppercase text-faint">Views</span>{TEAM_VIEWS.map(({ id, label }) => <Button key={id} size="sm" variant={view === id ? "secondary" : "ghost"} className="min-w-0 justify-start gap-2" aria-pressed={view === id} disabled={!known[id]} title={known[id] ? undefined : "Current authorized data is unavailable"} onClick={() => setView({ key, view: id })}>{label}<span className="ml-auto text-faint tabular-nums">{known[id] ? counts[id] : "—"}</span></Button>)}{!known[view] && <p role="status" className="px-2 py-1 text-xs text-faint">Current {view === "active" ? "presence" : "workspace data"} is unavailable. Refresh or choose Everyone.</p>}</nav>;
-  return { rows: filtered, controls, views, scoped: view !== "everyone" || selected.length > 0, clearScope: () => { setView({ key, view: "everyone" }); choose([]); } };
+  return { rows: filtered, controls: useExternalOwnerFilter ? null : controls, views, owners, scoped: view !== "everyone" || (!useExternalOwnerFilter && selected.length > 0), clearScope: () => { setView({ key, view: "everyone" }); if (!useExternalOwnerFilter) choose([]); } };
 }
 
 /** Reuse PRO-128's current roster and profile. Missing roles/emails stay unavailable. */

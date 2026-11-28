@@ -3,10 +3,14 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
 
 // The app's menu where there is no menu bar (Windows, Linux): the menu bar's groups, each item running its action.
-const mocks = vi.hoisted(() => ({ invoke: vi.fn(async () => undefined), dispatch: vi.fn() }));
+const mocks = vi.hoisted(() => ({ invoke: vi.fn(async () => undefined), dispatch: vi.fn(), setStatusSettings: vi.fn(async () => undefined), statusVisible: true }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
 vi.mock("@/lib/appWindow", () => ({ inAppWindow: () => true, isCompactWindow: () => false }));
 vi.mock("@/lib/nativeMenuBridge", () => ({ dispatchNativeMenu: mocks.dispatch }));
+vi.mock("@/lib/status", () => ({
+  useStatusSelector: (selector: (s: { settings: { visible: boolean } }) => unknown) => selector({ settings: { visible: mocks.statusVisible } }),
+  setStatusSettings: mocks.setStatusSettings,
+}));
 
 const { AppMenu, menuAction } = await import("./AppMenu");
 
@@ -47,5 +51,17 @@ describe("AppMenu", () => {
     expect(menuAction("command:focused:session.closeTab")).toBe("session.closeTab");
     expect(menuAction("recent:/code/web")).toBe("recent:/code/web");
     expect(menuAction("app-quit")).toBeNull();
+  });
+
+  it("includes a Status Bar toggle in View", async () => {
+    mocks.statusVisible = true;
+    mocks.setStatusSettings.mockClear();
+    render(<TooltipProvider><AppMenu mac={false} /></TooltipProvider>);
+    open("Menu");
+    open("View");
+    const toggle = await screen.findByRole("menuitemcheckbox", { name: "Status Bar" });
+    expect(toggle.getAttribute("aria-checked")).toBe("true");
+    fireEvent.click(toggle);
+    expect(mocks.setStatusSettings).toHaveBeenCalledWith({ visible: false });
   });
 });

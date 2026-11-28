@@ -839,3 +839,21 @@ describe("the runtime the app is moving to (#766)", () => {
     expect(view.container.querySelector("[data-status-bar]")).toBeNull();
   });
 });
+
+it("bounds Resource and Usage popovers to available viewport height and keeps Reset Codex dialog outside the popover", async () => {
+  resourceFixture();
+  render(<TooltipProvider><StatusBar /></TooltipProvider>);
+  openResources();
+  const resourcePopover = screen.getByText("App resources").closest("[data-status-context-exempt]")!;
+  expect(resourcePopover.className).toContain("--radix-popover-content-available-height");
+
+  fireEvent.click(screen.getByRole("button", { name: /Claude/ }));
+  const usagePopover = document.querySelector("[data-usage-popover]")!;
+  expect(usagePopover.className).toContain("--radix-popover-content-available-height");
+
+  fireEvent.click(within(usagePopover as HTMLElement).getByRole("button", { name: /^Codex/ }));
+  const detail = document.querySelector('[data-usage-detail="codex"]') as HTMLElement;
+  fireEvent.click(within(detail).getByRole("button", { name: "Reset now" }));
+  const resetDialog = screen.getByRole("dialog", { name: "Reset Codex limits?" });
+  expect(usagePopover.contains(resetDialog)).toBe(false);
+});

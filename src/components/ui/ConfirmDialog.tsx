@@ -30,16 +30,21 @@ export function ConfirmDialog({ open, title, children, action, cancel = "Cancel"
   onCancel: () => void;
 }) {
   const actionButton = useRef<HTMLButtonElement | null>(null);
+  const cancelButton = useRef<HTMLButtonElement | null>(null);
   // A long explanation (a path, a list of what is lost) reads better in a wider card than in a tall narrow one.
   const long = typeof children === "string" && children.length > 220;
   return (
     <Dialog open={open} onOpenChange={(next) => { if (!next && !busy) onCancel(); }}>
       <DialogContent
+        role="alertdialog"
         data-confirm-dialog
         showClose={false}
         width={long ? "max-w-[30rem]" : "max-w-[22rem]"}
         className="p-4"
-        onOpenAutoFocus={(event) => { event.preventDefault(); actionButton.current?.focus(); }}
+        onOpenAutoFocus={(event) => {
+          event.preventDefault();
+          (destructive ? cancelButton : actionButton).current?.focus();
+        }}
       >
         <DialogTitle className="text-sm font-semibold [overflow-wrap:anywhere]">{title}</DialogTitle>
         {children
@@ -50,7 +55,7 @@ export function ConfirmDialog({ open, title, children, action, cancel = "Cancel"
           ? error && <p role="alert" className="mt-2 text-xs leading-[18px] text-destructive [overflow-wrap:anywhere]">{error}</p>
           : error && <div className="mt-2">{error}</div>}
         <div className="mt-3.5 flex flex-wrap justify-end gap-2">
-          <Button variant="outline" size="sm" className="text-muted-foreground" disabled={busy} onClick={onCancel}>{cancel}</Button>
+          <Button ref={cancelButton} variant="outline" size="sm" className="text-muted-foreground" disabled={busy} onClick={onCancel}>{cancel}</Button>
           {alternative && <Button variant="outline" size="sm" className="text-muted-foreground" disabled={busy} onClick={onAlternative}>{alternative}</Button>}
           <Button ref={actionButton} variant={destructive ? "danger" : "default"} size="sm" className={cn(!destructive && "shadow-none")} disabled={busy} onClick={onAction}>{action}</Button>
         </div>

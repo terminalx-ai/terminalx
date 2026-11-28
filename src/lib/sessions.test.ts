@@ -615,3 +615,10 @@ describe("conversationTitle (PRO-331)", () => {
     expect(mocks.invoke.mock.calls.map((call) => call[0]).some((name) => /rename_tab/.test(String(name)))).toBe(true);
   });
 });
+
+it("increments navigationVersion when opening Skills so Settings dismisses", () => {
+  const before = sessions.getSessionStore().navigationVersion;
+  sessions.openSkills();
+  expect(sessions.getSessionStore()).toMatchObject({ view: "skills", selectedSessionId: null });
+  expect(sessions.getSessionStore().navigationVersion).toBe(before + 1);
+});

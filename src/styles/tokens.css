@@ -58,7 +58,7 @@
   --backdrop-top: var(--surface-page);
   --backdrop-bottom: var(--surface-page);
 
-  --accent-merge: oklch(0.62 0.17 150);
+  --accent-merge: oklch(0.5 0.16 150);
   --accent-merge-fg: oklch(0.99 0 0);
 
   /*
@@ -177,6 +177,7 @@
   --accent-merged: oklch(0.72 0.14 300);
   --accent-merged-fg: oklch(0.2 0.05 300);
   --destructive: oklch(0.7 0.18 22);
+  --destructive-foreground: oklch(0.15 0.03 22);
   --warning: oklch(0.82 0.14 80);
   --info: oklch(0.74 0.11 230);
 }
@@ -196,8 +197,8 @@
   --ink-strong: oklch(0.22 0.01 270);
   --ink-muted: oklch(0.41 0.01 270);
   --ink-faint: oklch(0.48 0.01 270);
-  --ring: oklch(0.6 0.14 65);
-  --accent: oklch(0.6 0.14 65);
+  --ring: oklch(0.51 0.14 65);
+  --accent: oklch(0.51 0.14 65);
   --accent-fg: oklch(0.99 0 0);
   --accent-command: oklch(0.55 0.13 70);
   --accent-mention: oklch(0.5 0.13 240);
@@ -206,7 +207,8 @@
   --accent-merged: oklch(0.5 0.15 300);
   --accent-merged-fg: oklch(0.99 0 0);
   --destructive: oklch(0.55 0.2 24);
-  --warning: oklch(0.6 0.14 75);
+  --destructive-foreground: oklch(0.99 0 0);
+  --warning: oklch(0.5 0.14 75);
   --info: oklch(0.5 0.13 240);
 }
 
@@ -236,6 +238,7 @@
   --accent-merged: oklch(0.72 0.14 300);
   --accent-merged-fg: oklch(0.2 0.05 300);
   --destructive: oklch(0.7 0.18 22);
+  --destructive-foreground: oklch(0.15 0.03 22);
   --warning: oklch(0.82 0.14 80);
   --info: oklch(0.74 0.11 230);
 }
@@ -255,8 +258,8 @@
   --ink-strong: oklch(0.22 0.015 255);
   --ink-muted: oklch(0.41 0.015 255);
   --ink-faint: oklch(0.48 0.015 255);
-  --ring: oklch(0.55 0.14 250);
-  --accent: oklch(0.55 0.14 250);
+  --ring: oklch(0.52 0.14 250);
+  --accent: oklch(0.52 0.14 250);
   --accent-fg: oklch(0.99 0 0);
   --accent-command: oklch(0.55 0.13 70);
   --accent-mention: oklch(0.5 0.13 240);
@@ -265,7 +268,8 @@
   --accent-merged: oklch(0.5 0.15 300);
   --accent-merged-fg: oklch(0.99 0 0);
   --destructive: oklch(0.55 0.2 24);
-  --warning: oklch(0.6 0.14 75);
+  --destructive-foreground: oklch(0.99 0 0);
+  --warning: oklch(0.5 0.14 75);
   --info: oklch(0.5 0.13 240);
 }
 
@@ -295,6 +299,7 @@
   --accent-merged: oklch(0.72 0.14 300);
   --accent-merged-fg: oklch(0.2 0.05 300);
   --destructive: oklch(0.7 0.18 22);
+  --destructive-foreground: oklch(0.15 0.03 22);
   --warning: oklch(0.82 0.14 80);
   --info: oklch(0.74 0.11 230);
 }
@@ -314,8 +319,8 @@
   --ink-strong: oklch(0.22 0.02 150);
   --ink-muted: oklch(0.41 0.02 150);
   --ink-faint: oklch(0.48 0.02 150);
-  --ring: oklch(0.55 0.14 150);
-  --accent: oklch(0.55 0.14 150);
+  --ring: oklch(0.48 0.14 150);
+  --accent: oklch(0.48 0.14 150);
   --accent-fg: oklch(0.99 0 0);
   --accent-command: oklch(0.55 0.13 70);
   --accent-mention: oklch(0.5 0.13 240);
@@ -324,7 +329,8 @@
   --accent-merged: oklch(0.5 0.15 300);
   --accent-merged-fg: oklch(0.99 0 0);
   --destructive: oklch(0.55 0.2 24);
-  --warning: oklch(0.6 0.14 75);
+  --destructive-foreground: oklch(0.99 0 0);
+  --warning: oklch(0.5 0.14 75);
   --info: oklch(0.5 0.13 240);
 }
 
@@ -355,6 +361,7 @@
   --accent-merged: oklch(0.72 0.14 300);
   --accent-merged-fg: oklch(0.2 0.05 300);
   --destructive: oklch(0.7 0.18 22);
+  --destructive-foreground: oklch(0.15 0.03 22);
   --warning: oklch(0.82 0.14 80);
   --info: oklch(0.74 0.11 230);
 }
