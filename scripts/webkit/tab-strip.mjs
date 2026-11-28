@@ -190,6 +190,7 @@ const measure = (page) =>
         const label = tab.querySelector('[role="tab"] span.truncate');
         return { key: tab.dataset.tabKey, ...rect(tab), name: tab.querySelector('[role="tab"]').getAttribute("aria-label"), selected: tab.querySelector('[role="tab"]').getAttribute("aria-selected") === "true", cut: label ? label.scrollWidth > label.clientWidth : false, hasIcon: !!tab.querySelector('[role="tab"] svg, [role="tab"] img, [role="tab"] [data-agent-mark]'), pinned: tab.dataset.pinned === "true" };
       }),
+      terminalIcon: visible(strip.querySelector('[data-testid="strip-terminal-view"] [data-icon="square-terminal"]')),
       plus: rect(strip.querySelector('[aria-label="New tab"]')),
       allTabs: rect(strip.querySelector('[data-testid="all-tabs"]')),
       allTabsText: strip.querySelector('[data-testid="all-tabs"]')?.textContent.trim() ?? null,
@@ -226,6 +227,7 @@ function fits(layout, { sidebarHidden = false } = {}) {
   const continuation = layout.actionButtons.find((button) => button.name === "Continue in New Session…");
   return {
     "the header does not overflow the window": !layout.headerOverflows && layout.actions.right <= layout.window + SLACK,
+    "the terminal switch shows its icon": layout.terminalIcon,
     "the row of tabs does not overflow the window": !layout.rowOverflows && layout.row.right <= layout.window + SLACK && (!layout.rowTrailing || layout.rowTrailing.right <= layout.row.right + SLACK),
     "every action is inside the header": layout.actionButtons.length >= 2 && layout.actionButtons.every((button) => button.left >= layout.header.left - SLACK && button.right <= layout.header.right + SLACK),
     "the tabs are in one row, under the title bar": layout.tabs.every((tab) => tab.top === layout.tabs[0].top && tab.top >= layout.header.bottom - SLACK && tab.bottom <= layout.row.bottom + SLACK),
@@ -386,7 +388,7 @@ for (const colorScheme of ["dark", "light"]) {
   const toggle = await page.locator('[data-testid="strip-terminal-view"]').evaluate((node) => {
     const box = node.getBoundingClientRect();
     const strip = node.closest('[data-testid="workspace-tab-strip"]').getBoundingClientRect();
-    return { text: node.textContent.trim(), atEnd: strip.right - box.right <= 16, inStrip: box.top >= strip.top && box.bottom <= strip.bottom };
+    return { atEnd: strip.right - box.right <= 16, inStrip: box.top >= strip.top && box.bottom <= strip.bottom };
   }).catch(() => null);
   const headerSwitch = await page.locator('main header [aria-label="Show terminal view"]').count();
   failed += report(`the designed tab menus, 1440x900 ${colorScheme}`, {
@@ -395,7 +397,7 @@ for (const colorScheme of ["dark", "light"]) {
     "Close tab is in the menu's own colour, not red": !!close && close.color === menu.items[0].color,
     "the new-tab menu is headed New tab and about 290 px wide": picker.heading === "New tab" && Math.abs(picker.width - 290) <= 2,
     "nothing in the new-tab menu is under 12 px": picker.small.length === 0,
-    "the strip ends with ⇧⌘T terminal view": !!toggle && toggle.atEnd && toggle.inStrip && /terminal view$/.test(toggle.text),
+    "the strip ends with the terminal switch": !!toggle && toggle.atEnd && toggle.inStrip,
     "the title bar has no terminal view button of its own": headerSwitch === 0,
   }, { menu, picker, toggle, headerSwitch });
   await page.close();

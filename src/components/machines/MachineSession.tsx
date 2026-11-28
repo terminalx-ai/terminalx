@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { thisComputer } from "@/lib/platform";
-import { ChevronDown, ChevronUp, LoaderCircle, MessageSquare, Plus, RotateCw, Unplug, X } from "@/icons";
+import { ChevronDown, ChevronUp, LoaderCircle, MessageSquare, Plus, RotateCw, SquareTerminal, Unplug, X } from "@/icons";
 import { AgentMark } from "@/components/AgentMark";
 import { CloudTerminalPane } from "@/components/cloud/CloudTerminalPane";
 import { Button } from "@/components/ui/button";
@@ -142,7 +142,7 @@ export function MachineSessionStrips({
               data-testid="machine-terminal-view"
             >
               {terminalView.on ? <MessageSquare className="size-3.5" aria-hidden /> : (
-                <><KbdGroup keys={shortcutKeys("session.toggleTerminalView")} />terminal view</>
+                <><KbdGroup keys={shortcutKeys("session.toggleTerminalView")} /><SquareTerminal className="size-3.5" aria-hidden /></>
               )}
             </button>
           </WithTooltip>
