@@ -41,9 +41,9 @@
 //! refreshed token lands in the reader's `auth.json`, a plugin cache in their
 //! `plugins`, exactly as they would if they had run `codex` themselves.
 
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -225,30 +225,57 @@ fn same_file(a: &Path, b: &Path) -> bool {
 
 // ------------------------------------------------------------------- rollouts
 
+const MAX_CACHED_ROLLOUTS: usize = 512;
+
+fn rollout_cache() -> &'static Mutex<HashMap<(PathBuf, String), PathBuf>> {
+    static CACHE: OnceLock<Mutex<HashMap<(PathBuf, String), PathBuf>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 /// The rollout file for a conversation, under `<home>/sessions/YYYY/MM/DD/`.
 /// The name ends `-<session id>.jsonl`, which is what identifies it; the
 /// timestamp in front only orders the directory.
+///
+/// Walks date directories in reverse chronological order, short-circuiting on
+/// the first (newest) match, and caches `(home, session_id) -> PathBuf` (P-81).
 pub fn find_rollout(home: &Path, session_id: &str) -> Option<PathBuf> {
+    let key = (home.to_path_buf(), session_id.to_owned());
+    let cached = rollout_cache().lock().unwrap_or_else(|e| e.into_inner()).get(&key).cloned();
+    if let Some(cached) = cached {
+        if cached.is_file() {
+            return Some(cached);
+        }
+        rollout_cache().lock().unwrap_or_else(|e| e.into_inner()).remove(&key);
+    }
+
     let suffix = format!("-{session_id}.jsonl");
-    let mut found: Option<PathBuf> = None;
     let sessions = home.join("sessions");
-    for year in read_dir(&sessions) {
-        for month in read_dir(&year) {
-            for day in read_dir(&month) {
-                for file in read_dir(&day) {
+    let mut found: Option<PathBuf> = None;
+    'search: for year in read_dir_desc(&sessions) {
+        for month in read_dir_desc(&year) {
+            for day in read_dir_desc(&month) {
+                for file in read_dir_desc(&day) {
                     if file.file_name().is_some_and(|n| n.to_string_lossy().ends_with(&suffix)) {
                         found = Some(file);
+                        break 'search;
                     }
                 }
             }
         }
     }
+    if let Some(ref path) = found {
+        let mut cache = rollout_cache().lock().unwrap_or_else(|e| e.into_inner());
+        if !cache.contains_key(&key) && cache.len() >= MAX_CACHED_ROLLOUTS {
+            cache.clear();
+        }
+        cache.insert(key, path.clone());
+    }
     found
 }
 
-fn read_dir(path: &Path) -> Vec<PathBuf> {
+fn read_dir_desc(path: &Path) -> Vec<PathBuf> {
     let mut v: Vec<PathBuf> = std::fs::read_dir(path).into_iter().flatten().flatten().map(|e| e.path()).collect();
-    v.sort();
+    v.sort_unstable_by(|a, b| b.cmp(a));
     v
 }
 
@@ -285,6 +312,10 @@ pub fn copy_rollout(managed: &Path, user: &Path, session_id: &str) -> Result<boo
     })();
     if copied.is_err() { let _ = std::fs::remove_file(&temporary); }
     copied.with_context(|| format!("copy {} into the managed Codex home", source.display()))?;
+    rollout_cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert((managed.to_path_buf(), session_id.to_owned()), target);
     Ok(true)
 }
 
@@ -330,7 +361,46 @@ fn link(managed: &Path, user: &Path, name: &str) -> Result<()> {
     std::os::unix::fs::symlink(&source, &target).with_context(|| format!("link {name} into the managed Codex home"))
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn link(managed: &Path, user: &Path, name: &str) -> Result<()> {
+    let source = user.join(name);
+    let target = managed.join(name);
+    if !source.exists() || source.is_dir() {
+        // Lifecycle cleanup: remove any stale managed credential copy once the
+        // user's own auth.json is gone (S-54).
+        if name == "auth.json" && (target.exists() || target.symlink_metadata().is_ok()) {
+            let _ = std::fs::remove_file(&target);
+        }
+        return Ok(());
+    }
+    if name == "auth.json" {
+        if std::fs::read_link(&target).is_ok_and(|t| t == source) {
+            return Ok(());
+        }
+        if target.exists() || target.symlink_metadata().is_ok() {
+            let _ = std::fs::remove_file(&target);
+        }
+        // Prefer symlink or hard link so no second plaintext copy is created (S-54).
+        if std::os::windows::fs::symlink_file(&source, &target).is_ok() {
+            return Ok(());
+        }
+        if std::fs::hard_link(&source, &target).is_ok() {
+            return Ok(());
+        }
+        // Cross-volume fallback: create with strict owner-only DACL before copying.
+        let mut src = std::fs::File::open(&source)
+            .with_context(|| format!("open {}", source.display()))?;
+        let mut dst = crate::win::fs::create_private(&target, true)
+            .with_context(|| format!("create private {}", target.display()))?;
+        std::io::copy(&mut src, &mut dst)
+            .with_context(|| format!("copy {} privately", source.display()))?;
+        return Ok(());
+    }
+    std::fs::copy(&source, &target)?;
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
 fn link(managed: &Path, user: &Path, name: &str) -> Result<()> {
     let source = user.join(name);
     if !source.exists() || source.is_dir() {
@@ -999,6 +1069,27 @@ url = "https://example.test/mcp"
         // Nothing that is not there gets a dangling link.
         link(managed.path(), user.path(), "skills").unwrap();
         assert!(!managed.path().join("skills").exists());
+    }
+
+    #[test]
+    fn find_rollout_picks_newest_date_dir_and_caches_until_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = "p81-rollout-test";
+        let older_day = dir.path().join("sessions/2025/01/01");
+        let newer_day = dir.path().join("sessions/2026/12/31");
+        std::fs::create_dir_all(&older_day).unwrap();
+        std::fs::create_dir_all(&newer_day).unwrap();
+        let older = older_day.join(format!("rollout-2025-01-01T00-00-00-{id}.jsonl"));
+        let newer = newer_day.join(format!("rollout-2026-12-31T23-59-59-{id}.jsonl"));
+        std::fs::write(&older, "old\n").unwrap();
+        std::fs::write(&newer, "new\n").unwrap();
+
+        assert_eq!(find_rollout(dir.path(), id), Some(newer.clone()));
+        // Cached hit returns the same file.
+        assert_eq!(find_rollout(dir.path(), id), Some(newer.clone()));
+        // Removing the cached file invalidates and falls back to the older copy.
+        std::fs::remove_file(&newer).unwrap();
+        assert_eq!(find_rollout(dir.path(), id), Some(older));
     }
 
     #[test]

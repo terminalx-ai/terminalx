@@ -334,21 +334,16 @@ pub(crate) fn with_caller_capability<T>(capability: Option<TabCapability>, f: im
 
 /// Whether `candidate` names a file inside `root`.
 ///
-/// The file is often one the CLI has yet to create, so there is nothing to
-/// canonicalise and the first answer is lexical; `..` is refused outright
-/// rather than resolved. A symlink on the way to either — `/tmp` under
-/// `/private` on macOS is the usual one — would fail that lexical check for a
-/// path that really is inside the root, so a second answer resolves as much
-/// of both as exists on disk.
+/// Always resolves symlinks on both `root` and `candidate` (up to the deepest
+/// existing ancestor for files not yet created) so a symlink planted inside
+/// `root` cannot escape to arbitrary host files (S-29). `..` and dangling
+/// symlinks are refused outright.
 pub fn under_root(root: &Path, candidate: &Path) -> bool {
     if !candidate.is_absolute() || candidate.components().any(|c| c == Component::ParentDir) {
         return false;
     }
-    if lexically_under(root, candidate) {
-        return true;
-    }
-    match (root.canonical(), resolve_existing(candidate)) {
-        (Ok(root), Some(candidate)) => lexically_under(&root, &candidate),
+    match (resolve_existing(root), resolve_existing(candidate)) {
+        (Some(root), Some(candidate)) => lexically_under(&root, &candidate),
         _ => false,
     }
 }
@@ -360,12 +355,16 @@ fn lexically_under(root: &Path, candidate: &Path) -> bool {
 }
 
 /// The deepest ancestor that exists, canonicalised, with the rest put back on.
+/// Fails closed if any encountered path component is a dangling symlink.
 fn resolve_existing(path: &Path) -> Option<PathBuf> {
     let mut tail = Vec::new();
     let mut here = path;
     loop {
         if let Ok(real) = here.canonical() {
             return Some(tail.iter().rev().fold(real, |acc, part| acc.join(part)));
+        }
+        if std::fs::symlink_metadata(here).is_ok_and(|meta| meta.file_type().is_symlink()) {
+            return None;
         }
         tail.push(here.file_name()?.to_owned());
         here = here.parent()?;
@@ -474,7 +473,12 @@ pub fn prepare_control() -> anyhow::Result<ControlEndpoint> {
     let nth = PREPARED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let socket = own_socket_path(std::process::id(), nth)?;
     #[cfg(unix)]
-    sweep_stale_sockets();
+    if let Ok(dir) = run_dir() {
+        // Sweep stale sockets asynchronously so startup never blocks on dead-socket probes (P-21).
+        let _ = std::thread::Builder::new()
+            .name("hook-socket-sweep".into())
+            .spawn(move || sweep_stale_sockets_in(&dir));
+    }
     Ok(ControlEndpoint { socket, token: mint_token(), published: Default::default() })
 }
 
@@ -493,9 +497,15 @@ fn launch_pid(name: &str) -> Option<u32> {
 /// the two belongs to a launch that is just starting. So the process named in
 /// the file must be dead as well.
 #[cfg(unix)]
+#[cfg_attr(not(test), allow(dead_code))]
 fn sweep_stale_sockets() {
     let Ok(dir) = run_dir() else { return };
-    let Ok(entries) = std::fs::read_dir(&dir) else { return };
+    sweep_stale_sockets_in(&dir);
+}
+
+#[cfg(unix)]
+fn sweep_stale_sockets_in(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
     for entry in entries.flatten() {
         let Some(pid) = launch_pid(&entry.file_name().to_string_lossy()) else { continue };
         if pid == std::process::id() || crate::harness::host::is_alive(pid) {
@@ -671,6 +681,10 @@ const PUBLISH_RETRY: Duration = Duration::from_secs(2);
 
 /// One line in, one reply out: what every listener of a launch runs.
 type Dispatch = std::sync::Arc<dyn Fn(&str) -> Value + Send + Sync>;
+/// Same handler taking an already-parsed JSON frame value so `accept` only
+/// parses each frame once (P-53).
+#[cfg(unix)]
+type DispatchValue = std::sync::Arc<dyn Fn(Value) -> Value + Send + Sync>;
 
 /// Listen for this launch's hook and control frames.
 ///
@@ -763,7 +777,19 @@ where
     C: Fn(crate::control::ControlRequest) -> crate::control::ControlResponse + Send + Sync + 'static,
 {
     let control_token = endpoint.token.clone();
-    let dispatch: Dispatch = std::sync::Arc::new(move |line: &str| dispatch_line(line, &control_token, &hook_handler, &control_handler));
+    let hook_handler = std::sync::Arc::new(hook_handler);
+    let control_handler = std::sync::Arc::new(control_handler);
+    let dispatch: Dispatch = {
+        let control_token = control_token.clone();
+        let hook_handler = hook_handler.clone();
+        let control_handler = control_handler.clone();
+        std::sync::Arc::new(move |line: &str| dispatch_line(line, &control_token, hook_handler.as_ref(), control_handler.as_ref()))
+    };
+    #[cfg(unix)]
+    let dispatch_val: DispatchValue = {
+        let control_token = control_token.clone();
+        std::sync::Arc::new(move |value: Value| dispatch_value(value, &control_token, hook_handler.as_ref(), control_handler.as_ref()))
+    };
     #[cfg(unix)]
     let frames = Frames::new(MAX_FRAMES)?;
     #[cfg(unix)]
@@ -779,7 +805,7 @@ where
                     let listener = std::os::unix::net::UnixListener::from(listener);
                     let socket = socket_path()?;
                     let identity = file_identity(&socket)?;
-                    accept(listener.try_clone()?, dispatch.clone(), frames.clone())?;
+                    accept(listener.try_clone()?, dispatch_val.clone(), frames.clone())?;
                     endpoint.published.store(true, std::sync::atomic::Ordering::Relaxed);
                     Some(Claim { _lock: std::fs::File::from(lock), identity, listener })
                 }
@@ -797,7 +823,7 @@ where
     #[cfg(unix)]
     let own = {
         let kept = own.try_clone()?;
-        accept(own, dispatch.clone(), frames.clone())?;
+        accept(own, dispatch_val.clone(), frames.clone())?;
         kept
     };
     #[cfg(windows)]
@@ -815,6 +841,8 @@ where
         own: endpoint.socket.clone(),
         token: endpoint.token,
         dispatch,
+        #[cfg(unix)]
+        dispatch_val,
         #[cfg(unix)]
         frames,
         published: endpoint.published,
@@ -835,8 +863,86 @@ fn bind(path: &Path) -> std::io::Result<std::os::unix::net::UnixListener> {
     use std::os::unix::fs::PermissionsExt;
 
     let listener = std::os::unix::net::UnixListener::bind(path)?;
-    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    // Fail closed if owner-only socket permissions cannot be applied (S-30).
+    if let Err(error) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
+        drop(listener);
+        let _ = std::fs::remove_file(path);
+        return Err(error);
+    }
     Ok(listener)
+}
+
+/// Hard cap on a single incoming frame line on the Unix hook/control socket to
+/// prevent pre-authentication OOM DoS via an unterminated giant payload (S-30).
+#[cfg(unix)]
+const MAX_FRAME_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Verify that the connected Unix-socket peer runs under the same effective UID
+/// as this process before reading or dispatching any frame (S-30).
+#[cfg(unix)]
+fn verify_peer_uid(stream: &std::os::unix::net::UnixStream) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+    let expected = unsafe { libc::geteuid() };
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly"
+    ))]
+    {
+        let mut euid: libc::uid_t = 0;
+        let mut egid: libc::gid_t = 0;
+        // SAFETY: valid fd and writable out-pointers.
+        if unsafe { libc::getpeereid(stream.as_raw_fd(), &mut euid, &mut egid) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        if euid != expected {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!("peer uid {euid} does not match expected uid {expected}"),
+            ));
+        }
+        Ok(())
+    }
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        let mut cred = libc::ucred { pid: 0, uid: 0, gid: 0 };
+        let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+        // SAFETY: valid fd and out-struct matching SO_PEERCRED.
+        let rc = unsafe {
+            libc::getsockopt(
+                stream.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_PEERCRED,
+                (&mut cred as *mut libc::ucred).cast(),
+                &mut len,
+            )
+        };
+        if rc != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        if cred.uid != expected {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!("peer uid {} does not match expected uid {expected}", cred.uid),
+            ));
+        }
+        Ok(())
+    }
+    #[cfg(not(any(
+        target_os = "macos",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly",
+        target_os = "linux",
+        target_os = "android"
+    )))]
+    {
+        let _ = (stream, expected);
+        Ok(())
+    }
 }
 
 /// How many frames a launch handles at once, on all its sockets together.
@@ -847,37 +953,187 @@ fn bind(path: &Path) -> std::io::Result<std::os::unix::net::UnixListener> {
 #[cfg(unix)]
 const MAX_FRAMES: usize = 256;
 
+/// Separate concurrency budget for long-poll waits (`wait` / `wait_many` /
+/// `wait_run`) so parked waits never starve short-lived hooks and RPCs (P-52).
+#[cfg(unix)]
+const MAX_LONG_WAIT_FRAMES: usize = 512;
+
+/// Reusable worker pool for incoming socket frames so each frame does not
+/// pay OS thread creation/teardown overhead (P-53).
+#[cfg(unix)]
+struct FramePool {
+    state: std::sync::Mutex<FramePoolState>,
+    wake: std::sync::Condvar,
+}
+
+#[cfg(unix)]
+#[derive(Default)]
+struct FramePoolState {
+    jobs: std::collections::VecDeque<Box<dyn FnOnce() + Send + 'static>>,
+    total_workers: usize,
+    idle_workers: usize,
+}
+
+#[cfg(unix)]
+impl FramePool {
+    const CORE_WORKERS: usize = 16;
+    const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+
+    fn new() -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self {
+            state: std::sync::Mutex::new(FramePoolState::default()),
+            wake: std::sync::Condvar::new(),
+        })
+    }
+
+    fn submit(self: &std::sync::Arc<Self>, job: impl FnOnce() + Send + 'static) {
+        let should_spawn = {
+            let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+            state.jobs.push_back(Box::new(job));
+            if state.idle_workers > 0 {
+                self.wake.notify_one();
+                false
+            } else {
+                state.total_workers += 1;
+                true
+            }
+        };
+        if should_spawn {
+            let pool = std::sync::Arc::clone(self);
+            if std::thread::Builder::new()
+                .name("hook-frame".into())
+                .spawn(move || pool.worker_loop())
+                .is_err()
+            {
+                let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+                state.total_workers = state.total_workers.saturating_sub(1);
+            }
+        }
+    }
+
+    fn worker_loop(self: std::sync::Arc<Self>) {
+        loop {
+            let job = {
+                let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+                loop {
+                    if let Some(job) = state.jobs.pop_front() {
+                        break Some(job);
+                    }
+                    state.idle_workers += 1;
+                    let timed_out = if state.total_workers > Self::CORE_WORKERS {
+                        let (guard, result) = self
+                            .wake
+                            .wait_timeout(state, Self::IDLE_TIMEOUT)
+                            .unwrap_or_else(|p| p.into_inner());
+                        state = guard;
+                        result.timed_out()
+                    } else {
+                        state = self.wake.wait(state).unwrap_or_else(|p| p.into_inner());
+                        false
+                    };
+                    state.idle_workers = state.idle_workers.saturating_sub(1);
+                    if timed_out && state.jobs.is_empty() && state.total_workers > Self::CORE_WORKERS {
+                        state.total_workers = state.total_workers.saturating_sub(1);
+                        break None;
+                    }
+                }
+            };
+            let Some(job) = job else { return };
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job));
+        }
+    }
+}
+
 /// A launch's frame places, shared by its own socket and the published one,
 /// and where frames past them go to be refused.
 #[cfg(unix)]
 #[derive(Clone)]
 struct Frames {
     count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    long_wait_count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     limit: usize,
     refuse: std::sync::mpsc::SyncSender<std::os::unix::net::UnixStream>,
     gate: std::sync::Arc<Gate>,
+    pool: std::sync::Arc<FramePool>,
 }
 
 #[cfg(unix)]
 impl Frames {
     fn new(limit: usize) -> std::io::Result<Self> {
-        Ok(Self { count: Default::default(), limit, refuse: refuser()?, gate: Default::default() })
+        Ok(Self {
+            count: Default::default(),
+            long_wait_count: Default::default(),
+            limit,
+            refuse: refuser()?,
+            gate: Default::default(),
+            pool: FramePool::new(),
+        })
     }
 
     fn take(&self) -> Option<FrameSlot> {
-        crate::local_runtime::permissions::increment_bounded(&self.count, self.limit).then(|| FrameSlot(self.count.clone()))
+        crate::local_runtime::permissions::increment_bounded(&self.count, self.limit).then(|| FrameSlot {
+            short: self.count.clone(),
+            long_wait: self.long_wait_count.clone(),
+            is_long_wait: false,
+        })
     }
 }
 
-/// One frame place, given back when the frame's thread ends.
+/// One frame place, given back when the frame's task ends. May transfer from
+/// the short-lived `MAX_FRAMES` budget to `MAX_LONG_WAIT_FRAMES` when a frame
+/// enters a long-poll wait (`hooks::resumable`, P-52).
 #[cfg(unix)]
-struct FrameSlot(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+struct FrameSlot {
+    short: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    long_wait: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    is_long_wait: bool,
+}
+
+#[cfg(unix)]
+impl FrameSlot {
+    fn promote_to_long_wait(&mut self) -> bool {
+        if self.is_long_wait {
+            return true;
+        }
+        if crate::local_runtime::permissions::increment_bounded(&self.long_wait, MAX_LONG_WAIT_FRAMES) {
+            self.short.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            self.is_long_wait = true;
+            true
+        } else {
+            false
+        }
+    }
+}
 
 #[cfg(unix)]
 impl Drop for FrameSlot {
     fn drop(&mut self) {
-        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        if self.is_long_wait {
+            self.long_wait.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        } else {
+            self.short.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        }
     }
+}
+
+#[cfg(unix)]
+thread_local! {
+    static ACTIVE_SLOT: std::cell::RefCell<Option<FrameSlot>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(unix)]
+fn with_active_slot<T>(slot: FrameSlot, f: impl FnOnce() -> T) -> T {
+    struct ClearSlot;
+    impl Drop for ClearSlot {
+        fn drop(&mut self) {
+            ACTIVE_SLOT.with(|active| {
+                let _ = active.borrow_mut().take();
+            });
+        }
+    }
+    ACTIVE_SLOT.with(|active| *active.borrow_mut() = Some(slot));
+    let _clear = ClearSlot;
+    f()
 }
 
 /// What a frame refused for want of a place is told: a control request that
@@ -922,7 +1178,7 @@ fn refuser() -> std::io::Result<std::sync::mpsc::SyncSender<std::os::unix::net::
 }
 
 #[cfg(unix)]
-fn accept(listener: std::os::unix::net::UnixListener, dispatch: Dispatch, frames: Frames) -> std::io::Result<()> {
+fn accept(listener: std::os::unix::net::UnixListener, dispatch: DispatchValue, frames: Frames) -> std::io::Result<()> {
     use std::os::fd::AsRawFd;
     // Accepted and read while the bridge is frozen too, and held for whoever
     // answers it (#765, PRO-589): a frame left unread in the socket's queue
@@ -932,6 +1188,7 @@ fn accept(listener: std::os::unix::net::UnixListener, dispatch: Dispatch, frames
     // the runtime that takes it to accept.
     // A hook that could not reach this socket left a note beside it.
     let failed_sends = listener.local_addr().ok().and_then(|address| address.as_pathname().map(failed_sends_beside));
+    let failed_check = std::sync::Arc::new(FailedSendsThrottle::new());
     listener.set_nonblocking(true)?;
     std::thread::Builder::new().name("hook-socket".into()).spawn(move || {
         let mut refusing = false;
@@ -961,9 +1218,15 @@ fn accept(listener: std::os::unix::net::UnixListener, dispatch: Dispatch, frames
                 continue;
             };
             // A socket accepted from a non-blocking listener is non-blocking
-            // itself on macOS; each frame thread reads and writes plainly.
+            // itself on macOS; each frame task reads and writes plainly.
             let _ = stream.set_nonblocking(false);
             let busy = Busy { gate: frames.gate.clone(), id };
+            // Enforce same-UID peer identity before allocating a frame slot or reading bytes (S-30).
+            if let Err(error) = verify_peer_uid(&stream) {
+                log::warn!("refusing unix socket peer: {error}");
+                drop(busy);
+                continue;
+            }
             let Some(slot) = frames.take() else {
                 if !refusing {
                     log::warn!("{} socket frames are already in progress; refusing new ones until some finish", frames.limit);
@@ -980,25 +1243,46 @@ fn accept(listener: std::os::unix::net::UnixListener, dispatch: Dispatch, frames
             }
             let dispatch = dispatch.clone();
             let failed_sends = failed_sends.clone();
-            // One thread per hook: a permission frame parks until it is
-            // answered, and the next hook must not queue behind it.
-            let _ = std::thread::Builder::new().name("hook-frame".into()).spawn(crate::github_process::queued(move || {
-                let _slot = slot;
-                // A hook writes its frame as soon as it connects.
-                let _ = stream.set_read_timeout(Some(FRAME_READ));
-                let mut reader = BufReader::new(match stream.try_clone() {
-                    Ok(s) => s,
-                    Err(_) => return,
+            let failed_check = failed_check.clone();
+            // Dispatch onto the reusable worker pool instead of spawning a new OS thread per frame (P-53).
+            frames.pool.submit(crate::github_process::queued(move || {
+                with_active_slot(slot, move || {
+                    // A hook writes its frame as soon as it connects.
+                    let _ = stream.set_read_timeout(Some(FRAME_READ));
+                    let mut reader = BufReader::new(match stream.try_clone() {
+                        Ok(s) => s,
+                        Err(_) => return,
+                    });
+                    let mut line = String::new();
+                    if reader.by_ref().take(MAX_FRAME_BYTES + 1).read_line(&mut line).is_err() || line.trim().is_empty() {
+                        return;
+                    }
+                    if line.len() as u64 > MAX_FRAME_BYTES {
+                        log::warn!("refusing oversized socket frame (>{MAX_FRAME_BYTES} bytes)");
+                        return;
+                    }
+                    let _ = stream.set_read_timeout(None);
+                    if let Some(path) = &failed_sends {
+                        failed_check.maybe_report(path);
+                    }
+                    // Parse JSON once and reuse the Value across gate inspection and dispatch (P-53).
+                    let parsed = serde_json::from_str::<Value>(&line);
+                    let parsed_ref = parsed.as_ref().ok();
+                    // Read while frozen, it is held as the queue would have held it.
+                    let Some(stream) = busy.read(stream, &line, parsed_ref) else { return };
+                    answer_frame(
+                        stream,
+                        busy,
+                        |_| match parsed {
+                            Ok(value) => dispatch(value),
+                            Err(error) => {
+                                log::warn!("socket frame: {error}");
+                                serde_json::to_value(HookReply::default()).unwrap_or_default()
+                            }
+                        },
+                        Some(line),
+                    );
                 });
-                let mut line = String::new();
-                if reader.read_line(&mut line).is_err() || line.trim().is_empty() {
-                    return;
-                }
-                let _ = stream.set_read_timeout(None);
-                if let Some(path) = &failed_sends { report_failed_sends(path); }
-                // Read while frozen, it is held as the queue would have held it.
-                let Some(stream) = busy.read(stream, &line) else { return };
-                answer_frame(stream, busy, |_| dispatch(&line), Some(line.clone()));
             }));
         }
     })?;
@@ -1032,6 +1316,58 @@ fn failed_sends_beside(socket: &Path) -> PathBuf {
     socket.with_file_name(FAILED_SENDS)
 }
 
+#[cfg(unix)]
+static FAILED_SENDS_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Throttle `hook-failures.jsonl` checks so normal frames avoid an unconditional
+/// `fs::rename` syscall on every IPC call (P-53), while checking immediately on
+/// the first frame, periodically every 5 seconds, or right after an in-process note.
+#[cfg(unix)]
+struct FailedSendsThrottle {
+    started: std::time::Instant,
+    last_check_ms: std::sync::atomic::AtomicU64,
+    last_gen: std::sync::atomic::AtomicU64,
+}
+
+#[cfg(unix)]
+impl FailedSendsThrottle {
+    const INTERVAL_MS: u64 = 5_000;
+
+    fn new() -> Self {
+        Self {
+            started: std::time::Instant::now(),
+            last_check_ms: std::sync::atomic::AtomicU64::new(0),
+            last_gen: std::sync::atomic::AtomicU64::new(FAILED_SENDS_GEN.load(std::sync::atomic::Ordering::Acquire)),
+        }
+    }
+
+    fn maybe_report(&self, path: &Path) {
+        use std::sync::atomic::Ordering;
+        let current_gen = FAILED_SENDS_GEN.load(Ordering::Acquire);
+        let gen_changed = self.last_gen.swap(current_gen, Ordering::AcqRel) != current_gen;
+        let now_ms = u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX).saturating_add(1);
+        let prev_ms = self.last_check_ms.load(Ordering::Acquire);
+        let due = prev_ms == 0 || now_ms.saturating_sub(prev_ms) >= Self::INTERVAL_MS;
+        if !gen_changed && !due {
+            return;
+        }
+        if !gen_changed
+            && self
+                .last_check_ms
+                .compare_exchange(prev_ms, now_ms, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+        {
+            return;
+        }
+        if gen_changed {
+            self.last_check_ms.store(now_ms, Ordering::Release);
+        }
+        if std::fs::symlink_metadata(path).is_ok() {
+            report_failed_sends(path);
+        }
+    }
+}
+
 /// Leave a note beside `socket` that `frame` could not be delivered: at
 /// which `stage`, why, its size and how long it was tried. Nothing of what
 /// the frame carried is noted, only what names it.
@@ -1049,7 +1385,9 @@ fn note_failed_send(socket: &Path, frame: &HookFrame, stage: &str, error: &str, 
     });
     let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).mode(0o600).open(&path) else { return };
     // One write, so that notes appended at once by several hooks stay whole.
-    let _ = file.write_all(format!("{note}\n").as_bytes());
+    if file.write_all(format!("{note}\n").as_bytes()).is_ok() {
+        FAILED_SENDS_GEN.fetch_add(1, std::sync::atomic::Ordering::Release);
+    }
 }
 
 /// Log at WARN the notes left at `path` by hooks that could not reach this
@@ -1264,16 +1602,37 @@ fn named(state: &GateState, phase: Phase) -> String {
     named
 }
 
+/// What a frame is, from an already-parsed JSON value (P-53).
+#[cfg(unix)]
+fn describe_value(value: Option<&Value>) -> String {
+    match value {
+        Some(v) => {
+            if let Some(command) = v.get("command").and_then(Value::as_str) {
+                format!("control command {command}")
+            } else if let Some(event) = v.get("event").and_then(Value::as_str) {
+                format!("hook {event}")
+            } else {
+                "a frame that does not parse".into()
+            }
+        }
+        None => "a frame that does not parse".into(),
+    }
+}
+
 /// What a frame is, by its line: a hook's event or a control command.
 #[cfg(unix)]
 fn describe(line: &str) -> String {
-    #[derive(Deserialize)]
-    struct Head { command: Option<String>, event: Option<String> }
-    match serde_json::from_str::<Head>(line) {
-        Ok(Head { command: Some(command), .. }) => format!("control command {command}"),
-        Ok(Head { event: Some(event), .. }) => format!("hook {event}"),
-        _ => "a frame that does not parse".into(),
-    }
+    let parsed = serde_json::from_str::<Value>(line).ok();
+    describe_value(parsed.as_ref())
+}
+
+/// Whether a frame read while the bridge drains is held, from a parsed Value (P-53).
+#[cfg(unix)]
+fn held_while_draining_value(value: Option<&Value>) -> bool {
+    value
+        .and_then(|v| v.get("command"))
+        .and_then(Value::as_str)
+        .is_some_and(|command| !command.starts_with("runtime."))
 }
 
 /// Whether a frame read while the bridge drains is held: a control command
@@ -1282,9 +1641,8 @@ fn describe(line: &str) -> String {
 /// (`runtime.*`), the handover itself among it, which nobody would see held.
 #[cfg(unix)]
 fn held_while_draining(line: &str) -> bool {
-    #[derive(Deserialize)]
-    struct Head { command: Option<String> }
-    matches!(serde_json::from_str::<Head>(line), Ok(Head { command: Some(command) }) if !command.starts_with("runtime."))
+    let parsed = serde_json::from_str::<Value>(line).ok();
+    held_while_draining_value(parsed.as_ref())
 }
 
 /// Whether the other end of `stream` has closed it: nothing more to read,
@@ -1365,10 +1723,10 @@ impl Busy {
 
     /// Its `line` has been read from `stream`: it is answered now, or, the
     /// bridge frozen, held as a frame that waited in the queue, and `None`.
-    fn read(&self, stream: std::os::unix::net::UnixStream, line: &str) -> Option<std::os::unix::net::UnixStream> {
-        let what = describe(line);
+    fn read(&self, stream: std::os::unix::net::UnixStream, line: &str, parsed: Option<&Value>) -> Option<std::os::unix::net::UnixStream> {
+        let what = describe_value(parsed);
         let mut state = self.gate.lock();
-        if state.frozen || (state.draining && held_while_draining(line)) {
+        if state.frozen || (state.draining && held_while_draining_value(parsed)) {
             state.held.push(HeldFrame { stream, line: line.to_string(), queued: true });
             return None;
         }
@@ -1433,6 +1791,13 @@ pub(crate) struct Resumable {
 pub(crate) fn resumable() -> Resumable {
     #[cfg(unix)]
     {
+        // Long-poll waits transfer out of the short-lived MAX_FRAMES budget into
+        // MAX_LONG_WAIT_FRAMES so parked waits never starve short hooks/RPCs (P-52).
+        ACTIVE_SLOT.with(|active| {
+            if let Some(slot) = active.borrow_mut().as_mut() {
+                slot.promote_to_long_wait();
+            }
+        });
         let frame = FRAME.with(|frame| frame.borrow().clone());
         let stream = CALLER.with(|caller| caller.borrow().as_ref().and_then(|stream| stream.try_clone().ok()));
         let (Some(Answering { gate, line: Some(line), id }), Some(stream)) = (frame, stream) else { return Resumable { gate: None } };
@@ -1822,6 +2187,8 @@ struct Publisher {
     token: String,
     dispatch: Dispatch,
     #[cfg(unix)]
+    dispatch_val: DispatchValue,
+    #[cfg(unix)]
     frames: Frames,
     published: std::sync::Arc<std::sync::atomic::AtomicBool>,
     held: Option<Claim>,
@@ -1912,7 +2279,7 @@ impl Publisher {
                 return Err(error.context("write the control token"));
             }
             let kept = listener.try_clone()?;
-            accept(listener, self.dispatch.clone(), self.frames.clone())?;
+            accept(listener, self.dispatch_val.clone(), self.frames.clone())?;
             Ok(Claim { _lock: lock, identity, listener: kept })
         }
         #[cfg(windows)]
@@ -1942,6 +2309,14 @@ where
             return serde_json::to_value(HookReply::default()).unwrap_or_default();
         }
     };
+    dispatch_value(value, control_token, hook_handler, control_handler)
+}
+
+fn dispatch_value<F, C>(value: Value, control_token: &str, hook_handler: &F, control_handler: &C) -> Value
+where
+    F: Fn(HookFrame) -> HookReply + ?Sized,
+    C: Fn(crate::control::ControlRequest) -> crate::control::ControlResponse + ?Sized,
+{
     if value.get("command").is_some() {
         let request_id = value.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
         let request: crate::control::ControlRequest = match serde_json::from_value(value) {
@@ -2079,7 +2454,13 @@ fn ask_app_with_policy(event: &str, stdin: &str, local_decision: bool) -> Option
             stream.set_write_timeout(Some(FRAME_WRITE)).map_err(failed("connect"))?;
             stream.write_all(&bytes).and_then(|()| stream.flush()).map_err(failed("write"))?;
             let mut line = String::new();
-            BufReader::new(stream).read_line(&mut line).map_err(failed("read the reply"))?;
+            BufReader::new(stream)
+                .take(MAX_FRAME_BYTES + 1)
+                .read_line(&mut line)
+                .map_err(failed("read the reply"))?;
+            if line.len() as u64 > MAX_FRAME_BYTES {
+                return Err(("read the reply", "reply exceeded maximum frame size".into()));
+            }
             if line.trim().is_empty() {
                 return Err(("read the reply", "the connection closed without a reply".into()));
             }
@@ -2485,8 +2866,8 @@ mod tests {
         let (entered, inside) = mpsc::channel::<()>();
         let entered = Mutex::new(entered);
         let gate = held.clone();
-        let dispatch: Dispatch = Arc::new(move |line: &str| {
-            if line.contains("\"command\"") {
+        let dispatch: DispatchValue = Arc::new(move |value: Value| {
+            if value.get("command").is_some() {
                 return json!({"ok": true});
             }
             entered.lock().unwrap().send(()).unwrap();
@@ -3352,5 +3733,58 @@ mod tests {
         });
         assert_eq!(reply_forged["ok"], false);
         assert_eq!(reply_forged["error"]["code"], "unauthorized");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn under_root_rejects_symlinks_and_dangling_symlinks_s29() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("transcripts");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+
+        let secret = outside.join("secret.txt");
+        std::fs::write(&secret, "secret").unwrap();
+
+        // Legitimate existing and not-yet-created files inside root pass.
+        let good = root.join("chat.jsonl");
+        std::fs::write(&good, "{}\n").unwrap();
+        assert!(under_root(&root, &good));
+        assert!(under_root(&root, &root.join("future.jsonl")));
+
+        // Direct symlink inside root pointing outside must be rejected (no lexical short-circuit).
+        let link = root.join("evil.jsonl");
+        std::os::unix::fs::symlink(&secret, &link).unwrap();
+        assert!(!under_root(&root, &link));
+
+        // Symlinked subdirectory inside root pointing outside must be rejected.
+        let sub_link = root.join("sub");
+        std::os::unix::fs::symlink(&outside, &sub_link).unwrap();
+        assert!(!under_root(&root, &sub_link.join("secret.txt")));
+        assert!(!under_root(&root, &sub_link.join("not-yet-created.jsonl")));
+
+        // Dangling symlink inside root must also fail closed.
+        let dangling = root.join("dangling.jsonl");
+        std::os::unix::fs::symlink(outside.join("missing.txt"), &dangling).unwrap();
+        assert!(!under_root(&root, &dangling));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn peer_uid_check_passes_same_user_and_resumable_releases_short_frame_slot_s30_p52() {
+        let (a, _b) = std::os::unix::net::UnixStream::pair().unwrap();
+        verify_peer_uid(&a).expect("same-UID unix socket peer must be accepted");
+
+        let frames = Frames::new(1).unwrap();
+        let mut slot = frames.take().expect("first short frame slot acquired");
+        assert!(frames.take().is_none(), "short frame limit of 1 is full");
+        assert!(slot.promote_to_long_wait(), "long wait promotion succeeds");
+        assert_eq!(frames.count.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(frames.long_wait_count.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let second = frames.take().expect("short frame slot freed for non-wait frames");
+        drop(second);
+        drop(slot);
+        assert_eq!(frames.long_wait_count.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 }

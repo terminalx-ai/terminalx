@@ -93,7 +93,8 @@ fn read_title(path: &Path, conversation: Option<&str>) -> Option<String> {
 /// never sent anywhere.
 pub fn first_request(session: &SessionEntry) -> Option<String> {
     let tab = session.tabs.first()?;
-    let path = super::log_path(&session.id, &tab.id).ok()?;
+    let root = super::root().ok()?;
+    let path = super::log_path_for_tab(&root, &session.id, tab).ok()?;
     find_request(&path, tab.follow.conversation.as_deref(), |text| (!text.trim().is_empty()).then(|| text.to_string()))
 }
 
@@ -135,17 +136,73 @@ fn find_request<T>(path: &Path, conversation: Option<&str>, pick: impl Fn(&str) 
 /// persisted once; future refreshes only inspect tabs that still lack a name.
 pub fn backfill() -> Result<Vec<SessionEntry>> {
     let sessions = index::load()?;
+    let titles = collect_missing_titles(&sessions)?;
+    if titles.is_empty() {
+        return Ok(sessions);
+    }
+    apply_missing_titles(titles)?;
+    // Updates read the raw index; reload to include message-activity sidecars.
+    index::load()
+}
+
+/// Schedule conversation-title backfilling on a background thread (single-flight)
+/// so listing sessions does not block on scanning unnamed JSONL logs (P-17).
+pub fn spawn_backfill_if_needed(sessions: &[SessionEntry]) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    if !sessions.iter().any(|session| session.tabs.iter().any(unnamed)) {
+        return;
+    }
+    static RUNNING: AtomicBool = AtomicBool::new(false);
+    if RUNNING.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
+        return;
+    }
+    let snapshot = sessions.to_vec();
+    let spawned = std::thread::Builder::new()
+        .name("conversation-titles-backfill".into())
+        .spawn(move || {
+            let _reset = scopeguard_reset(&RUNNING);
+            match collect_missing_titles(&snapshot) {
+                Ok(titles) if !titles.is_empty() => {
+                    if let Err(error) = apply_missing_titles(titles) {
+                        log::debug!("background conversation title backfill failed: {error:#}");
+                    }
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    log::debug!("background conversation title scan failed: {error:#}");
+                }
+            }
+        });
+    if spawned.is_err() {
+        RUNNING.store(false, Ordering::Release);
+    }
+}
+
+fn scopeguard_reset(flag: &'static std::sync::atomic::AtomicBool) -> impl Drop {
+    struct Reset(&'static std::sync::atomic::AtomicBool);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            self.0.store(false, std::sync::atomic::Ordering::Release);
+        }
+    }
+    Reset(flag)
+}
+
+fn collect_missing_titles(sessions: &[SessionEntry]) -> Result<Vec<(String, String, String)>> {
+    let root = super::root()?;
     let mut titles = Vec::new();
-    for session in &sessions {
+    for session in sessions {
         for tab in session.tabs.iter().filter(|tab| unnamed(tab)) {
-            if let Some(title) = read_title(&super::log_path(&session.id, &tab.id)?, tab.follow.conversation.as_deref()) {
+            let path = super::log_path_for_tab(&root, &session.id, tab)?;
+            if let Some(title) = read_title(&path, tab.follow.conversation.as_deref()) {
                 titles.push((session.id.clone(), tab.id.clone(), title));
             }
         }
     }
-    if titles.is_empty() {
-        return Ok(sessions);
-    }
+    Ok(titles)
+}
+
+fn apply_missing_titles(titles: Vec<(String, String, String)>) -> Result<()> {
     index::update(|sessions| {
         for (session_id, tab_id, title) in titles {
             if let Some(tab) = sessions
@@ -160,9 +217,7 @@ pub fn backfill() -> Result<Vec<SessionEntry>> {
         }
         // Naming is metadata; do not reorder worktrees by touching modified.
         Ok(())
-    })?;
-    // Updates read the raw index; reload to include message-activity sidecars.
-    index::load()
+    })
 }
 
 /// Called after a top-level user message is persisted, including provider TUI
@@ -172,7 +227,8 @@ pub fn name_tab(session_id: &str, tab_id: &str) -> Result<Option<SessionEntry>> 
     let Some(tab) = session.tab(tab_id).filter(|tab| unnamed(tab)) else {
         return Ok(None);
     };
-    let Some(title) = read_title(&super::log_path(session_id, tab_id)?, tab.follow.conversation.as_deref()) else {
+    let root = super::root()?;
+    let Some(title) = read_title(&super::log_path_for_tab(&root, session_id, tab)?, tab.follow.conversation.as_deref()) else {
         return Ok(None);
     };
     index::update(|sessions| {

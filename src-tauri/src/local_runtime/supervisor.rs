@@ -152,6 +152,8 @@ struct Inner {
     recovered: HashMap<Target, (Instant, u32)>,
     losses: u64,
     halted: bool,
+    /// True while the initial background startup attach is in flight (P-21).
+    starting: bool,
 }
 
 fn ms(duration: Duration) -> u64 { duration.as_millis().try_into().unwrap_or(u64::MAX) }
@@ -245,7 +247,18 @@ impl Inner {
                 down_ms: ms(now.saturating_duration_since(retry.since)), message: retry.message.clone() }
         };
         if let Some(retry) = self.pending.get(&Target::Events) { return retrying(retry, false); }
-        let Some(attached) = attached else { return ConnectionState::Unavailable { message: unattached.into(), start_failed: None } };
+        let Some(attached) = attached else {
+            if self.starting {
+                return ConnectionState::Connecting {
+                    terminal: false,
+                    attempt: 1,
+                    retry_in_ms: 0,
+                    down_ms: 0,
+                    message: "Connecting to the background runtime…".into(),
+                };
+            }
+            return ConnectionState::Unavailable { message: unattached.into(), start_failed: None };
+        };
         let Some(epoch) = attached.epoch else {
             // Closed a moment ago; its loss is on the way.
             return ConnectionState::Connecting { terminal: false, attempt: 1, retry_in_ms: 0, down_ms: 0, message: LOST_EVENTS.into() };
@@ -338,16 +351,27 @@ impl Supervisor {
         }
     }
 
+    /// Mark the initial asynchronous startup attach as in progress so the
+    /// window paints immediately in `Connecting` state rather than flashing
+    /// `Unavailable` (P-21).
+    pub(crate) fn begin_initial_attach(&self) {
+        self.inner.lock().unwrap().starting = true;
+    }
+
     /// The first attachment, at launch.
     pub(crate) fn attached(&self, generation: u64) {
         let mut inner = self.inner.lock().unwrap();
+        inner.starting = false;
         inner.generation = inner.generation.max(generation);
+        drop(inner);
+        self.emit();
     }
 
     /// The first attachment failed at launch: keep trying, as after any loss.
     pub(crate) fn unattached(&self, error: &anyhow::Error) {
         let now = Instant::now();
         let mut inner = self.inner.lock().unwrap();
+        inner.starting = false;
         if !inner.lose(Target::Events, 0, LOST_EVENTS, now, jitter()) { return; }
         let loss = inner.losses;
         // Logged as the launch's own failure to attach.
