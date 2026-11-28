@@ -136,9 +136,12 @@ fn write_vnc_env_file(password: &str) -> Result<tempfile::NamedTempFile> {
         use std::os::unix::fs::PermissionsExt;
         builder.permissions(std::fs::Permissions::from_mode(0o600));
     }
+    #[cfg(unix)]
     let mut file = builder.tempfile_in(&dir).context("create private VNC env file")?;
     #[cfg(windows)]
-    crate::win::security::restrict_handle(file.as_file()).context("restrict private VNC env file")?;
+    let mut file = builder
+        .make_in(&dir, crate::win::fs::create_new_private)
+        .context("create private VNC env file")?;
     writeln!(file, "VNC_PW={password}")?;
     file.as_file().sync_all()?;
     Ok(file)

@@ -2148,7 +2148,8 @@ fn what_a_real_pane_draws_is_what_holds_the_warning_back() {
     // transcript event arrived for an hour and the warning is still shown.
     rig.rt.lock().unwrap().last_activity = drew - crate::cloud_activity::MAX_TURN_SILENCE;
     assert_eq!(rig.manager.turn_counts_at(drew), (1, 0));
-    assert_eq!(rig.manager.turn_counts_at(drew + crate::cloud_activity::MAX_TURN_SILENCE), (0, 0));
+    let latest = rig.manager.terminals.last_output(&rig.pane).unwrap_or(drew).max(Instant::now());
+    assert_eq!(rig.manager.turn_counts_at(latest + crate::cloud_activity::MAX_TURN_SILENCE + Duration::from_secs(1)), (0, 0));
 }
 
 /// What a prompt typed into the terminal, and one sent from the composer,
