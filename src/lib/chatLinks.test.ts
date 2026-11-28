@@ -155,4 +155,12 @@ describe("chat link routing", () => {
   it("rejects executable schemes", async () => {
     await expect(openChatLink(parseChatLink("javascript:alert(1)"), context)).rejects.toThrow("not allowed");
   });
+
+  it("S-05: blocks direct external opening of executables, scripts, bundles, HTML, and SVG files", async () => {
+    for (const rel of ["payload.command", "run.sh", "evil.app", "Evil.app/Contents/MacOS/bin", "drop.exe", "page.html", "vector.svg"]) {
+      vi.mocked(fs.inspectPath).mockResolvedValueOnce(info({ path: `/workspace/${rel}`, root: "/workspace", rel, text: false }));
+      await expect(openChatLink(parseChatLink(rel), context)).rejects.toThrow("cannot be opened directly");
+      expect(fs.openPath).not.toHaveBeenCalled();
+    }
+  });
 });

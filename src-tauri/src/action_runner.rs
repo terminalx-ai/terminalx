@@ -253,9 +253,10 @@ fn command_line(command: &str, env: &[(String, String)]) -> String {
     format!("env {} {} -c {}", assignments.join(" "), quote(&shell), quote(command))
 }
 
-/// Single-quoted for POSIX shells, and read the same way by fish.
+/// Single-quoted for POSIX shells; `pty::spawn_after` decodes POSIX words
+/// into direct argv (`exec "$@"`) or `fish_quote` for `fish`.
 fn quote(text: &str) -> String {
-    format!("'{}'", text.replace('\'', r"'\''"))
+    crate::pty::posix_quote(text)
 }
 
 /// A session's runs, oldest first: one per action tab still open.

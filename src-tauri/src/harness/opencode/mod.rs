@@ -37,20 +37,191 @@ pub use crate::harness::Action;
 /// without unbounded memory growth over long-lived sessions.
 const MAX_TRACKED_IDS: usize = 64;
 
+pub const SERVER_USERNAME_ENV: &str = "OPENCODE_SERVER_USERNAME";
+pub const SERVER_PASSWORD_ENV: &str = "OPENCODE_SERVER_PASSWORD";
+const SERVER_USERNAME: &str = "opencode";
+
+#[derive(Clone)]
+struct PortAuth {
+    username: String,
+    password: String,
+    expected_pid: Option<u32>,
+    verified: bool,
+}
+
+fn port_auth_registry() -> &'static std::sync::Mutex<HashMap<u16, PortAuth>> {
+    static REGISTRY: std::sync::OnceLock<std::sync::Mutex<HashMap<u16, PortAuth>>> = std::sync::OnceLock::new();
+    REGISTRY.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+fn generate_server_password() -> String {
+    use base64::Engine as _;
+    use rand_core::{OsRng, RngCore};
+    let mut bytes = [0u8; 32];
+    OsRng.fill_bytes(&mut bytes);
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+}
+
+pub fn basic_auth_header(username: &str, password: &str) -> String {
+    use base64::Engine as _;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(format!("{username}:{password}"));
+    format!("Basic {encoded}")
+}
+
+fn register_port_auth(port: u16, password: String) {
+    port_auth_registry().lock().unwrap_or_else(|e| e.into_inner()).insert(
+        port,
+        PortAuth {
+            username: SERVER_USERNAME.into(),
+            password,
+            expected_pid: None,
+            verified: false,
+        },
+    );
+}
+
+/// Called by [`crate::harness::host::Host::spawn`] when spawning `opencode serve`
+/// so the child receives its per-launch authentication secret strictly via
+/// environment variables (never CLI args).
+pub(crate) fn bind_spawn_auth(_program: &std::path::Path, args: &[String]) -> Option<(u16, Vec<(String, String)>)> {
+    if args.len() >= 5
+        && args[0] == "serve"
+        && args[1] == "--hostname"
+        && args[2] == "127.0.0.1"
+        && args[3] == "--port"
+    {
+        let port: u16 = args[4].parse().ok()?;
+        let guard = port_auth_registry().lock().unwrap_or_else(|e| e.into_inner());
+        let auth = guard.get(&port)?;
+        return Some((
+            port,
+            vec![
+                (SERVER_USERNAME_ENV.into(), auth.username.clone()),
+                (SERVER_PASSWORD_ENV.into(), auth.password.clone()),
+            ],
+        ));
+    }
+    None
+}
+
+pub(crate) fn attach_spawn_pid(port: u16, pid: u32) {
+    if let Some(entry) = port_auth_registry().lock().unwrap_or_else(|e| e.into_inner()).get_mut(&port) {
+        entry.expected_pid = Some(pid);
+    }
+}
+
+pub(crate) fn clear_port_auth(port: u16, pid: Option<u32>) {
+    let mut guard = port_auth_registry().lock().unwrap_or_else(|e| e.into_inner());
+    let should_remove = match (pid, guard.get(&port)) {
+        (None, Some(_)) => true,
+        (Some(p), Some(entry)) => entry.expected_pid == Some(p) || entry.expected_pid.is_none(),
+        _ => false,
+    };
+    if should_remove {
+        guard.remove(&port);
+    }
+}
+
+fn loopback_port(url: &str) -> Option<u16> {
+    let rest = url.strip_prefix("http://127.0.0.1:")?;
+    let port_str = rest.split('/').next()?;
+    port_str.parse::<u16>().ok()
+}
+
+/// If `url` targets a port allocated with a per-launch secret, verify that
+/// (1) the spawned server process is still alive (detecting `EADDRINUSE`
+///     exit caused by a port squatter), and
+/// (2) before ever sending credentials on the wire, an unauthenticated probe
+///     receives `401 Unauthorized` (proving the listener enforces auth rather
+///     than being an unauthenticated server).
+fn verify_and_auth_header(
+    url: &str,
+    retry_for: std::time::Duration,
+    alive: &dyn Fn() -> bool,
+) -> Result<Option<String>, String> {
+    let Some(port) = loopback_port(url) else { return Ok(None) };
+    let initial = port_auth_registry().lock().unwrap_or_else(|e| e.into_inner()).get(&port).cloned();
+    let Some(auth) = initial else { return Ok(None) };
+
+    if let Some(pid) = auth.expected_pid {
+        if !crate::harness::host::group_or_process_alive(pid) {
+            return Err("OpenCode server process exited before answering".into());
+        }
+    }
+    if auth.verified {
+        return Ok(Some(basic_auth_header(&auth.username, &auth.password)));
+    }
+
+    let probe_url = format!("http://127.0.0.1:{port}/session");
+    let probe_agent = ureq::AgentBuilder::new()
+        .timeout_connect(std::time::Duration::from_secs(2))
+        .timeout(std::time::Duration::from_secs(5))
+        .redirects(0)
+        .build();
+    let started = std::time::Instant::now();
+    loop {
+        if !alive() {
+            return Err("OpenCode server stopped".into());
+        }
+        if let Some(pid) = auth.expected_pid {
+            if !crate::harness::host::group_or_process_alive(pid) {
+                return Err("OpenCode server process exited before answering".into());
+            }
+        }
+        match probe_agent.get(&probe_url).call() {
+            Err(ureq::Error::Status(401, _)) => {
+                if let Some(entry) = port_auth_registry().lock().unwrap_or_else(|e| e.into_inner()).get_mut(&port) {
+                    if entry.password == auth.password {
+                        entry.verified = true;
+                    }
+                }
+                return Ok(Some(basic_auth_header(&auth.username, &auth.password)));
+            }
+            Ok(resp) => {
+                return Err(format!(
+                    "Refused unauthenticated OpenCode listener on 127.0.0.1:{port} (expected HTTP 401, got {})",
+                    resp.status()
+                ));
+            }
+            Err(ureq::Error::Status(code, _)) => {
+                return Err(format!(
+                    "Refused OpenCode listener on 127.0.0.1:{port} that did not challenge with HTTP 401 (got {code})"
+                ));
+            }
+            Err(ureq::Error::Transport(_)) if started.elapsed() < retry_for => {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(e) => return Err(format!("OpenCode server probe failed: {e}")),
+        }
+    }
+}
+
 pub struct SpawnPlan {
     pub program: std::path::PathBuf,
     pub args: Vec<String>,
     pub port: u16,
+    #[allow(dead_code)]
+    pub env: Vec<(String, String)>,
 }
 
-/// A free loopback port, then the server pinned to it.
+/// A free loopback port, a high-entropy per-launch secret, and the server pinned to it.
 pub fn spawn_plan() -> Option<SpawnPlan> {
     let program = crate::binpath::resolve("opencode")?;
+    Some(spawn_plan_for_program(program)?)
+}
+
+fn spawn_plan_for_program(program: std::path::PathBuf) -> Option<SpawnPlan> {
     let port = std::net::TcpListener::bind("127.0.0.1:0").ok()?.local_addr().ok()?.port();
+    let password = generate_server_password();
+    register_port_auth(port, password.clone());
     Some(SpawnPlan {
         program,
         args: vec!["serve".into(), "--hostname".into(), "127.0.0.1".into(), "--port".into(), port.to_string()],
         port,
+        env: vec![
+            (SERVER_USERNAME_ENV.into(), SERVER_USERNAME.into()),
+            (SERVER_PASSWORD_ENV.into(), password),
+        ],
     })
 }
 
@@ -600,11 +771,27 @@ const STARTUP_WAIT: std::time::Duration = std::time::Duration::from_secs(120);
 /// server is gone.
 pub fn pump_events(base: &str, alive: impl Fn() -> bool, emit: impl Fn(String)) {
     use std::io::{BufRead, BufReader};
-    let agent = ureq::AgentBuilder::new().timeout_connect(std::time::Duration::from_secs(2)).build();
-    // Wait for the server to answer at all.
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(std::time::Duration::from_secs(2))
+        .redirects(0)
+        .build();
+    let auth_header = match verify_and_auth_header(base, STARTUP_WAIT, &alive) {
+        Ok(hdr) => hdr,
+        Err(message) => {
+            if alive() {
+                emit(json!({"type": "session.error", "properties": {"error": {"name": "StartupError", "data": {"message": message}}}}).to_string());
+            }
+            return;
+        }
+    };
+    // Wait for the server to answer at all (with credentials when registered).
     let started = std::time::Instant::now();
     while alive() && started.elapsed() < STARTUP_WAIT {
-        if agent.get(&format!("{base}/session")).call().is_ok() {
+        let mut req = agent.get(&format!("{base}/session"));
+        if let Some(hdr) = auth_header.as_deref() {
+            req = req.set("Authorization", hdr);
+        }
+        if req.call().is_ok() {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(400));
@@ -617,7 +804,11 @@ pub fn pump_events(base: &str, alive: impl Fn() -> bool, emit: impl Fn(String)) 
         return;
     }
     while alive() {
-        let Ok(resp) = agent.get(&format!("{base}/event")).call() else {
+        let mut req = agent.get(&format!("{base}/event"));
+        if let Some(hdr) = auth_header.as_deref() {
+            req = req.set("Authorization", hdr);
+        }
+        let Ok(resp) = req.call() else {
             std::thread::sleep(std::time::Duration::from_millis(800));
             continue;
         };
@@ -758,7 +949,13 @@ fn bounded_http_with_limits(
     const MAX: usize = 8 * 1024 * 1024;
     const CHUNK: usize = 4096;
     if payload.len() > MAX { return PhysicalOutcome::Refused; }
-    let bytes = format!("{method} /{path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}", payload.len()).into_bytes();
+    let auth_header = match verify_and_auth_header(url, limits.connect_retry.min(limits.budget), &|| true) {
+        Ok(hdr) => hdr,
+        Err(_) => return PhysicalOutcome::Refused,
+    };
+    if !current() { return PhysicalOutcome::Refused; }
+    let auth_line = auth_header.map(|hdr| format!("Authorization: {hdr}\r\n")).unwrap_or_default();
+    let bytes = format!("{method} /{path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n{auth_line}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}", payload.len()).into_bytes();
     let started = Instant::now();
     let deadline = started + limits.budget;
     let pause = || std::thread::sleep(Duration::from_millis(5));
@@ -886,10 +1083,19 @@ pub(crate) fn perform_mobile(
 
 fn perform_with_timeout(tag: &str, method: &str, url: &str, body: Option<Value>,
     timeout: std::time::Duration, retry_for: std::time::Duration) -> String {
-    let agent = ureq::AgentBuilder::new().timeout(timeout).build();
+    let auth_header = match verify_and_auth_header(url, retry_for, &|| true) {
+        Ok(hdr) => hdr,
+        Err(message) => {
+            return json!({"raccoon_http": {"tag": tag, "status": 0, "body": message}}).to_string();
+        }
+    };
+    let agent = ureq::AgentBuilder::new().timeout(timeout).redirects(0).build();
     let started = std::time::Instant::now();
     let (status, body) = loop {
-        let req = agent.request(method, url);
+        let mut req = agent.request(method, url);
+        if let Some(hdr) = auth_header.as_deref() {
+            req = req.set("Authorization", hdr);
+        }
         let resp = match &body {
             Some(b) => req.send_json(b),
             None => req.call(),
@@ -1325,5 +1531,176 @@ mod tests {
         assert!(o.retired.contains("m-149"));
         assert!(!o.prompts.contains("u-0"));
         assert!(!o.retired.contains("m-0"));
+    }
+
+    // ---- S-10 security regression tests ----
+
+    #[test]
+    fn spawn_plan_generates_unique_high_entropy_env_secrets_and_never_puts_secret_in_args() {
+        let p1 = spawn_plan_for_program(std::path::PathBuf::from("/opt/opencode")).unwrap();
+        let p2 = spawn_plan_for_program(std::path::PathBuf::from("/opt/opencode")).unwrap();
+        let secret1 = p1.env.iter().find(|(k, _)| k == SERVER_PASSWORD_ENV).map(|(_, v)| v.clone()).unwrap();
+        let secret2 = p2.env.iter().find(|(k, _)| k == SERVER_PASSWORD_ENV).map(|(_, v)| v.clone()).unwrap();
+        assert!(secret1.len() >= 40, "secret must be >= 256 bits base64url");
+        assert_ne!(secret1, secret2, "each launch must generate a fresh secret");
+        assert!(!p1.args.iter().any(|a| a.contains(&secret1)), "secret must never appear in CLI argv");
+        assert_eq!(p1.env.iter().find(|(k, _)| k == SERVER_USERNAME_ENV).map(|(_, v)| v.as_str()), Some(SERVER_USERNAME));
+        clear_port_auth(p1.port, None);
+        clear_port_auth(p2.port, None);
+    }
+
+    #[test]
+    fn perform_and_pump_events_send_basic_auth_and_reject_unauthenticated_squatter() {
+        use std::io::{Read, Write};
+        use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+
+        // 1. Authenticated server: challenges unauthenticated probe with 401, accepts Basic auth.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let secret = generate_server_password();
+        let expected_auth = basic_auth_header(SERVER_USERNAME, &secret);
+        register_port_auth(port, secret.clone());
+
+        let expected_hdr = expected_auth.clone();
+        let server = std::thread::spawn(move || {
+            let mut saw_unauth_probe = false;
+            let mut saw_authed_post = false;
+            let mut saw_authed_sse = false;
+            for _ in 0..4 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).unwrap();
+                let req = String::from_utf8_lossy(&buf[..n]);
+                let has_auth = req.lines().any(|l| {
+                    l.split_once(':').is_some_and(|(k, v)| k.eq_ignore_ascii_case("authorization") && v.trim() == expected_hdr)
+                });
+                if !has_auth {
+                    saw_unauth_probe = true;
+                    let _ = write!(stream, "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"opencode\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                } else if req.starts_with("POST /session ") {
+                    saw_authed_post = true;
+                    let body = r#"{"id":"ses_auth"}"#;
+                    let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                } else if req.starts_with("GET /session ") {
+                    let body = "[]";
+                    let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                } else if req.starts_with("GET /event ") {
+                    saw_authed_sse = true;
+                    let sse = "data: {\"type\":\"session.idle\",\"properties\":{\"sessionID\":\"ses_auth\"}}\n\n";
+                    let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{sse}", sse.len());
+                }
+                let _ = stream.shutdown(std::net::Shutdown::Write);
+            }
+            (saw_unauth_probe, saw_authed_post, saw_authed_sse)
+        });
+
+        let line: Value = serde_json::from_str(&perform(
+            "session_new",
+            "POST",
+            &format!("http://127.0.0.1:{port}/session"),
+            Some(json!({})),
+        ))
+        .unwrap();
+        assert_eq!(line["raccoon_http"]["status"], 200);
+        assert_eq!(line["raccoon_http"]["body"]["id"], "ses_auth");
+
+        let keep_alive = Arc::new(AtomicBool::new(true));
+        let stop_on_event = keep_alive.clone();
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen_events = events.clone();
+        pump_events(
+            &format!("http://127.0.0.1:{port}"),
+            move || keep_alive.load(Ordering::Acquire),
+            move |ev| {
+                seen_events.lock().unwrap().push(ev);
+                stop_on_event.store(false, Ordering::Release);
+            },
+        );
+        let (saw_unauth, saw_post, saw_sse) = server.join().unwrap();
+        assert!(saw_unauth, "must verify 401 challenge before sending credentials");
+        assert!(saw_post, "POST /session must include matching Basic Authorization header");
+        assert!(saw_sse, "GET /event SSE must include matching Basic Authorization header");
+        assert_eq!(events.lock().unwrap().len(), 1);
+        clear_port_auth(port, None);
+
+        // 2. Unauthenticated port squatter returning 200 OK: client MUST fail closed and NEVER leak Authorization header.
+        let rogue_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let rogue_port = rogue_listener.local_addr().unwrap().port();
+        let rogue_secret = generate_server_password();
+        register_port_auth(rogue_port, rogue_secret.clone());
+        let rogue_server = std::thread::spawn(move || {
+            let (mut stream, _) = rogue_listener.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let n = stream.read(&mut buf).unwrap();
+            let req = String::from_utf8_lossy(&buf[..n]).into_owned();
+            let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n[]");
+            req
+        });
+
+        let refused: Value = serde_json::from_str(&perform_with_timeout(
+            "session_new",
+            "POST",
+            &format!("http://127.0.0.1:{rogue_port}/session"),
+            Some(json!({"prompt": "secret-prompt"})),
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_secs(2),
+        ))
+        .unwrap();
+        assert_eq!(refused["raccoon_http"]["status"], 0, "rogue unauthenticated server must be refused: {refused}");
+        let rogue_seen = rogue_server.join().unwrap();
+        assert!(!rogue_seen.to_ascii_lowercase().contains("authorization:"), "must never leak credentials to unauthenticated squatter: {rogue_seen}");
+        assert!(!rogue_seen.contains("secret-prompt"), "must never leak prompt body to squatter: {rogue_seen}");
+        clear_port_auth(rogue_port, None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn host_spawn_injects_opencode_auth_env_and_clears_on_exit() {
+        use std::os::unix::fs::PermissionsExt;
+        struct NoopSink;
+        impl crate::harness::host::Sink for NoopSink {
+            fn stdout_line(&self, _: String) {}
+            fn stderr_line(&self, _: String) {}
+            fn exited(&self, _: u32, _: Option<i32>) {}
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let out_file = dir.path().join("env.txt");
+        let bin = dir.path().join("opencode");
+        std::fs::write(
+            &bin,
+            format!(
+                "#!/bin/sh\nprintf '%s:%s\\n' \"$OPENCODE_SERVER_USERNAME\" \"$OPENCODE_SERVER_PASSWORD\" > '{}'\n",
+                out_file.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let plan = spawn_plan_for_program(bin).unwrap();
+        let expected_pass = plan.env.iter().find(|(k, _)| k == SERVER_PASSWORD_ENV).unwrap().1.clone();
+        let host = crate::harness::host::Host::new();
+        let child = host
+            .spawn(
+                "opencode-auth-test",
+                crate::harness::host::SpawnSpec {
+                    program: &plan.program,
+                    args: &plan.args,
+                    cwd: dir.path(),
+                    env: &[],
+                    unset: &[],
+                },
+                std::sync::Arc::new(NoopSink),
+            )
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while child.terminal_receipt().is_none() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(child.terminal_receipt().is_some(), "child should exit cleanly");
+        assert_eq!(std::fs::read_to_string(&out_file).unwrap().trim(), format!("{SERVER_USERNAME}:{expected_pass}"));
+        assert!(
+            !port_auth_registry().lock().unwrap().contains_key(&plan.port),
+            "port auth entry must be cleared when child exits"
+        );
     }
 }

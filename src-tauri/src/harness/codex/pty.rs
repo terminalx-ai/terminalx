@@ -150,7 +150,7 @@ pub struct LaunchOptions<'a> {
 }
 
 fn quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\\''"))
+    crate::pty::posix_quote(s)
 }
 
 /// The program a test's sessions run as Codex (`codex_program_for_tests`).

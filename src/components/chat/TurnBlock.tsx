@@ -97,6 +97,7 @@ interface TurnProps {
   resetUnavailable?: string;
   secondOpinionUnavailable?: string;
   retryInNewChatUnavailable?: string;
+  webLinksOnly?: boolean;
 }
 
 function TurnBody({
@@ -127,6 +128,7 @@ function TurnBody({
   resetUnavailable,
   secondOpinionUnavailable,
   retryInNewChatUnavailable,
+  webLinksOnly = false,
 }: TurnProps) {
   const prefs = usePrefs();
   const [expanded, setExpanded] = useDisclosure("fold");
@@ -157,7 +159,7 @@ function TurnBody({
     () => (onReset ?? (onResetAt && turnIndex != null ? (endSeq: number) => onResetAt(endSeq, turnIndex) : undefined)),
     [onReset, onResetAt, turnIndex],
   );
-  const row = (w: WorkItem) => <WorkRow key={w.key} item={w} cwd={cwd} linkContext={linkContext} onSendQueuedNow={onSendQueuedNow} onSendAgain={onSendAgain} agent={agent} />;
+  const row = (w: WorkItem) => <WorkRow key={w.key} item={w} cwd={cwd} linkContext={linkContext} onSendQueuedNow={onSendQueuedNow} onSendAgain={onSendAgain} agent={agent} webLinksOnly={webLinksOnly} />;
 
   return (
     // A block formatting context: a last row's margin stays inside, so the turn's measured height is all the room it takes (#727).
@@ -209,7 +211,7 @@ function TurnBody({
         </div>
       )}
       {streamText.map((s) => (
-        <div key={`${s.ref.messageId}:${s.ref.index}`} className="mb-3"><Markdown text={s.text} streaming linkContext={linkContext} /></div>
+        <div key={`${s.ref.messageId}:${s.ref.index}`} className="mb-3"><Markdown text={s.text} streaming linkContext={linkContext} webLinksOnly={webLinksOnly} remoteImages={false} /></div>
       ))}
 
       {working && !streamText.length && !streamThinking.length && !streamingTool && (
@@ -513,11 +515,11 @@ export function previewFromPartialJson(partial: string): string {
   return "";
 }
 
-const WorkRow = memo(function WorkRow({ item, cwd, linkContext, onSendQueuedNow, onSendAgain, agent }: { item: WorkItem; cwd?: string; linkContext?: { sessionId: string; cwd: string }; onSendQueuedNow?: (seq: number) => void; onSendAgain?: (seq: number) => void; agent?: { id: string; name: string } }) {
+const WorkRow = memo(function WorkRow({ item, cwd, linkContext, onSendQueuedNow, onSendAgain, agent, webLinksOnly = false }: { item: WorkItem; cwd?: string; linkContext?: { sessionId: string; cwd: string }; onSendQueuedNow?: (seq: number) => void; onSendAgain?: (seq: number) => void; agent?: { id: string; name: string }; webLinksOnly?: boolean }) {
   const section = useSearchSection(item.kind === "queued" ? `message:${item.seq}` : item.key);
   switch (item.kind) {
     case "text":
-      return <div className="mb-3"><div {...section}><Markdown text={item.text} linkContext={linkContext} /></div>{linkContext && <MentionedMedia text={item.text} linkContext={linkContext} />}</div>;
+      return <div className="mb-3"><div {...section}><Markdown text={item.text} linkContext={linkContext} webLinksOnly={webLinksOnly} remoteImages={false} /></div>{!webLinksOnly && linkContext && <MentionedMedia text={item.text} linkContext={linkContext} />}</div>;
     case "reasoning":
       return <ReasoningRow name={item.key} text={item.text} durationMs={item.durationMs} linkContext={linkContext} />;
     case "tool":
@@ -698,7 +700,7 @@ function WithdrawnNote({ seq, unconfirmed, onSendAgain }: { seq?: number; unconf
 }
 
 function MentionedMedia({ text, linkContext }: { text: string; linkContext: { sessionId: string; cwd: string } }) {
-  const paths = useMemo(() => mediaMentions(text), [text]);
+  const paths = useMemo(() => mediaMentions(text, linkContext.cwd), [text, linkContext.cwd]);
   return <ChatMedia paths={paths} context={linkContext} />;
 }
 

@@ -245,6 +245,93 @@ pub fn token_matches(expected: &str, given: &str) -> bool {
     a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
+/// Scoped per-tab capability token payload injected into agent tab subprocesses
+/// in place of the app-wide master control token (S-01).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TabCapability {
+    pub session_id: String,
+    pub tab_id: String,
+    pub launch_id: String,
+    pub permission_mode: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bot_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bot_access: Option<String>,
+    /// `"standard"`, `"lead"`, `"worker"`, or `"verifier"`.
+    pub orchestration_role: String,
+}
+
+const TAB_TOKEN_PREFIX: &str = "txcap1.";
+const TAB_TOKEN_DOMAIN: &[u8] = b"terminalx-tab-cap-v1:";
+
+/// Mint an HMAC-SHA256-authenticated capability token bound to one tab launch.
+/// The master `control_token` acts only as the MAC key and is never exposed in
+/// the returned string.
+pub fn mint_tab_token(master_token: &str, capability: &TabCapability) -> String {
+    use base64::Engine as _;
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+
+    let payload = serde_json::to_vec(capability).expect("TabCapability serializes");
+    let encoded_payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload);
+    let mut mac = Hmac::<Sha256>::new_from_slice(master_token.as_bytes()).expect("HMAC accepts any key length");
+    mac.update(TAB_TOKEN_DOMAIN);
+    mac.update(encoded_payload.as_bytes());
+    let sig = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes());
+    format!("{TAB_TOKEN_PREFIX}{encoded_payload}.{sig}")
+}
+
+/// Verify a scoped tab capability token against `master_token` in constant time.
+pub fn verify_tab_token(master_token: &str, token: &str) -> Option<TabCapability> {
+    use base64::Engine as _;
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+
+    if master_token.is_empty() {
+        return None;
+    }
+    let rest = token.strip_prefix(TAB_TOKEN_PREFIX)?;
+    let (encoded_payload, encoded_sig) = rest.split_once('.')?;
+    if encoded_payload.is_empty() || encoded_sig.is_empty() || encoded_sig.contains('.') {
+        return None;
+    }
+    let sig = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(encoded_sig).ok()?;
+    let mut mac = Hmac::<Sha256>::new_from_slice(master_token.as_bytes()).ok()?;
+    mac.update(TAB_TOKEN_DOMAIN);
+    mac.update(encoded_payload.as_bytes());
+    mac.verify_slice(&sig).ok()?;
+    let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(encoded_payload).ok()?;
+    let cap: TabCapability = serde_json::from_slice(&payload).ok()?;
+    if cap.session_id.is_empty() || cap.tab_id.is_empty() || cap.launch_id.is_empty() {
+        return None;
+    }
+    Some(cap)
+}
+
+thread_local! {
+    static CALLER_CAPABILITY: std::cell::RefCell<Option<TabCapability>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The verified scoped tab capability of the current control request, or `None`
+/// when authenticated with the master control token / in-process.
+pub(crate) fn caller_capability() -> Option<TabCapability> {
+    CALLER_CAPABILITY.with(|cap| cap.borrow().clone())
+}
+
+/// Run `f` with `capability` installed as the active control caller capability.
+pub(crate) fn with_caller_capability<T>(capability: Option<TabCapability>, f: impl FnOnce() -> T) -> T {
+    struct Reset(Option<TabCapability>);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            CALLER_CAPABILITY.with(|slot| *slot.borrow_mut() = self.0.take());
+        }
+    }
+    let previous = CALLER_CAPABILITY.with(|slot| slot.replace(capability));
+    let _reset = Reset(previous);
+    f()
+}
+
 /// Whether `candidate` names a file inside `root`.
 ///
 /// The file is often one the CLI has yet to create, so there is nothing to
@@ -1871,7 +1958,11 @@ where
                 return serde_json::to_value(response).unwrap_or_default();
             }
         };
-        if !token_matches(control_token, &request.token) {
+        let capability = if token_matches(control_token, &request.token) {
+            None
+        } else if let Some(cap) = verify_tab_token(control_token, &request.token) {
+            Some(cap)
+        } else {
             let response = crate::control::ControlResponse::failure(
                 request.id,
                 crate::control::ControlError::new(
@@ -1881,8 +1972,8 @@ where
                 ),
             );
             return serde_json::to_value(response).unwrap_or_default();
-        }
-        serde_json::to_value(control_handler(request)).unwrap_or_default()
+        };
+        serde_json::to_value(with_caller_capability(capability, || control_handler(request))).unwrap_or_default()
     } else {
         match serde_json::from_value::<HookFrame>(value) {
             Ok(frame) => serde_json::to_value(hook_handler(frame)).unwrap_or_default(),
@@ -3178,5 +3269,88 @@ mod tests {
         let leftovers: Vec<_> = std::fs::read_dir(own.parent().unwrap()).unwrap().flatten()
             .filter(|entry| entry.file_name().to_string_lossy().starts_with(FAILED_SENDS)).collect();
         assert!(leftovers.is_empty(), "no claimed copy is left behind");
+    }
+
+    #[test]
+    fn scoped_tab_capability_tokens_verify_and_reject_tampering_s01() {
+        let master = mint_token();
+        let cap = TabCapability {
+            session_id: "sess-1".into(),
+            tab_id: "tab-1".into(),
+            launch_id: "launch-1".into(),
+            permission_mode: "plan".into(),
+            bot_id: Some("bot-1".into()),
+            bot_access: Some("readReport".into()),
+            orchestration_role: "worker".into(),
+        };
+        let scoped = mint_tab_token(&master, &cap);
+        assert!(scoped.starts_with(TAB_TOKEN_PREFIX));
+        assert!(!scoped.contains(&master), "scoped token must never expose master control token");
+        assert_eq!(verify_tab_token(&master, &scoped), Some(cap.clone()));
+
+        // Wrong master key must fail.
+        assert_eq!(verify_tab_token(&mint_token(), &scoped), None);
+
+        // Tampered payload (trying to escalate `plan` -> `bypassPermissions`) must fail.
+        let mut escalated = cap.clone();
+        escalated.permission_mode = "bypassPermissions".into();
+        use base64::Engine as _;
+        let forged_payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&escalated).unwrap());
+        let orig_sig = scoped.rsplit_once('.').unwrap().1;
+        let forged = format!("{TAB_TOKEN_PREFIX}{forged_payload}.{orig_sig}");
+        assert_eq!(verify_tab_token(&master, &forged), None);
+
+        // Tampered signature must fail.
+        let mut bad_sig = scoped.clone();
+        bad_sig.push('A');
+        assert_eq!(verify_tab_token(&master, &bad_sig), None);
+
+        // `dispatch_line` installs `caller_capability()` for scoped tokens and `None` for master.
+        let seen_scoped = std::sync::Mutex::new(None);
+        let req = serde_json::to_string(&crate::control::ControlRequest {
+            id: "r1".into(),
+            token: scoped.clone(),
+            command: "status".into(),
+            params: json!({}),
+        })
+        .unwrap();
+        let reply = dispatch_line(&req, &master, &|_| HookReply::default(), &|r| {
+            *seen_scoped.lock().unwrap() = caller_capability();
+            crate::control::ControlResponse::success(r.id, json!({"ok": true}))
+        });
+        assert_eq!(reply["ok"], true);
+        assert_eq!(*seen_scoped.lock().unwrap(), Some(cap));
+        assert!(caller_capability().is_none(), "thread-local capability must reset after dispatch");
+
+        // Master token authenticates with `caller_capability() == None`.
+        let seen_master = std::sync::Mutex::new(Some("sentinel".to_string()));
+        let req_master = serde_json::to_string(&crate::control::ControlRequest {
+            id: "r2".into(),
+            token: master.clone(),
+            command: "status".into(),
+            params: json!({}),
+        })
+        .unwrap();
+        let reply_master = dispatch_line(&req_master, &master, &|_| HookReply::default(), &|r| {
+            *seen_master.lock().unwrap() = caller_capability().map(|c| c.tab_id);
+            crate::control::ControlResponse::success(r.id, json!({"ok": true}))
+        });
+        assert_eq!(reply_master["ok"], true);
+        assert_eq!(*seen_master.lock().unwrap(), None);
+
+        // Forged token is rejected as `unauthorized`.
+        let req_forged = serde_json::to_string(&crate::control::ControlRequest {
+            id: "r3".into(),
+            token: forged,
+            command: "status".into(),
+            params: json!({}),
+        })
+        .unwrap();
+        let reply_forged = dispatch_line(&req_forged, &master, &|_| HookReply::default(), &|r| {
+            crate::control::ControlResponse::success(r.id, json!({}))
+        });
+        assert_eq!(reply_forged["ok"], false);
+        assert_eq!(reply_forged["error"]["code"], "unauthorized");
     }
 }

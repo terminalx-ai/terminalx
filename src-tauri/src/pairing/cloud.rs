@@ -133,13 +133,101 @@ pub fn register_host_at(base: &str, context: &AccountContext, payload: &HostBind
     )
 }
 
-/// A guest's token is presented only to the fixed account API. No active
-/// organization, profile or host membership is needed to verify a person.
-pub(super) fn verify_guest(token: &str) -> Result<crate::local_sharing::Person> {
-    verify_guest_at(&crate::account::api_base_url(), token)
+pub(super) const GUEST_ASSERTION_PURPOSE: &str = "session-share-guest";
+pub(super) const MAX_GUEST_ASSERTION_LEN: usize = 8192;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct GuestAssertionAudience {
+    pub session_id: String,
+    pub link_id: String,
+    pub host_public_key_b64: String,
+    pub transcript_hash_b64: String,
 }
 
-fn verify_guest_at(base: &str, token: &str) -> Result<crate::local_sharing::Person> {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct GuestAssertion {
+    pub assertion: String,
+    pub expires_at: i64,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct VerifiedGuest {
+    pub person: crate::local_sharing::Person,
+    pub expires_at: i64,
+}
+
+/// Mint a short-lived, audience-bound guest identity assertion from the fixed
+/// account API. The guest's master `access_token` is sent ONLY to the account
+/// service here and NEVER transmitted to the peer share host.
+pub(super) fn mint_guest_assertion(
+    context: &AccountContext,
+    audience: &GuestAssertionAudience,
+) -> Result<GuestAssertion> {
+    mint_guest_assertion_at(&crate::account::api_base_url(), context, audience)
+}
+
+fn mint_guest_assertion_at(
+    base: &str,
+    context: &AccountContext,
+    audience: &GuestAssertionAudience,
+) -> Result<GuestAssertion> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Response {
+        assertion: String,
+        expires_at: i64,
+    }
+    let response: Response = request_json(
+        base,
+        "/v1/desktop/auth/share-assertion",
+        "POST",
+        Some(json!({
+            "v": 1,
+            "purpose": GUEST_ASSERTION_PURPOSE,
+            "sessionId": audience.session_id,
+            "linkId": audience.link_id,
+            "hostPublicKeyB64": audience.host_public_key_b64,
+            "transcriptHashB64": audience.transcript_hash_b64,
+        })),
+        &context.access_token,
+    )?;
+    let assertion = response.assertion.trim().to_string();
+    if assertion.is_empty() || assertion.len() > MAX_GUEST_ASSERTION_LEN {
+        return Err(anyhow!("Account API returned an invalid guest assertion."));
+    }
+    if assertion == context.access_token {
+        return Err(anyhow!("Refusing guest assertion that mirrors master access token."));
+    }
+    let now = chrono::Utc::now().timestamp_millis();
+    if response.expires_at <= now {
+        return Err(anyhow!("Account API returned an already-expired guest assertion."));
+    }
+    Ok(GuestAssertion {
+        assertion,
+        expires_at: response.expires_at,
+    })
+}
+
+/// Verify a guest's short-lived, audience-bound assertion against the fixed
+/// account API using the host's own account credentials. Never uses a guest
+/// credential as an API `Authorization` bearer token.
+pub(super) fn verify_guest_assertion(
+    host_context: &AccountContext,
+    assertion: &str,
+    expected: &GuestAssertionAudience,
+) -> Result<VerifiedGuest> {
+    verify_guest_assertion_at(&crate::account::api_base_url(), host_context, assertion, expected)
+}
+
+fn verify_guest_assertion_at(
+    base: &str,
+    host_context: &AccountContext,
+    assertion: &str,
+    expected: &GuestAssertionAudience,
+) -> Result<VerifiedGuest> {
+    if assertion.is_empty() || assertion.len() > MAX_GUEST_ASSERTION_LEN {
+        return Err(anyhow!("Invalid guest assertion."));
+    }
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase")]
     struct Identity {
@@ -155,35 +243,73 @@ fn verify_guest_at(base: &str, token: &str) -> Result<crate::local_sharing::Pers
         org_id: String,
     }
     #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
     struct Response {
         cloud: Identity,
         #[serde(default)]
         organizations: Vec<Organization>,
+        #[serde(default)]
+        expires_at: Option<i64>,
+        #[serde(default)]
+        purpose: Option<String>,
+        #[serde(default)]
+        session_id: Option<String>,
+        #[serde(default)]
+        link_id: Option<String>,
+        #[serde(default)]
+        host_public_key_b64: Option<String>,
+        #[serde(default)]
+        transcript_hash_b64: Option<String>,
     }
     let response: Response = request_json(
         base,
-        "/v1/desktop/auth/capabilities",
+        "/v1/desktop/auth/share-assertion/verify",
         "POST",
-        Some(json!({})),
-        token,
+        Some(json!({
+            "v": 1,
+            "purpose": GUEST_ASSERTION_PURPOSE,
+            "assertion": assertion,
+            "sessionId": expected.session_id,
+            "linkId": expected.link_id,
+            "hostPublicKeyB64": expected.host_public_key_b64,
+            "transcriptHashB64": expected.transcript_hash_b64,
+        })),
+        &host_context.access_token,
     )?;
+    if response.purpose.as_deref().is_some_and(|p| p != GUEST_ASSERTION_PURPOSE)
+        || response.session_id.as_deref().is_some_and(|s| s != expected.session_id)
+        || response.link_id.as_deref().is_some_and(|l| l != expected.link_id)
+        || response.host_public_key_b64.as_deref().is_some_and(|k| k != expected.host_public_key_b64)
+        || response.transcript_hash_b64.as_deref().is_some_and(|t| t != expected.transcript_hash_b64)
+    {
+        return Err(anyhow!("Guest assertion audience mismatch."));
+    }
+    let now = chrono::Utc::now().timestamp_millis();
+    let expires_at = match response.expires_at {
+        Some(ts) if ts <= now => return Err(anyhow!("Guest assertion has expired.")),
+        Some(ts) => ts.min(now + crate::local_sharing::IDENTITY_MS),
+        None => now + crate::local_sharing::IDENTITY_MS,
+    };
     let identity = response.cloud;
     if identity.user_id.trim().is_empty() || identity.email.trim().is_empty() {
         return Err(anyhow!("Account API returned no verified identity."));
     }
-    Ok(crate::local_sharing::Person {
-        user_id: identity.user_id,
-        display_name: identity
-            .display_name
-            .filter(|name| !name.trim().is_empty())
-            .unwrap_or_else(|| identity.email.clone()),
-        email: identity.email,
-        email_verified: identity.email_verified,
-        organization_ids: response
-            .organizations
-            .into_iter()
-            .map(|o| o.org_id)
-            .collect(),
+    Ok(VerifiedGuest {
+        person: crate::local_sharing::Person {
+            user_id: identity.user_id,
+            display_name: identity
+                .display_name
+                .filter(|name| !name.trim().is_empty())
+                .unwrap_or_else(|| identity.email.clone()),
+            email: identity.email,
+            email_verified: identity.email_verified,
+            organization_ids: response
+                .organizations
+                .into_iter()
+                .map(|o| o.org_id)
+                .collect(),
+        },
+        expires_at,
     })
 }
 
@@ -386,6 +512,9 @@ fn relay_assignment_at(
     relay_host_id: &str,
     reconnect: bool,
 ) -> Result<RelayAssignment> {
+    if !allowed_https_origin(base) {
+        return Err(anyhow!(Category::Protocol));
+    }
     let mut body = json!({ "v": 1, "relayHostId": relay_host_id });
     if reconnect {
         body["reconnect"] = json!(true);
@@ -472,9 +601,7 @@ fn retry_after(response: &ureq::Response) -> Option<RetryAfter> {
 }
 
 pub(super) fn allowed_https_origin(value: &str) -> bool {
-    url::Url::parse(value)
-        .ok()
-        .is_some_and(|url| url.scheme() == "https" && url.origin().ascii_serialization() == value)
+    crate::remote::host::valid_relay_origin(value)
 }
 
 /// A loopback HTTP/1.1 server that keeps connections alive, as the account
@@ -781,76 +908,108 @@ mod tests {
     }
 
     #[test]
-    fn guest_identity_is_verified_with_bearer_token_without_an_organization() {
-        use std::io::{BufRead, Read, Write};
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let base = format!("http://{}", listener.local_addr().unwrap());
-        let server = std::thread::spawn(move || {
-            for (status, body) in [
-                (
-                    200,
-                    r#"{"cloud":{"userId":"verified-user","email":"guest@example.com","displayName":"Verified Guest","emailVerified":true},"organizations":[]}"#,
+    fn guest_assertions_are_audience_bound_and_never_echo_master_access_tokens() {
+        use super::fixture::{KeepAliveServer, Reply};
+        let future = chrono::Utc::now().timestamp_millis() + 60_000;
+        let past = chrono::Utc::now().timestamp_millis() - 1_000;
+        let step = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let server_step = step.clone();
+        let server = KeepAliveServer::start(move |request| {
+            let i = server_step.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            match (request.path.as_str(), i) {
+                ("/v1/desktop/auth/share-assertion", 0) => Reply::ok(
+                    &json!({ "assertion": "scoped-guest-assertion-1", "expiresAt": future }).to_string(),
                 ),
-                (
-                    200,
-                    r#"{"cloud":{"userId":"verified-user","email":"guest@example.com","displayName":null}}"#,
+                ("/v1/desktop/auth/share-assertion", 1) => Reply::ok(
+                    &json!({ "assertion": "guest-master-token", "expiresAt": future }).to_string(),
                 ),
-                (401, r#"{"userId":"forged","email":"forged@example.com"}"#),
-                (
-                    200,
-                    r#"{"cloud":{"userId":"","email":"guest@example.com"}}"#,
+                ("/v1/desktop/auth/share-assertion", 2) => Reply::ok(
+                    &json!({ "assertion": "expired-assertion", "expiresAt": past }).to_string(),
                 ),
-            ] {
-                let (mut stream, _) = listener.accept().unwrap();
-                stream
-                    .set_read_timeout(Some(Duration::from_secs(5)))
-                    .unwrap();
-                let mut reader = std::io::BufReader::new(&mut stream);
-                let mut line = String::new();
-                reader.read_line(&mut line).unwrap();
-                assert_eq!(line.trim(), "POST /v1/desktop/auth/capabilities HTTP/1.1");
-                let mut length = 0;
-                let mut authenticated = false;
-                loop {
-                    line.clear();
-                    reader.read_line(&mut line).unwrap();
-                    if line == "\r\n" {
-                        break;
-                    }
-                    let lower = line.to_lowercase();
-                    if let Some(value) = lower.strip_prefix("content-length: ") {
-                        length = value.trim().parse::<usize>().unwrap();
-                    }
-                    authenticated |= lower.trim() == "authorization: bearer synthetic-guest-token";
-                }
-                assert!(authenticated);
-                let mut payload = vec![0; length];
-                reader.read_exact(&mut payload).unwrap();
-                assert_eq!(
-                    serde_json::from_slice::<serde_json::Value>(&payload).unwrap(),
-                    json!({})
-                );
-                write!(stream, "HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+                ("/v1/desktop/auth/share-assertion/verify", 3) => Reply::ok(
+                    &json!({
+                        "cloud": { "userId": "verified-user", "email": "guest@example.com", "displayName": "Verified Guest", "emailVerified": true },
+                        "organizations": [],
+                        "purpose": GUEST_ASSERTION_PURPOSE,
+                        "sessionId": "session-1",
+                        "linkId": "link-1",
+                        "hostPublicKeyB64": "host-pub-b64",
+                        "transcriptHashB64": "transcript-hash-b64",
+                        "expiresAt": future
+                    }).to_string(),
+                ),
+                ("/v1/desktop/auth/share-assertion/verify", 4) => Reply::ok(
+                    &json!({
+                        "cloud": { "userId": "verified-user", "email": "guest@example.com", "displayName": "Verified Guest" },
+                        "sessionId": "wrong-session",
+                        "expiresAt": future
+                    }).to_string(),
+                ),
+                ("/v1/desktop/auth/share-assertion/verify", 5) => Reply::ok(
+                    &json!({
+                        "cloud": { "userId": "verified-user", "email": "guest@example.com" },
+                        "expiresAt": past
+                    }).to_string(),
+                ),
+                _ => Reply { status: 401, retry_after: None, body: r#"{"error":"invalid_assertion"}"#.into() },
             }
         });
-        let person = verify_guest_at(&base, "synthetic-guest-token").unwrap();
-        assert_eq!(person.user_id, "verified-user");
-        assert_eq!(person.display_name, "Verified Guest");
-        assert!(person.email_verified);
-        assert!(person.organization_ids.is_empty());
-        let legacy = verify_guest_at(&base, "synthetic-guest-token").unwrap();
-        assert!(!legacy.email_verified);
-        assert_eq!(legacy.display_name, "guest@example.com");
-        assert!(verify_guest_at(&base, "synthetic-guest-token").is_err());
-        assert!(verify_guest_at(&base, "synthetic-guest-token").is_err());
-        server.join().unwrap();
+        let guest_ctx = AccountContext {
+            access_token: "guest-master-token".into(),
+            user_id: "verified-user".into(),
+            email: "guest@example.com".into(),
+            display_name: "Verified Guest".into(),
+            profile_id: "p-guest".into(),
+            organization_id: "org-guest".into(),
+            relay_entitled: true,
+            generation: 1,
+        };
+        let host_ctx = AccountContext {
+            access_token: "host-master-token".into(),
+            user_id: "host-user".into(),
+            email: "host@example.com".into(),
+            display_name: "Host".into(),
+            profile_id: "p-host".into(),
+            organization_id: "org-host".into(),
+            relay_entitled: true,
+            generation: 1,
+        };
+        let audience = GuestAssertionAudience {
+            session_id: "session-1".into(),
+            link_id: "link-1".into(),
+            host_public_key_b64: "host-pub-b64".into(),
+            transcript_hash_b64: "transcript-hash-b64".into(),
+        };
+
+        let minted = mint_guest_assertion_at(&server.base, &guest_ctx, &audience).unwrap();
+        assert_eq!(minted.assertion, "scoped-guest-assertion-1");
+        assert_ne!(minted.assertion, guest_ctx.access_token);
+        assert!(mint_guest_assertion_at(&server.base, &guest_ctx, &audience).is_err(), "must reject master token echo");
+        assert!(mint_guest_assertion_at(&server.base, &guest_ctx, &audience).is_err(), "must reject expired assertion");
+
+        let verified = verify_guest_assertion_at(&server.base, &host_ctx, &minted.assertion, &audience).unwrap();
+        assert_eq!(verified.person.user_id, "verified-user");
+        assert_eq!(verified.person.display_name, "Verified Guest");
+        assert!(verified.person.email_verified);
+        assert!(verify_guest_assertion_at(&server.base, &host_ctx, &minted.assertion, &audience).is_err(), "audience mismatch rejected");
+        assert!(verify_guest_assertion_at(&server.base, &host_ctx, &minted.assertion, &audience).is_err(), "expired verification rejected");
+        assert!(verify_guest_assertion_at(&server.base, &host_ctx, &minted.assertion, &audience).is_err(), "401 rejected");
+
+        let requests = server.requests();
+        assert_eq!(requests[0].authorization, "Bearer guest-master-token");
+        assert_eq!(requests[3].authorization, "Bearer host-master-token", "host authenticates verification with its own token, never the guest's");
+        assert_eq!(requests[3].body.as_ref().unwrap()["assertion"], "scoped-guest-assertion-1");
+        assert_eq!(requests[3].body.as_ref().unwrap()["transcriptHashB64"], "transcript-hash-b64");
     }
 
     #[test]
     fn relay_cells_must_be_canonical_https_origins() {
-        assert!(allowed_https_origin("https://relay.example"));
-        assert!(!allowed_https_origin("http://relay.example"));
-        assert!(!allowed_https_origin("https://relay.example/path"));
+        assert!(allowed_https_origin("https://relay.terminalx.ai"));
+        assert!(allowed_https_origin("https://cell-1.relay.terminalx.ai"));
+        assert!(!allowed_https_origin("https://relay.example"));
+        assert!(!allowed_https_origin("http://relay.terminalx.ai"));
+        assert!(!allowed_https_origin("https://relay.terminalx.ai/path"));
+        assert!(!allowed_https_origin("https://169.254.169.254"));
     }
     #[test]
     fn authenticated_assignment_outage_preserves_status_and_recovers_without_body_leaks() {
@@ -882,7 +1041,7 @@ mod tests {
                     "/v1/assign",
                     "synthetic-relay-token",
                     200,
-                    r#"{"v":1,"cellUrl":"https://cell.example.invalid","assignmentEpoch":1,"lease":"synthetic-lease"}"#,
+                    r#"{"v":1,"cellUrl":"https://cell-1.relay.terminalx.ai","assignmentEpoch":1,"lease":"synthetic-lease"}"#,
                 ),
             ] {
                 let (mut stream, _) = listener.accept().unwrap();
@@ -961,7 +1120,7 @@ mod tests {
         let assignment =
             relay_assignment_at(&base, &authorization, "synthetic-host", true).unwrap();
         assert_eq!(assignment.assignment_epoch, 1);
-        assert_eq!(assignment.cell_url, "https://cell.example.invalid");
+        assert_eq!(assignment.cell_url, "https://cell-1.relay.terminalx.ai");
         server.join().unwrap();
     }
 }

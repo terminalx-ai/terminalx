@@ -67,12 +67,12 @@ pub fn session_gate(bot: Option<&str>, payload: &Value) -> Gate {
         return Gate::Leave;
     }
     match bot_store::get(bot_id) {
-        Ok(Some(bot)) if bot.paused.is_some() => held(payload, &format!("{} is paused", bot.name)),
-        Ok(Some(bot)) => gate(&bot.access, payload),
+        Ok(Some(bot)) if bot.paused.is_some() => held(Some(bot_id), payload, &format!("{} is paused", bot.name)),
+        Ok(Some(bot)) => gate_for_bot(Some(bot_id), &bot.access, payload),
         Ok(None) => Gate::Leave,
         Err(error) => {
             log::warn!("bot {bot_id}'s access cannot be read, so its session is held to read and report: {error:#}");
-            held(payload, "its bot cannot be read")
+            held(Some(bot_id), payload, "its bot cannot be read")
         }
     }
 }
@@ -94,8 +94,8 @@ pub(crate) fn approval_payload(method: &str, params: &Value, cwd: Option<&str>) 
 }
 
 /// A paused bot, or one that cannot be read: it reads, and nothing else runs, nor is asked.
-fn held(payload: &Value, why: &str) -> Gate {
-    match gate(&BotAccess::ReadReport, payload) {
+fn held(bot_id: Option<&str>, payload: &Value, why: &str) -> Gate {
+    match gate_for_bot(bot_id, &BotAccess::ReadReport, payload) {
         Gate::Ask(_) => Gate::Refuse(format!("TerminalX refused {}: {why}, so it only reads until your owner resumes it. This did not run. Say in the chat what you wanted to do.", describe(payload["tool_name"].as_str().unwrap_or_default(), &payload["tool_input"]))),
         gate => gate,
     }
@@ -105,19 +105,58 @@ fn held(payload: &Value, why: &str) -> Gate {
 ///
 /// The session's permission mode is the barrier (`chat::permission_mode`,
 /// held by `chat::mode_limit`); this adds to it and never widens it. It lets through unasked only what is known to read:
-/// a named read tool, a shell command vetted read-only, a `terminalx` read.
+/// a named read tool confined to workspace roots, a shell command vetted read-only, a `terminalx` read.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn gate(access: &BotAccess, payload: &Value) -> Gate {
+    gate_for_bot(None, access, payload)
+}
+
+fn gate_for_bot(bot_id: Option<&str>, access: &BotAccess, payload: &Value) -> Gate {
     let tool = payload["tool_name"].as_str().unwrap_or_default();
     let input = &payload["tool_input"];
     let cwd = payload["cwd"].as_str();
-    if let Some(what) = own_settings(tool, input, cwd) {
-        return Gate::Refuse(format!("TerminalX refused this: it names {what}, where your owner keeps your access, your reporting line and whether you are paused. A bot does not change them, and runs no command on them; read them with the Read tool if you must. Ask your owner in the chat if something there should change."));
-    }
-    if let Some(what) = shell_command(tool, input).and_then(|command| guard::find_command(&command, &unsigned_post)) {
-        return Gate::Refuse(format!("TerminalX refused `{what}`: it would post on GitHub with your owner's login and no line saying a bot wrote it, so it could be taken for your owner's own words. This did not run. Post with `terminalx bots post github --pr PR|--issue ISSUE --text \"…\"` or `terminalx bots post linear --issue ISSUE --text \"…\"`, or answer a mention with `terminalx bots reply --text \"…\"`: they sign the post as yours."));
-    }
     let access = access.effective();
-    if access == BotAccess::Full || reads(tool, input, cwd) || single(tool, input, |program, args| app_cli(program, cwd) && own_notes(program, args)) {
+
+    // S-02 & S-21: Always deny sensitive TerminalX home paths (`settings.json`,
+    // `bot-chat-logins.json`, `account/`, `run/`, `runtime/`) and user credential
+    // directories (`~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.netrc`) even for READ_TOOLS
+    // and ReadReport bots, and deny writes/shell access to `bots.json`.
+    if let Some(what) = own_settings(tool, input, cwd) {
+        return Gate::Refuse(format!("TerminalX refused this: it accesses {what}, which is protected from bots. This did not run. Ask your owner in the chat if something there should change."));
+    }
+    // S-21: Confine file-reading tools (`Read`, `Grep`, `Glob`, `LS`, `NotebookRead`, `view_image`)
+    // strictly to explicitly assigned workspace roots (the bot's own home, registered projects,
+    // or a safe working directory).
+    if FILE_READ_TOOLS.contains(&tool) {
+        if let Some(reason) = outside_workspace_read(bot_id, input, cwd) {
+            return Gate::Refuse(reason);
+        }
+    }
+    // S-20: Fail-closed shell scanning for `unsigned_post` and `own_settings`.
+    let mut opaque_shell: Option<&'static str> = None;
+    if let Some(command) = shell_command(tool, input) {
+        match guard::scan_command(&command, &unsigned_post) {
+            guard::CommandScan::Matched(what) => {
+                return Gate::Refuse(format!("TerminalX refused `{what}`: it would post on GitHub with your owner's login and no line saying a bot wrote it, so it could be taken for your owner's own words. This did not run. Post with `terminalx bots post github --pr PR|--issue ISSUE --text \"…\"` or `terminalx bots post linear --issue ISSUE --text \"…\"`, or answer a mention with `terminalx bots reply --text \"…\"`: they sign the post as yours."));
+            }
+            guard::CommandScan::Opaque(why) => {
+                // Depth > 4 and heredocs/here-strings are ALWAYS refused at every level;
+                // other opaque constructs (e.g., `sh script.sh`, `$cmd`) are refused at Full
+                // and ReadReport and require owner approval (Ask) at AskOutward.
+                let hard_refuse = why.contains("depth") || why.contains("heredoc") || why.contains("unterminated");
+                if hard_refuse || access == BotAccess::Full {
+                    return Gate::Refuse(format!("TerminalX refused this shell command: {why}. Opaque shell constructs cannot be verified against bot safety rules. This did not run."));
+                }
+                opaque_shell = Some(why);
+            }
+            guard::CommandScan::Clear => {}
+        }
+    }
+    if opaque_shell.is_none()
+        && (access == BotAccess::Full
+            || reads(tool, input, cwd)
+            || single(tool, input, |program, args| app_cli(program, cwd) && own_notes(program, args)))
+    {
         return Gate::Leave;
     }
     let what = describe(tool, input);
@@ -127,11 +166,15 @@ pub fn gate(access: &BotAccess, payload: &Value) -> Gate {
     match access {
         BotAccess::AskOutward => Gate::Ask(format!("This bot reads freely and asks before it changes anything or runs a command: {what}.")),
         _ => match single(tool, input, |program, args| app_cli(program, cwd) && report_command(program, args).is_some()) {
-            true => Gate::Ask(format!("This bot reads and reports only, and asks before a report leaves this computer: {what}.")),
-            false => Gate::Refuse(format!("TerminalX refused {what}: this bot is set to Read and report, so it changes nothing and runs only commands known to read. This did not run. Read with Read, Grep or Glob or with commands that only read, and report what you found in the chat.")),
+            true if opaque_shell.is_none() => Gate::Ask(format!("This bot reads and reports only, and asks before a report leaves this computer: {what}.")),
+            _ => Gate::Refuse(format!("TerminalX refused {what}: this bot is set to Read and report, so it changes nothing and runs only commands known to read. This did not run. Read with Read, Grep or Glob or with commands that only read, and report what you found in the chat.")),
         },
     }
 }
+
+/// The file-reading subset of [`READ_TOOLS`] that must be confined to workspace
+/// roots and denied access to secret files/directories (S-21).
+const FILE_READ_TOOLS: &[&str] = &["Read", "Grep", "Glob", "LS", "NotebookRead", "view_image"];
 
 /// The tools that fetch a page from a host the call names (PRO-496): what the
 /// address carries (`https://some.host/?d=…`, with what the bot just read)
@@ -563,68 +606,224 @@ fn quote(word: &str) -> String {
     }
 }
 
-/// The app's own record a call names, if it names one: the bots' definitions
-/// or the settings. A file tool is refused one only to write it; a shell
-/// command is refused one whatever it does with it, since what it does
-/// cannot be told for certain.
+/// The app's own protected files, runtime directory, or user credential paths
+/// a call accesses (S-02, S-20, S-21).
+///
+/// - Secret files & directories (`settings.json`, `bot-chat-logins.json`,
+///   `account/`, `run/`, `runtime/`, `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.netrc`)
+///   are denied for EVERY tool including `READ_TOOLS` (`Read`, `Grep`, `Glob`,
+///   `LS`, `view_image`) and shell commands.
+/// - `bots.json` is denied for writes and shell commands.
 fn own_settings(tool: &str, input: &Value, cwd: Option<&str>) -> Option<&'static str> {
     let root = crate::store::root().ok()?;
     let guarded = Guarded::new(&root);
-    if READ_TOOLS.contains(&tool) {
-        return None;
-    }
+    let is_read_tool = READ_TOOLS.contains(&tool);
     if !guard::SHELL_TOOLS.contains(&tool) {
-        for key in ["file_path", "path", "notebook_path"] {
-            if let Some(what) = input[key].as_str().and_then(|path| guarded.names(path, cwd)) {
-                return Some(what);
+        for key in ["file_path", "path", "directory", "notebook_path", "image_path"] {
+            if let Some(path) = input[key].as_str() {
+                if let Some(what) = guarded.names(path, cwd, is_read_tool) {
+                    return Some(what);
+                }
             }
         }
-        // `apply_patch` names its files inside the patch.
-        let patch = input["patch"].as_str().or(input["input"].as_str()).or(input["command"].as_str());
-        return patch.and_then(|patch| patch.split_whitespace().find_map(|word| guarded.names(word, cwd)));
+        // `Grep` / `Glob` / `LS` with no explicit path operate on `cwd`.
+        if is_read_tool
+            && FILE_READ_TOOLS.contains(&tool)
+            && ["file_path", "path", "directory", "notebook_path", "image_path"]
+                .iter()
+                .all(|key| input[key].as_str().is_none())
+        {
+            if let Some(dir) = cwd {
+                if let Some(what) = guarded.names(dir, None, true) {
+                    return Some(what);
+                }
+            }
+        }
+        if !is_read_tool {
+            // `apply_patch` names its files inside the patch.
+            let patch = input["patch"].as_str().or(input["input"].as_str()).or(input["command"].as_str());
+            return patch.and_then(|patch| patch.split_whitespace().find_map(|word| guarded.names(word, cwd, false)));
+        }
+        return None;
     }
     let command = shell_command(tool, input)?;
-    guard::find_command(&command, &|program, args| std::iter::once(program).chain(args.iter().copied()).find_map(|word| guarded.word(word, cwd)))
+    match guard::scan_command(&command, &|program, args| {
+        std::iter::once(program)
+            .chain(args.iter().copied())
+            .find_map(|word| guarded.word(word, cwd))
+    }) {
+        guard::CommandScan::Matched(what) => Some(what),
+        guard::CommandScan::Clear | guard::CommandScan::Opaque(_) => None,
+    }
 }
 
-/// `bots.json` and `settings.json` in the app's data folder, as they are
-/// found through links and in any letter case.
+/// Whether `resolved_path` is strictly equal to or inside `dir` (case-insensitive
+/// on path string comparison after canonicalization/normalization).
+fn path_is_or_under(candidate: &Path, dir: &Path) -> bool {
+    let cand = candidate.to_string_lossy().to_lowercase();
+    let base = dir.to_string_lossy().to_lowercase();
+    let base = base.trim_end_matches(['/', '\\']);
+    if base.is_empty() {
+        return false;
+    }
+    if cand == base {
+        return true;
+    }
+    cand.strip_prefix(base)
+        .is_some_and(|rest| rest.starts_with('/') || rest.starts_with('\\'))
+}
+
+/// Protected TerminalX files/directories and user credential directories (S-02, S-21).
 struct Guarded {
-    files: [(String, &'static str); 2],
+    root: PathBuf,
+    /// Write/shell-protected files (still blocked for reads when outside workspace).
+    write_files: [(PathBuf, &'static str); 1],
+    /// Read+write+shell-protected secret files.
+    secret_files: Vec<(PathBuf, &'static str)>,
+    /// Read+write+shell-protected secret/runtime directories.
+    secret_dirs: Vec<(PathBuf, &'static str)>,
 }
 
 impl Guarded {
     fn new(root: &Path) -> Self {
         let root = crate::paths::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
-        let key = |name: &str| root.join(name).to_string_lossy().to_lowercase();
-        Self { files: [(key("bots.json"), "bots.json"), (key("settings.json"), "TerminalX's settings.json")] }
+        let mut secret_files = vec![
+            (root.join("settings.json"), "TerminalX's settings.json"),
+            (root.join("bot-chat-logins.json"), "TerminalX's bot-chat-logins.json"),
+        ];
+        let mut secret_dirs = vec![
+            (root.join("account"), "TerminalX's account credentials"),
+            (root.join("run"), "TerminalX's runtime socket and token directory"),
+            (root.join("runtime"), "TerminalX's installed runtime directory"),
+            (root.join("agent-accounts"), "TerminalX's agent accounts directory"),
+        ];
+        if let Some(home) = dirs::home_dir() {
+            let home = crate::paths::canonicalize(&home).unwrap_or(home);
+            secret_dirs.push((home.join(".ssh"), "your SSH credentials (~/.ssh)"));
+            secret_dirs.push((home.join(".aws"), "your AWS credentials (~/.aws)"));
+            secret_dirs.push((home.join(".gnupg"), "your GnuPG credentials (~/.gnupg)"));
+            secret_files.push((home.join(".netrc"), "your .netrc credentials"));
+        }
+        Self {
+            write_files: [(root.join("bots.json"), "bots.json")],
+            secret_files,
+            secret_dirs,
+            root,
+        }
     }
 
-    /// The record `path` is, against `cwd` when it is relative.
-    fn names(&self, path: &str, cwd: Option<&str>) -> Option<&'static str> {
+    /// The protected resource `path` names, resolved against `cwd` and through symlinks.
+    fn names(&self, path: &str, cwd: Option<&str>, read_only_tool: bool) -> Option<&'static str> {
         let path = path.trim_matches(|c| matches!(c, '"' | '\'' | ',' | ';' | ':'));
-        let name = Path::new(path).file_name()?.to_string_lossy().to_lowercase();
-        if name != "bots.json" && name != "settings.json" {
+        if path.is_empty() {
             return None;
         }
-        let key = resolved(&expand_home(path), cwd).to_string_lossy().to_lowercase();
-        if let Some((_, what)) = self.files.iter().find(|(file, _)| *file == key) {
-            return Some(what);
+        let expanded = expand_home(path, &self.root);
+        let resolved_path = resolved(&expanded, cwd);
+        let key = resolved_path.to_string_lossy().to_lowercase();
+
+        for (secret, what) in &self.secret_files {
+            if key == secret.to_string_lossy().to_lowercase() {
+                return Some(what);
+            }
         }
-        // Where a relative path starts cannot be told: `bots.json` is the app's until shown otherwise.
-        (name == "bots.json" && cwd.is_none() && Path::new(path).is_relative()).then_some("bots.json")
+        for (dir, what) in &self.secret_dirs {
+            if path_is_or_under(&resolved_path, dir) {
+                return Some(what);
+            }
+        }
+        if !read_only_tool {
+            for (file, what) in &self.write_files {
+                if key == file.to_string_lossy().to_lowercase() {
+                    return Some(what);
+                }
+            }
+            // Where a relative path starts cannot be told: `bots.json` is the app's until shown otherwise.
+            let name = Path::new(path).file_name().map(|n| n.to_string_lossy().to_lowercase());
+            if name.as_deref() == Some("bots.json") && cwd.is_none() && Path::new(path).is_relative() {
+                return Some("bots.json");
+            }
+        }
+        None
     }
 
     /// One shell word: a path, a redirection's target, or an option's value.
     fn word(&self, word: &str, cwd: Option<&str>) -> Option<&'static str> {
         let word = word.trim_start_matches(|c: char| c.is_ascii_digit() || matches!(c, '>' | '<' | '&'));
-        self.names(word, cwd).or_else(|| word.split_once('=').and_then(|(_, value)| self.names(value, cwd)))
+        self.names(word, cwd, false)
+            .or_else(|| word.split_once('=').and_then(|(_, value)| self.names(value, cwd, false)))
     }
 }
 
-/// `~/…`, `$HOME/…` and `${HOME}/…` as the home folder.
-fn expand_home(path: &str) -> PathBuf {
-    let rest = path.strip_prefix("~/").or_else(|| path.strip_prefix("$HOME/")).or_else(|| path.strip_prefix("${HOME}/"));
+/// Confine file-reading tools (`Read`, `Grep`, `Glob`, `LS`, `NotebookRead`,
+/// `view_image`) to explicitly assigned workspace roots (S-21).
+fn outside_workspace_read(bot_id: Option<&str>, input: &Value, cwd: Option<&str>) -> Option<String> {
+    let target = ["file_path", "path", "directory", "notebook_path", "image_path"]
+        .iter()
+        .find_map(|key| input[key].as_str())
+        .filter(|s| !s.trim().is_empty());
+    let Some(raw_target) = target else {
+        // Tool without an explicit path (e.g. `Grep { pattern: "x" }`) searches `cwd`.
+        return None;
+    };
+    let root = crate::store::root().ok();
+    let canonical_root = root
+        .as_deref()
+        .map(|r| crate::paths::canonicalize(r).unwrap_or_else(|_| r.to_path_buf()));
+    let expanded = match canonical_root.as_deref() {
+        Some(r) => expand_home(raw_target, r),
+        None => PathBuf::from(raw_target),
+    };
+    let resolved_target = resolved(&expanded, cwd);
+
+    let mut allowed: Vec<PathBuf> = Vec::new();
+    // 1. The bot's own home folder (`$TERMINALX_HOME/bots/<bot_id>/`).
+    if let Some(id) = bot_id {
+        if let Ok(home) = bot_store::home_dir(id) {
+            allowed.push(resolved(&home, None));
+        }
+    } else if let Some(ref r) = canonical_root {
+        // Without a specific bot_id (direct `gate()` calls), allow files inside `$TERMINALX_HOME/bots/`.
+        allowed.push(r.join("bots"));
+    }
+    // 2. Registered TerminalX projects.
+    if let Ok((projects, _)) = crate::store::projects::list() {
+        for project in projects {
+            allowed.push(resolved(Path::new(&project.path), None));
+        }
+    }
+    // 3. The session's `cwd`, provided it is not overly broad (`/`, `~`, `$TERMINALX_HOME` root).
+    if let Some(dir) = cwd.filter(|d| !d.trim().is_empty()) {
+        let resolved_cwd = resolved(Path::new(dir), None);
+        let is_fs_root = resolved_cwd.parent().is_none();
+        let is_user_home = dirs::home_dir()
+            .map(|h| crate::paths::canonicalize(&h).unwrap_or(h))
+            .is_some_and(|h| resolved_cwd == h);
+        let is_tx_home = canonical_root.as_ref().is_some_and(|r| resolved_cwd == *r);
+        if !is_fs_root && !is_user_home && !is_tx_home {
+            allowed.push(resolved_cwd);
+        }
+    }
+    if allowed.iter().any(|root| path_is_or_under(&resolved_target, root)) {
+        return None;
+    }
+    Some(format!(
+        "TerminalX refused reading `{raw_target}`: bots may only read files inside their assigned workspace roots or their own bot home folder."
+    ))
+}
+
+/// `~/…`, `$HOME/…`, `${HOME}/…`, `$TERMINALX_HOME/…`, `${TERMINALX_HOME}/…` expanded.
+fn expand_home(path: &str, tx_root: &Path) -> PathBuf {
+    if let Some(rest) = path
+        .strip_prefix("$TERMINALX_HOME/")
+        .or_else(|| path.strip_prefix("${TERMINALX_HOME}/"))
+    {
+        return tx_root.join(rest);
+    }
+    let rest = path
+        .strip_prefix("~/")
+        .or_else(|| path.strip_prefix("$HOME/"))
+        .or_else(|| path.strip_prefix("${HOME}/"));
     match (rest, dirs::home_dir()) {
         (Some(rest), Some(home)) => home.join(rest),
         _ => PathBuf::from(path),

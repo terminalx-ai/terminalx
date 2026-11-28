@@ -470,3 +470,112 @@ fn walk(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
     }
     found
 }
+
+/// S-21: Slack/Telegram bot tokens are stored in OS keychain (when available)
+/// rather than plaintext `bot-chat-logins.json`, legacy plaintext logins migrate
+/// cleanly to keychain on read, and removing a login deletes its keychain item.
+#[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
+fn chat_app_tokens_prefer_os_keychain_and_migrate_safely_s21() {
+    let _home = bots_on();
+    let bot = bot_with(json!([]));
+    let secrets = crate::keychain::testing::MemorySecrets::default();
+    let slack_bot = concat!("xox", "b-111111111111-222222222222-secretbotvalue123");
+    let slack_app = concat!("xapp", "-1-A1234567890-9999999999999-secretappvalue456");
+
+    change_logins_with(&secrets, |logins| {
+        logins.bots.entry(bot.id.clone()).or_default().insert(
+            SLACK.into(),
+            Login {
+                token: slack_bot.into(),
+                app_token: slack_app.into(),
+                account: Account { id: "T1/B1".into(), name: "Acme".into(), user: "U1".into(), unknown: BTreeMap::new() },
+                saved: index::now(),
+                unknown: BTreeMap::new(),
+            },
+        );
+        Ok(())
+    })
+    .unwrap();
+
+    // On-disk `bot-chat-logins.json` must NOT contain plaintext tokens when keychain succeeded.
+    let disk_raw = std::fs::read_to_string(logins_path().unwrap()).unwrap();
+    assert!(!disk_raw.contains(slack_bot), "bot token must not be written in plaintext to disk");
+    assert!(!disk_raw.contains(slack_app), "app token must not be written in plaintext to disk");
+    let disk_json: Value = serde_json::from_str(&disk_raw).unwrap();
+    assert_eq!(disk_json["bots"][&bot.id][SLACK]["secretStore"], "keychain", "{disk_raw}");
+
+    // Reading hydrates tokens back from keychain.
+    let loaded = read_logins_with(&secrets).unwrap();
+    let login = loaded.get(&bot.id, SLACK).unwrap();
+    assert_eq!(login.token, slack_bot);
+    assert_eq!(login.app_token, slack_app);
+
+    // Legacy plaintext migration: write plaintext token on disk, then `read_logins_with` migrates it to keychain.
+    let tg_token = concat!("987654321", ":AAE-legacy-plaintext-telegram-token-0123456789");
+    let mut legacy = read_logins_disk(&logins_path().unwrap()).unwrap();
+    legacy.bots.entry(bot.id.clone()).or_default().insert(
+        TELEGRAM.into(),
+        Login {
+            token: tg_token.into(),
+            app_token: String::new(),
+            account: Account { id: "99".into(), name: "@legacy_bot".into(), ..Account::default() },
+            saved: index::now(),
+            unknown: BTreeMap::new(),
+        },
+    );
+    crate::store::write_json(&logins_path().unwrap(), &legacy).unwrap();
+    let migrated = read_logins_with(&secrets).unwrap();
+    assert_eq!(migrated.get(&bot.id, TELEGRAM).unwrap().token, tg_token);
+    let after_raw = std::fs::read_to_string(logins_path().unwrap()).unwrap();
+    assert!(!after_raw.contains(tg_token), "legacy plaintext token should be scrubbed from disk after migration");
+
+    // Removing the login deletes it from keychain too.
+    change_logins_with(&secrets, |logins| {
+        logins.bots.remove(&bot.id);
+        Ok(())
+    })
+    .unwrap();
+    assert!(read_logins_with(&secrets).unwrap().bots.is_empty());
+}
+
+/// S-21: Outbound bot replies scrub known configured secret tokens and
+/// high-confidence credential patterns before leaving the host.
+#[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
+fn outbound_bot_replies_scrub_configured_secrets_and_token_patterns_s21() {
+    let _home = bots_on();
+    let bot = bot_with(json!([]));
+    let slack_tok = concat!("xox", "b-1234567890-abcdef1234567890");
+    let linear_tok = concat!("lin_", "api_abcdefghijklmnopqrstuvwxyz1234");
+    let custom_secret = "my-custom-control-token-abcdef123456";
+
+    let mut settings = crate::store::settings::load();
+    settings.linear_api_key = Some(linear_tok.into());
+    crate::store::settings::save(&settings).unwrap();
+    change_logins(|logins| {
+        logins.bots.entry(bot.id.clone()).or_default().insert(
+            SLACK.into(),
+            Login { token: slack_tok.into(), app_token: concat!("xapp", "-1-A1234567890-9999999999").into(), account: Account::default(), saved: index::now(), unknown: BTreeMap::new() },
+        );
+        Ok(())
+    })
+    .unwrap();
+
+    let leaky = format!(
+        "Summary:\nSlack: {slack_tok}\nLinear: {linear_tok}\nControl: {custom_secret}\nGitHub: ghp_1234567890abcdefghij1234567890\nAWS: AKIAIOSFODNN7EXAMPLE\nKey:\n-----BEGIN OPENSSH PRIVATE KEY-----\nSECRET_KEY_MATERIAL\n-----END OPENSSH PRIVATE KEY-----\nStatus: all checks passed."
+    );
+    let scrubbed = scrub_secrets_with(&scrub_secrets(&leaky), &[custom_secret.into()]);
+    for secret in [
+        slack_tok,
+        linear_tok,
+        custom_secret,
+        "ghp_1234567890abcdefghij1234567890",
+        "AKIAIOSFODNN7EXAMPLE",
+        "SECRET_KEY_MATERIAL",
+    ] {
+        assert!(!scrubbed.contains(secret), "secret leaked in scrubbed reply: {secret}\n{scrubbed}");
+    }
+    assert!(scrubbed.contains("[REDACTED]"));
+    assert!(scrubbed.contains("Status: all checks passed."), "benign reply text must stay intact");
+}

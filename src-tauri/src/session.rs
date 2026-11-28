@@ -4049,16 +4049,65 @@ impl SessionManager {
         Ok((refs, wire))
     }
 
+    /// Mint a scoped per-tab control capability token for a launched agent subprocess
+    /// so the app-wide master `TERMINALX_NEXT_TOKEN` is never exposed to agent tabs (S-01).
+    pub(crate) fn mint_tab_control_token(
+        &self,
+        session_id: &str,
+        tab_id: &str,
+        launch_id: &str,
+        mode_override: Option<&str>,
+    ) -> String {
+        let entry = index::get(session_id).ok();
+        let permission_mode = mode_override
+            .map(str::to_owned)
+            .or_else(|| entry.as_ref().and_then(|e| e.tab(tab_id)).map(|t| t.permission_mode.clone()))
+            .filter(|m| !m.is_empty())
+            .unwrap_or_else(|| "manual".to_string());
+        let bot_id = entry.as_ref().and_then(crate::bots::chat::acting_bot);
+        let bot_access = bot_id.as_deref().map(|id| match crate::store::bots::get(id) {
+            Ok(Some(bot)) if bot.paused.is_some() => "paused".to_string(),
+            Ok(Some(bot)) => bot.access.effective().as_str().to_string(),
+            Ok(None) => "readReport".to_string(),
+            Err(_) => "paused".to_string(),
+        });
+        let orchestration_role = if crate::orchestration::guard::reads_only(
+            crate::orchestration::store::is_verifier(session_id, tab_id),
+            entry.as_ref(),
+            tab_id,
+        ) {
+            "verifier"
+        } else if entry.as_ref().is_some_and(crate::orchestration::guard::limited) {
+            "worker"
+        } else if crate::orchestration::store::for_lead(session_id).ok().flatten().is_some() {
+            "lead"
+        } else {
+            "standard"
+        };
+        let cap = crate::hooks::TabCapability {
+            session_id: session_id.to_owned(),
+            tab_id: tab_id.to_owned(),
+            launch_id: launch_id.to_owned(),
+            permission_mode,
+            bot_id,
+            bot_access,
+            orchestration_role: orchestration_role.to_owned(),
+        };
+        crate::hooks::mint_tab_token(&self.control.token, &cap)
+    }
+
     fn spawn_child(&self, rt: &mut TabRuntime, rt_arc: &Arc<Mutex<TabRuntime>>, program: &Path, args: &[String], cwd: &str) -> Result<()> {
         self.accepting_work()?;
         let sink = Arc::new(TabSink { manager: self.clone(), rt: rt_arc.clone(), epoch: std::sync::atomic::AtomicU64::new(0), child: Mutex::new(None) });
         let environment = crate::store::environment::launch(cwd)?;
         let mut env: Vec<_> = environment.values.into_iter().collect();
+        let launch_id = crate::hooks::mint_token();
+        let scoped_token = self.mint_tab_control_token(&rt.session_id, &rt.tab_id, &launch_id, None);
         env.extend([
             ("RACCOON_SESSION_ID".to_string(), rt.session_id.clone()),
             ("RACCOON_TAB_ID".to_string(), rt.tab_id.clone()),
             (crate::hooks::CONTROL_SOCKET_ENV.to_string(), self.control.socket.to_string_lossy().into_owned()),
-            (crate::hooks::CONTROL_TOKEN_ENV.to_string(), self.control.token.clone()),
+            (crate::hooks::CONTROL_TOKEN_ENV.to_string(), scoped_token),
         ]);
         // A cloud workspace's agent credentials (`cloud_grants`). Only Cursor
         // runs this way, and its grant only sets a variable.
@@ -6983,11 +7032,16 @@ impl SessionManager {
         }
 
         let exe = std::env::current_exe().context("locate this binary for the CLI's hooks")?;
+        // A fresh secret per launch, per tab: the socket path is inherited by
+        // every process the agent starts, so what keeps one tab's hooks from
+        // speaking for another is that only this CLI was given this token.
+        let token = crate::hooks::mint_token();
+        let scoped_token = self.mint_tab_control_token(&rt.session_id, &rt.tab_id, &token, Some(&launching.permission_mode));
         let mut env = vec![
             ("RACCOON_SESSION_ID".to_string(), rt.session_id.clone()),
             ("RACCOON_TAB_ID".to_string(), rt.tab_id.clone()),
             (crate::hooks::CONTROL_SOCKET_ENV.to_string(), self.control.socket.to_string_lossy().into_owned()),
-            (crate::hooks::CONTROL_TOKEN_ENV.to_string(), self.control.token.clone()),
+            (crate::hooks::CONTROL_TOKEN_ENV.to_string(), scoped_token),
         ];
         // A run's worker never pushes (`orchestration::guard`): every git its
         // agent starts, in a script as much as on a command line, reads a
@@ -6997,10 +7051,6 @@ impl SessionManager {
             let config = crate::orchestration::guard::git_config(&entry.id, Path::new(&entry.cwd)).context("write the run worker's git configuration")?;
             env.push(("GIT_CONFIG_GLOBAL".to_string(), config.to_string_lossy().into_owned()));
         }
-        // A fresh secret per launch, per tab: the socket path is inherited by
-        // every process the agent starts, so what keeps one tab's hooks from
-        // speaking for another is that only this CLI was given this token.
-        let token = crate::hooks::mint_token();
         // This launch's own socket, not the home's published one: another
         // TerminalX on the same home may hold that, and it does not know
         // this tab (#202).

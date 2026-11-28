@@ -594,11 +594,12 @@ impl SessionManager {
                 engine.hook_token = token.clone();
             }
         }
+        let scoped_token = self.mint_tab_control_token(session, tab, &token, None);
         env.extend([
             ("RACCOON_SESSION_ID".into(), session.to_owned()), ("RACCOON_TAB_ID".into(), tab.to_owned()),
             ("RACCOON_HOOK_TOKEN".into(), token),
             (crate::hooks::CONTROL_SOCKET_ENV.into(), self.control.socket.to_string_lossy().into_owned()),
-            (crate::hooks::CONTROL_TOKEN_ENV.into(), self.control.token.clone()),
+            (crate::hooks::CONTROL_TOKEN_ENV.into(), scoped_token),
         ]);
         // A cloud workspace's credential, route and configuration, from one
         // grant snapshot like a terminal launch's; read here, off every lock,

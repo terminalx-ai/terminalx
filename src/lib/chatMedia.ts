@@ -20,16 +20,41 @@ const MEDIA_EXTENSIONS = ["svg", ...Object.keys(mediaTypes)].sort((a, b) => b.le
 // extension: a bare path, a Markdown link or image target, or inline code.
 const CANDIDATE = new RegExp(`[^\\s\`'"()<>\\[\\]]+\\.(?:${MEDIA_EXTENSIONS})(?![\\w.])`, "gi");
 
+const TRAVERSAL_SEGMENT = /(?:^|[\\/])\.\.(?:[\\/]|$)/;
+const ABSOLUTE_PATH = /^(?:[/\\]|[A-Za-z]:[\\/])/;
+
+function normalizeSlashes(value: string): string {
+  return value.replace(/\\/g, "/").replace(/\/+$/, "");
+}
+
+/**
+ * S-25: Confine automatic ChatMedia mentions strictly to workspace-relative paths
+ * (no `..` traversal) or absolute paths inside the active workspace or attachments root.
+ */
+export function isSafeWorkspaceMediaPath(path: string, base?: string): boolean {
+  const trimmed = path.trim();
+  if (!trimmed || trimmed.includes("\0")) return false;
+  if (TRAVERSAL_SEGMENT.test(trimmed)) return false;
+  if (!ABSOLUTE_PATH.test(trimmed)) return true;
+  if (!base) return false;
+  const normPath = normalizeSlashes(trimmed);
+  const normBase = normalizeSlashes(base);
+  if (!normBase) return false;
+  if (normPath.startsWith(`${normBase}/`)) return true;
+  return /\/(?:\.raccoon|\.terminalx)\/attachments\/[^/]+\//.test(normPath);
+}
+
 /**
  * The local media files a message names, in order and once each. Web
- * addresses are left to the Markdown; a path that names nothing on disk is
- * found out later, when it is opened.
+ * addresses, `..` traversal escapes, and out-of-workspace absolute paths are
+ * ignored so untrusted replies cannot probe arbitrary disk files.
  */
-export function mediaMentions(text: string): string[] {
+export function mediaMentions(text: string, base?: string): string[] {
   const found: string[] = [];
   for (const [candidate] of text.matchAll(CANDIDATE)) {
     const destination = parseChatLink(candidate);
     if (destination.kind !== "local" || !chatMediaKind(destination.path)) continue;
+    if (!isSafeWorkspaceMediaPath(destination.path, base)) continue;
     if (!found.includes(destination.path)) found.push(destination.path);
     if (found.length === MOST) break;
   }

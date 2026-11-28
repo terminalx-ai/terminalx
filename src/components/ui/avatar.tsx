@@ -1,6 +1,7 @@
 import { useState, type HTMLAttributes } from "react";
 import { UserRound } from "@/icons";
 import { cn } from "@/lib/cn";
+import { PrivacyImage } from "./privacy-image";
 
 export type Presence = "online" | "away" | "offline" | "unknown";
 
@@ -51,7 +52,7 @@ export function Avatar({ name, photoUrl, initials, presence, decorative = false,
       className={cn("relative inline-flex shrink-0 items-center justify-center rounded-full bg-well font-medium text-foreground", size === "sm" ? "size-5 text-[9px]" : "size-8 text-xs", className)}
     >
       {photoUrl && photoUrl !== failedPhoto ? (
-        <img src={photoUrl} alt="" aria-hidden draggable={false} referrerPolicy="no-referrer" width={size === "sm" ? 20 : 32} height={size === "sm" ? 20 : 32} onError={() => setFailedPhoto(photoUrl)} className="size-full rounded-full object-cover" />
+        <PrivacyImage src={photoUrl} alt="" aria-hidden draggable={false} referrerPolicy="no-referrer" width={size === "sm" ? 20 : 32} height={size === "sm" ? 20 : 32} onError={() => setFailedPhoto(photoUrl)} className="size-full rounded-full object-cover" />
       ) : name.trim() ? <span aria-hidden>{initials ?? initial}</span> : <UserRound aria-hidden className="size-3" />}
       {presence && <span className="absolute -bottom-0.5 -right-0.5"><PresenceDot presence={presence} decorative /></span>}
     </span>

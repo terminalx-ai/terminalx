@@ -28,3 +28,14 @@ it.each([false, true])("withdraws full-size external images and copy fetches, ke
   act(() => stepImageViewer(-1));
   expect(screen.getByRole("img", { name: "remote" })).toBeTruthy();
 });
+
+it("S-25: blocks external open in default app for SVG images while keeping it for safe raster images", () => {
+  render(<ImageViewerHost />);
+  act(() => openImageViewer([
+    { src: "data:image/svg+xml;charset=utf-8,%3Csvg%2F%3E", name: "diagram.svg", path: "/repo/diagram.svg" },
+    { src: "http://127.0.0.1:9/shot.png", name: "shot.png", path: "/repo/shot.png" },
+  ]));
+  expect(screen.queryByRole("button", { name: "Open in default app" })).toBeNull();
+  act(() => stepImageViewer(1));
+  expect(screen.getByRole("button", { name: "Open in default app" })).toBeTruthy();
+});

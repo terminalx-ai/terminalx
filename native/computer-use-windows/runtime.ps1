@@ -85,6 +85,51 @@ public static class TerminalXDesktopWin32 {
     [DllImport("user32.dll")]
     public static extern IntPtr GetForegroundWindow();
 
+    public const uint GA_ROOT = 2;
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr WindowFromPoint(POINT point);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetAncestor(IntPtr hwnd, uint gaFlags);
+
+    [DllImport("user32.dll")]
+    public static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint processId);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    public static extern int GetClassName(IntPtr hwnd, System.Text.StringBuilder className, int maxCount);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    public static extern int GetWindowText(IntPtr hwnd, System.Text.StringBuilder text, int maxCount);
+
+    public static IntPtr GetTopLevelWindowAtPoint(int x, int y) {
+        var hwnd = WindowFromPoint(new POINT { X = x, Y = y });
+        if (hwnd == IntPtr.Zero) return IntPtr.Zero;
+        var root = GetAncestor(hwnd, GA_ROOT);
+        return root != IntPtr.Zero ? root : hwnd;
+    }
+
+    public static uint GetWindowProcessId(IntPtr hwnd) {
+        if (hwnd == IntPtr.Zero) return 0;
+        uint pid = 0;
+        GetWindowThreadProcessId(hwnd, out pid);
+        return pid;
+    }
+
+    public static string GetWindowClassName(IntPtr hwnd) {
+        if (hwnd == IntPtr.Zero) return "";
+        var sb = new System.Text.StringBuilder(256);
+        int len = GetClassName(hwnd, sb, sb.Capacity);
+        return len > 0 ? sb.ToString(0, len) : "";
+    }
+
+    public static string GetWindowTitleText(IntPtr hwnd) {
+        if (hwnd == IntPtr.Zero) return "";
+        var sb = new System.Text.StringBuilder(512);
+        int len = GetWindowText(hwnd, sb, sb.Capacity);
+        return len > 0 ? sb.ToString(0, len) : "";
+    }
+
     [DllImport("user32.dll")]
     public static extern bool SetCursorPos(int x, int y);
 
@@ -262,6 +307,23 @@ $BlockedAppFragments = @(
     "nordpass",
     "proton pass"
 )
+$OwnAppReleaseBundleId = "com.terminalx.next"
+$OwnAppFragments = @(
+    "terminalx",
+    "terminal-x",
+    "terminal x",
+    "com.terminalx",
+    "raccoon"
+)
+$GenericInterpreterNames = @(
+    "powershell",
+    "pwsh",
+    "cmd",
+    "conhost",
+    "python",
+    "python3",
+    "node"
+)
 
 $WindowsMessages = @{
     Char = 0x0102
@@ -313,12 +375,146 @@ function Get-TerminalXWindowProcesses {
     @(Get-Process | Where-Object { $_.MainWindowHandle -ne 0 } | Sort-Object ProcessName, Id)
 }
 
-function Find-TerminalXProcess([string]$Query) {
+function Get-TerminalXProcessParentId([int]$ProcessId) {
+    if ($ProcessId -le 0) { return 0 }
+    try {
+        $proc = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId = $ProcessId" -ErrorAction SilentlyContinue
+        if ($null -ne $proc -and $null -ne $proc.ParentProcessId) {
+            return [int]$proc.ParentProcessId
+        }
+    } catch {}
+    0
+}
+
+function Test-TerminalXDescendantProcess([int]$TargetPid, [int]$AncestorPid, [int]$MaxDepth = 32) {
+    if ($TargetPid -le 0 -or $AncestorPid -le 0) { return $false }
+    if ($TargetPid -eq $AncestorPid) { return $true }
+    $seen = New-Object System.Collections.Generic.HashSet[int]
+    [void]$seen.Add($TargetPid)
+    $current = $TargetPid
+    for ($depth = 0; $depth -lt $MaxDepth; $depth++) {
+        $parent = Get-TerminalXProcessParentId $current
+        if ($parent -le 0 -or -not $seen.Add($parent)) { return $false }
+        if ($parent -eq $AncestorPid) { return $true }
+        $current = $parent
+    }
+    $false
+}
+
+function Get-TerminalXProcessExecutablePath($Process) {
+    if ($null -eq $Process) { return "" }
+    try {
+        if (-not [string]::IsNullOrWhiteSpace($Process.Path)) { return [string]$Process.Path }
+    } catch {}
+    try {
+        if ($null -ne $Process.MainModule -and -not [string]::IsNullOrWhiteSpace($Process.MainModule.FileName)) {
+            return [string]$Process.MainModule.FileName
+        }
+    } catch {}
+    ""
+}
+
+function Test-TerminalXOwnAppIdentity([int]$TargetPid = 0, [string[]]$Names = @(), [string]$ExecutablePath = "", $OwnApp = $null) {
+    $normalizedNames = New-Object System.Collections.Generic.List[string]
+    foreach ($entry in @($Names)) {
+        if (-not [string]::IsNullOrWhiteSpace([string]$entry)) {
+            $normalizedNames.Add(([string]$entry).Trim().ToLowerInvariant())
+        }
+    }
+    if (-not [string]::IsNullOrWhiteSpace($ExecutablePath)) {
+        $normalizedNames.Add([System.IO.Path]::GetFileNameWithoutExtension($ExecutablePath).ToLowerInvariant())
+        $normalizedNames.Add([System.IO.Path]::GetFileName($ExecutablePath).ToLowerInvariant())
+    }
+
+    $releaseId = $OwnAppReleaseBundleId
+    if ($null -ne $OwnApp -and -not [string]::IsNullOrWhiteSpace([string]$OwnApp.releaseBundleId)) {
+        $releaseId = ([string]$OwnApp.releaseBundleId).Trim().ToLowerInvariant()
+    }
+    foreach ($value in $normalizedNames) {
+        if ($value.Contains($releaseId)) { return $true }
+    }
+
+    if ($null -ne $OwnApp -and [bool]$OwnApp.allowOwnWindowsForTests) {
+        return $false
+    }
+
+    foreach ($fragment in $OwnAppFragments) {
+        foreach ($value in $normalizedNames) {
+            if ($value.Contains($fragment)) { return $true }
+        }
+    }
+
+    if ($null -ne $OwnApp) {
+        $ownerPid = 0
+        try { if ($null -ne $OwnApp.pid) { $ownerPid = [int]$OwnApp.pid } } catch {}
+        if ($ownerPid -gt 0 -and $TargetPid -gt 0) {
+            if ($TargetPid -eq $ownerPid -or (Test-TerminalXDescendantProcess $TargetPid $ownerPid)) {
+                return $true
+            }
+        }
+        $ownerExe = if ($null -ne $OwnApp.executablePath) { ([string]$OwnApp.executablePath).Trim() } else { "" }
+        if (-not [string]::IsNullOrWhiteSpace($ownerExe) -and -not [string]::IsNullOrWhiteSpace($ExecutablePath)) {
+            try {
+                if ([System.IO.Path]::GetFullPath($ExecutablePath).Equals([System.IO.Path]::GetFullPath($ownerExe), [System.StringComparison]::OrdinalIgnoreCase)) {
+                    return $true
+                }
+            } catch {}
+        }
+        $ownerExeName = if ($null -ne $OwnApp.executableName) { ([string]$OwnApp.executableName).Trim().ToLowerInvariant() } else { "" }
+        if (-not [string]::IsNullOrWhiteSpace($ownerExeName) -and ($GenericInterpreterNames -notcontains $ownerExeName)) {
+            foreach ($value in $normalizedNames) {
+                if ($value -eq $ownerExeName) { return $true }
+            }
+        }
+        $appId = if ($null -ne $OwnApp.appIdentifier) { ([string]$OwnApp.appIdentifier).Trim().ToLowerInvariant() } else { "" }
+        if (-not [string]::IsNullOrWhiteSpace($appId)) {
+            foreach ($value in $normalizedNames) {
+                if ($value.Contains($appId)) { return $true }
+            }
+        }
+        foreach ($extra in @($OwnApp.appNames) + @($OwnApp.windowClasses)) {
+            $token = ([string]$extra).Trim().ToLowerInvariant()
+            if ([string]::IsNullOrWhiteSpace($token)) { continue }
+            foreach ($value in $normalizedNames) {
+                if ($value.Contains($token)) { return $true }
+            }
+        }
+    }
+    $false
+}
+
+function Test-TerminalXBlockedAppIdentity([string[]]$Names = @()) {
+    foreach ($entry in @($Names)) {
+        if ([string]::IsNullOrWhiteSpace([string]$entry)) { continue }
+        $value = ([string]$entry).ToLowerInvariant()
+        foreach ($fragment in $BlockedAppFragments) {
+            if ($value.Contains($fragment)) { return $true }
+        }
+    }
+    $false
+}
+
+function Assert-TerminalXQueryAllowed([string]$Query, $OwnApp = $null) {
+    if ([string]::IsNullOrWhiteSpace($Query)) { return }
+    $trimmed = $Query.Trim()
+    $queryPid = 0
+    $pidText = if ($trimmed.StartsWith("pid:", [System.StringComparison]::OrdinalIgnoreCase)) { $trimmed.Substring(4).Trim() } else { $trimmed }
+    [void][int]::TryParse($pidText, [ref]$queryPid)
+    if (Test-TerminalXOwnAppIdentity -TargetPid $queryPid -Names @($trimmed) -OwnApp $OwnApp) {
+        throw "own_app_protected: computer use cannot observe or operate TerminalX ($trimmed)"
+    }
+    if (Test-TerminalXBlockedAppIdentity -Names @($trimmed)) {
+        throw "appBlocked(`"$trimmed`")"
+    }
+}
+
+function Find-TerminalXProcess([string]$Query, $OwnApp = $null) {
     $needle = ""
     if ($null -ne $Query) { $needle = $Query.Trim() }
     if ([string]::IsNullOrWhiteSpace($needle)) { throw 'appNotFound("")' }
+    Assert-TerminalXQueryAllowed $needle $OwnApp
     if ($needle.StartsWith("pid:", [System.StringComparison]::OrdinalIgnoreCase)) {
-        $needle = $needle.Substring(4)
+        $needle = $needle.Substring(4).Trim()
     }
 
     $parsedProcessId = 0
@@ -326,7 +522,7 @@ function Find-TerminalXProcess([string]$Query) {
     if ([int]::TryParse($needle, [ref]$parsedProcessId)) {
         $match = $processes | Where-Object { $_.Id -eq $parsedProcessId } | Select-Object -First 1
         if ($null -ne $match) {
-            Assert-TerminalXProcessAllowed $match
+            Assert-TerminalXProcessAllowed $match $OwnApp
             return $match
         }
     }
@@ -343,21 +539,44 @@ function Find-TerminalXProcess([string]$Query) {
         $_.MainWindowTitle -ilike "*$needle*"
     } | Select-Object -First 1
     if ($null -ne $match) {
-        Assert-TerminalXProcessAllowed $match
+        Assert-TerminalXProcessAllowed $match $OwnApp
         return $match
     }
 
     throw "appNotFound(`"$Query`")"
 }
 
-function Assert-TerminalXProcessAllowed($Process) {
-    $values = @($Process.ProcessName, $Process.MainWindowTitle) | ForEach-Object { ([string]$_).ToLowerInvariant() }
-    foreach ($fragment in $BlockedAppFragments) {
-        foreach ($value in $values) {
-            if ($value.Contains($fragment)) {
-                throw "appBlocked(`"$($Process.ProcessName)`")"
-            }
+function Assert-TerminalXProcessAllowed($Process, $OwnApp = $null) {
+    $windowClass = ""
+    try {
+        if ($Process.MainWindowHandle -ne 0) {
+            $windowClass = [TerminalXDesktopWin32]::GetWindowClassName([IntPtr]$Process.MainWindowHandle)
         }
+    } catch {}
+    $exePath = Get-TerminalXProcessExecutablePath $Process
+    $names = @([string]$Process.ProcessName, [string]$Process.MainWindowTitle, $windowClass)
+    if (Test-TerminalXOwnAppIdentity -TargetPid ([int]$Process.Id) -Names $names -ExecutablePath $exePath -OwnApp $OwnApp) {
+        throw "own_app_protected: computer use cannot observe or operate $($Process.ProcessName)"
+    }
+    if (Test-TerminalXBlockedAppIdentity -Names $names) {
+        throw "appBlocked(`"$($Process.ProcessName)`")"
+    }
+}
+
+function Assert-TerminalXForegroundAllowed($OwnApp = $null) {
+    $fgHwnd = [TerminalXDesktopWin32]::GetForegroundWindow()
+    if ($fgHwnd -eq [IntPtr]::Zero) { return }
+    $fgPid = [int][TerminalXDesktopWin32]::GetWindowProcessId($fgHwnd)
+    $fgClass = [TerminalXDesktopWin32]::GetWindowClassName($fgHwnd)
+    $fgTitle = [TerminalXDesktopWin32]::GetWindowTitleText($fgHwnd)
+    $fgProc = if ($fgPid -gt 0) { Get-Process -Id $fgPid -ErrorAction SilentlyContinue } else { $null }
+    $fgExe = Get-TerminalXProcessExecutablePath $fgProc
+    $fgNames = @($(if ($null -ne $fgProc) { [string]$fgProc.ProcessName } else { "" }), $fgTitle, $fgClass)
+    if (Test-TerminalXOwnAppIdentity -TargetPid $fgPid -Names $fgNames -ExecutablePath $fgExe -OwnApp $OwnApp) {
+        throw "own_app_protected: keyboard input was stopped because a TerminalX window has the keyboard focus"
+    }
+    if (Test-TerminalXBlockedAppIdentity -Names $fgNames) {
+        throw "appBlocked(`"$(if ($null -ne $fgProc) { $fgProc.ProcessName } else { $fgTitle })`")"
     }
 }
 
@@ -448,10 +667,15 @@ function Wait-TerminalXWindowFocused([IntPtr]$WindowHandle, [int]$TimeoutMillise
     Test-TerminalXWindowFocused $WindowHandle
 }
 
-function Assert-TerminalXKeyboardFocus([IntPtr]$WindowHandle, $Operation) {
+function Assert-TerminalXKeyboardFocus([IntPtr]$WindowHandle, $Operation, $OwnApp = $null) {
+    Assert-TerminalXForegroundAllowed $OwnApp
     if (Test-TerminalXWindowFocused $WindowHandle) { return }
     if ([bool]$Operation.restoreWindow) {
-        if (Wait-TerminalXWindowFocused $WindowHandle 500) { return }
+        if (Wait-TerminalXWindowFocused $WindowHandle 500) {
+            Assert-TerminalXForegroundAllowed $OwnApp
+            return
+        }
+        Assert-TerminalXForegroundAllowed $OwnApp
         throw "window_not_focused: keyboard input requires the target window to be focused; restoreWindow was requested but the target window is still not focused; bring it forward manually or check desktop permissions"
     }
     throw "window_not_focused: keyboard input requires the target window to be focused; retry with --restore-window"
@@ -999,8 +1223,8 @@ function Get-TerminalXScreenshot([bool]$IncludeScreenshot, $WindowFrame) {
     }
 }
 
-function New-TerminalXSnapshot([string]$Query, [bool]$IncludeScreenshot, $WindowId = $null, $WindowIndex = $null, [bool]$RestoreWindow = $false) {
-    $process = Find-TerminalXProcess $Query
+function New-TerminalXSnapshot([string]$Query, [bool]$IncludeScreenshot, $WindowId = $null, $WindowIndex = $null, [bool]$RestoreWindow = $false, $OwnApp = $null) {
+    $process = Find-TerminalXProcess $Query $OwnApp
     if ($RestoreWindow) { Restore-TerminalXWindow $process }
     Assert-TerminalXWindowTarget $process $WindowId $WindowIndex
     $root = Get-TerminalXRootElement $process
@@ -1035,8 +1259,8 @@ function Get-TerminalXAppList {
     })
 }
 
-function Get-TerminalXWindowList([string]$Query) {
-    $process = Find-TerminalXProcess $Query
+function Get-TerminalXWindowList([string]$Query, $OwnApp = $null) {
+    $process = Find-TerminalXProcess $Query $OwnApp
     $root = Get-TerminalXRootElement $process
     $windowFrame = Get-TerminalXWindowFrame $process $root
     $x = $null
@@ -1255,34 +1479,101 @@ function Get-TerminalXRequiredString($Value, [string]$Name) {
     $text
 }
 
-function Get-TerminalXScreenPoint($Operation, $WindowFrame) {
-    if ($null -ne $Operation.element) {
+function Assert-TerminalXPointInWindowBounds($WindowFrame, [double]$LocalX, [double]$LocalY, [string]$XName = "x", [string]$YName = "y") {
+    if ($null -eq $WindowFrame -or $WindowFrame.width -le 0 -or $WindowFrame.height -le 0) {
+        throw "coordinate action requires a visible window and coordinates"
+    }
+    if ($LocalX -lt 0 -or $LocalY -lt 0 -or $LocalX -gt $WindowFrame.width -or $LocalY -gt $WindowFrame.height) {
+        throw "invalid_argument: $XName and $YName ($LocalX, $LocalY) are out of window bounds [0, $($WindowFrame.width)] x [0, $($WindowFrame.height)]"
+    }
+}
+
+function Assert-TerminalXScreenPointInWindow($WindowFrame, [double]$ScreenX, [double]$ScreenY) {
+    if ($null -eq $WindowFrame -or $WindowFrame.width -le 0 -or $WindowFrame.height -le 0) {
+        throw "coordinate action requires a visible window and coordinates"
+    }
+    if ($ScreenX -lt $WindowFrame.x -or $ScreenY -lt $WindowFrame.y -or $ScreenX -gt ($WindowFrame.x + $WindowFrame.width) -or $ScreenY -gt ($WindowFrame.y + $WindowFrame.height)) {
+        throw "invalid_argument: target point ($ScreenX, $ScreenY) is out of window bounds"
+    }
+}
+
+function Get-TerminalXTopLevelWindowAtPoint([int]$ScreenX, [int]$ScreenY) {
+    $hwnd = [TerminalXDesktopWin32]::GetTopLevelWindowAtPoint($ScreenX, $ScreenY)
+    if ($hwnd -eq [IntPtr]::Zero) { return $null }
+    $pidValue = [int][TerminalXDesktopWin32]::GetWindowProcessId($hwnd)
+    $className = [TerminalXDesktopWin32]::GetWindowClassName($hwnd)
+    $title = [TerminalXDesktopWin32]::GetWindowTitleText($hwnd)
+    $proc = if ($pidValue -gt 0) { Get-Process -Id $pidValue -ErrorAction SilentlyContinue } else { $null }
+    [pscustomobject]@{
+        hwnd = $hwnd
+        pid = $pidValue
+        processName = if ($null -ne $proc) { [string]$proc.ProcessName } else { "" }
+        executablePath = Get-TerminalXProcessExecutablePath $proc
+        className = $className
+        title = $title
+    }
+}
+
+function Assert-TerminalXScreenPointOwnedByTarget($TargetProcess, [IntPtr]$TargetHandle, $WindowFrame, [int]$ScreenX, [int]$ScreenY, $OwnApp = $null) {
+    Assert-TerminalXScreenPointInWindow $WindowFrame $ScreenX $ScreenY
+    Assert-TerminalXProcessAllowed $TargetProcess $OwnApp
+    $hit = Get-TerminalXTopLevelWindowAtPoint $ScreenX $ScreenY
+    if ($null -eq $hit) {
+        throw "window_not_focused: no visible window owns screen coordinate ($ScreenX, $ScreenY); bring the target window forward and retry"
+    }
+    $hitNames = @([string]$hit.processName, [string]$hit.title, [string]$hit.className)
+    if (Test-TerminalXOwnAppIdentity -TargetPid ([int]$hit.pid) -Names $hitNames -ExecutablePath ([string]$hit.executablePath) -OwnApp $OwnApp) {
+        throw "own_app_protected: pointer input stopped because a TerminalX window owns screen coordinate ($ScreenX, $ScreenY)"
+    }
+    if (Test-TerminalXBlockedAppIdentity -Names $hitNames) {
+        $label = if (-not [string]::IsNullOrWhiteSpace($hit.processName)) { $hit.processName } else { [string]$hit.pid }
+        throw "appBlocked(`"$label`")"
+    }
+    $targetPid = [int]$TargetProcess.Id
+    $hitPid = [int]$hit.pid
+    $sameWindow = ($hit.hwnd -eq $TargetHandle) -or ($hitPid -eq $targetPid) -or (Test-TerminalXDescendantProcess $hitPid $targetPid) -or (Test-TerminalXDescendantProcess $targetPid $hitPid)
+    if (-not $sameWindow) {
+        throw "window_not_focused: screen coordinate ($ScreenX, $ScreenY) is occluded by another window (pid $hitPid, expected pid $targetPid); bring the target window forward and retry"
+    }
+}
+
+function Get-TerminalXScreenPoint($Operation, $WindowFrame, [string]$XKey = "x", [string]$YKey = "y") {
+    if ($XKey -eq "x" -and $null -ne $Operation.element) {
         throw "stale element frame; run get-app-state again and use a fresh element index"
     }
-    $x = Get-TerminalXRequiredNumber $Operation.x "x"
-    $y = Get-TerminalXRequiredNumber $Operation.y "y"
+    $x = Get-TerminalXRequiredNumber $Operation.$XKey $XKey
+    $y = Get-TerminalXRequiredNumber $Operation.$YKey $YKey
+    Assert-TerminalXPointInWindowBounds $WindowFrame $x $y $XKey $YKey
     @{
         x = [int][Math]::Round($WindowFrame.x + $x)
         y = [int][Math]::Round($WindowFrame.y + $y)
     }
 }
 
-function Get-TerminalXElementScreenPoint($Element) {
+function Get-TerminalXElementScreenPoint($Element, $WindowFrame = $null) {
     if ($null -eq $Element) { return $null }
     try {
         $rect = $Element.Current.BoundingRectangle
         if ($rect.Width -gt 0 -and $rect.Height -gt 0) {
+            $px = [int][Math]::Round($rect.X + ($rect.Width / 2))
+            $py = [int][Math]::Round($rect.Y + ($rect.Height / 2))
+            if ($null -ne $WindowFrame) {
+                Assert-TerminalXScreenPointInWindow $WindowFrame $px $py
+            }
             return @{
-                x = [int][Math]::Round($rect.X + ($rect.Width / 2))
-                y = [int][Math]::Round($rect.Y + ($rect.Height / 2))
+                x = $px
+                y = $py
             }
         }
-    } catch {}
+    } catch {
+        if ($_.Exception.Message -like "invalid_argument:*") { throw }
+    }
     $null
 }
 
-function Send-TerminalXMouseClick([IntPtr]$WindowHandle, [int]$ScreenX, [int]$ScreenY, [string]$Button, [int]$Count, [string]$Modifiers) {
+function Send-TerminalXMouseClick($TargetProcess, [IntPtr]$WindowHandle, $WindowFrame, [int]$ScreenX, [int]$ScreenY, [string]$Button, [int]$Count, [string]$Modifiers, $OwnApp = $null) {
     [void][TerminalXDesktopWin32]::SetForegroundWindow($WindowHandle)
+    Assert-TerminalXScreenPointOwnedByTarget $TargetProcess $WindowHandle $WindowFrame $ScreenX $ScreenY $OwnApp
     [void][TerminalXDesktopWin32]::SetCursorPos($ScreenX, $ScreenY)
     $buttonName = if ([string]::IsNullOrWhiteSpace($Button)) { "left" } else { $Button.ToLowerInvariant() }
     switch ($buttonName) {
@@ -1312,12 +1603,14 @@ function Send-TerminalXMouseClick([IntPtr]$WindowHandle, [int]$ScreenX, [int]$Sc
     }
 }
 
-function Send-TerminalXDrag([IntPtr]$WindowHandle, $From, $To) {
+function Send-TerminalXDrag($TargetProcess, [IntPtr]$WindowHandle, $WindowFrame, $From, $To, $OwnApp = $null) {
     [void][TerminalXDesktopWin32]::SetForegroundWindow($WindowHandle)
     $startX = [int]$From.x
     $startY = [int]$From.y
     $endX = [int]$To.x
     $endY = [int]$To.y
+    Assert-TerminalXScreenPointOwnedByTarget $TargetProcess $WindowHandle $WindowFrame $startX $startY $OwnApp
+    Assert-TerminalXScreenPointOwnedByTarget $TargetProcess $WindowHandle $WindowFrame $endX $endY $OwnApp
     [void][TerminalXDesktopWin32]::SetCursorPos($startX, $startY)
     [TerminalXDesktopWin32]::mouse_event($MouseEvents.LeftDown, 0, 0, 0, [UIntPtr]::Zero)
     for ($step = 1; $step -le 12; $step++) {
@@ -1462,6 +1755,7 @@ function Send-TerminalXPasteText([IntPtr]$WindowHandle, [string]$Text) {
 }
 
 function Invoke-TerminalXOperation($Operation) {
+    $ownApp = $Operation.ownApp
     $includeScreenshot = -not [bool]$Operation.noScreenshot
     if ($Operation.tool -eq "handshake") {
         return [pscustomobject]@{ ok = $true; capabilities = Get-TerminalXHandshake }
@@ -1470,24 +1764,24 @@ function Invoke-TerminalXOperation($Operation) {
         return [pscustomobject]@{ ok = $true; apps = @(Get-TerminalXAppList) }
     }
     if ($Operation.tool -eq "list_windows") {
-        $list = Get-TerminalXWindowList $Operation.app
+        $list = Get-TerminalXWindowList $Operation.app $ownApp
         return [pscustomobject]@{ ok = $true; app = $list.app; windows = @($list.windows) }
     }
     if ($Operation.tool -eq "get_app_state") {
-        return [pscustomobject]@{ ok = $true; snapshot = New-TerminalXSnapshot $Operation.app $includeScreenshot $Operation.windowId $Operation.windowIndex ([bool]$Operation.restoreWindow) }
+        return [pscustomobject]@{ ok = $true; snapshot = New-TerminalXSnapshot $Operation.app $includeScreenshot $Operation.windowId $Operation.windowIndex ([bool]$Operation.restoreWindow) $ownApp }
     }
 
-    $process = Find-TerminalXProcess $Operation.app
+    $process = Find-TerminalXProcess $Operation.app $ownApp
     if ([bool]$Operation.restoreWindow) { Restore-TerminalXWindow $process }
     Assert-TerminalXWindowTarget $process $Operation.windowId $Operation.windowIndex
     $root = Get-TerminalXRootElement $process
-    $windowFrame = if ($null -ne $Operation.windowBounds) { $Operation.windowBounds } else { Get-TerminalXWindowFrame $process $root }
+    $windowFrame = Get-TerminalXWindowFrame $process $root
     $element = Find-TerminalXElement $root $Operation.element
     $fromElement = Find-TerminalXElement $root $Operation.fromElement
     $toElement = Find-TerminalXElement $root $Operation.toElement
     $handle = [IntPtr]$process.MainWindowHandle
     if ($Operation.tool -in @("type_text", "press_key", "hotkey", "paste_text")) {
-        Assert-TerminalXKeyboardFocus $handle $Operation
+        Assert-TerminalXKeyboardFocus $handle $Operation $ownApp
     }
     $action = $null
 
@@ -1503,9 +1797,9 @@ function Invoke-TerminalXOperation($Operation) {
                 $handledByPattern = Invoke-TerminalXPrimaryAction $element
             }
             if (-not $handledByPattern) {
-                $point = Get-TerminalXElementScreenPoint $element
+                $point = Get-TerminalXElementScreenPoint $element $windowFrame
                 if ($null -eq $point) { $point = Get-TerminalXScreenPoint $Operation $windowFrame }
-                Send-TerminalXMouseClick $handle $point.x $point.y $Operation.mouse_button $clickCount $Operation.modifiers
+                Send-TerminalXMouseClick $process $handle $windowFrame $point.x $point.y $Operation.mouse_button $clickCount $Operation.modifiers $ownApp
                 $action = [pscustomobject]@{ path = "synthetic"; actionName = $null; fallbackReason = "actionUnsupported" }
             } else {
                 $action = [pscustomobject]@{ path = "accessibility"; actionName = "primaryAction"; fallbackReason = $null }
@@ -1531,31 +1825,26 @@ function Invoke-TerminalXOperation($Operation) {
             } elseif ($Operation.direction -ne "up") {
                 throw "unsupported scroll direction: $($Operation.direction)"
             }
-            $point = Get-TerminalXElementScreenPoint $element
+            $point = Get-TerminalXElementScreenPoint $element $windowFrame
             if ($null -eq $point) { $point = Get-TerminalXScreenPoint $Operation $windowFrame }
             [void][TerminalXDesktopWin32]::SetForegroundWindow($handle)
+            Assert-TerminalXScreenPointOwnedByTarget $process $handle $windowFrame ([int]$point.x) ([int]$point.y) $ownApp
             [void][TerminalXDesktopWin32]::SetCursorPos([int]$point.x, [int]$point.y)
             [TerminalXDesktopWin32]::mouse_event($mouseEvent, 0, 0, $delta, [UIntPtr]::Zero)
             $action = [pscustomobject]@{ path = "synthetic"; actionName = "scroll"; fallbackReason = $null }
         }
         "drag" {
-            $from = Get-TerminalXElementScreenPoint $fromElement
+            $from = Get-TerminalXElementScreenPoint $fromElement $windowFrame
             if ($null -eq $from -and $null -ne $Operation.fromElement) { throw "stale element frame; run get-app-state again and use a fresh element index" }
             if ($null -eq $from) {
-                $from = @{
-                    x = $windowFrame.x + (Get-TerminalXRequiredNumber $Operation.from_x "from_x")
-                    y = $windowFrame.y + (Get-TerminalXRequiredNumber $Operation.from_y "from_y")
-                }
+                $from = Get-TerminalXScreenPoint $Operation $windowFrame "from_x" "from_y"
             }
-            $to = Get-TerminalXElementScreenPoint $toElement
+            $to = Get-TerminalXElementScreenPoint $toElement $windowFrame
             if ($null -eq $to -and $null -ne $Operation.toElement) { throw "stale element frame; run get-app-state again and use a fresh element index" }
             if ($null -eq $to) {
-                $to = @{
-                    x = $windowFrame.x + (Get-TerminalXRequiredNumber $Operation.to_x "to_x")
-                    y = $windowFrame.y + (Get-TerminalXRequiredNumber $Operation.to_y "to_y")
-                }
+                $to = Get-TerminalXScreenPoint $Operation $windowFrame "to_x" "to_y"
             }
-            Send-TerminalXDrag $handle $from $to
+            Send-TerminalXDrag $process $handle $windowFrame $from $to $ownApp
             $action = [pscustomobject]@{ path = "synthetic"; actionName = "drag"; fallbackReason = $null }
         }
         "type_text" {
@@ -1586,13 +1875,13 @@ function Invoke-TerminalXOperation($Operation) {
     }
 
     try {
-        $snapshot = New-TerminalXSnapshot $Operation.app $includeScreenshot $Operation.windowId $Operation.windowIndex
+        $snapshot = New-TerminalXSnapshot $Operation.app $includeScreenshot $Operation.windowId $Operation.windowIndex $false $ownApp
     } catch {
         if ($null -eq $Operation.windowId -and $null -eq $Operation.windowIndex) { throw }
         if ($null -eq $action.verification) {
             $action | Add-Member -NotePropertyName verification -NotePropertyValue ([pscustomobject]@{ state = "unverified"; reason = "window_changed" })
         }
-        $snapshot = New-TerminalXSnapshot $Operation.app $includeScreenshot $null $null
+        $snapshot = New-TerminalXSnapshot $Operation.app $includeScreenshot $null $null $false $ownApp
     }
     [pscustomobject]@{ ok = $true; action = $action; snapshot = $snapshot }
 }

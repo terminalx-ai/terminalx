@@ -653,14 +653,75 @@ fn branch_state(checkout: &Checkout, commit: &str) -> GateResult {
     }
 }
 
+/// Safe environment variables passed to isolated verification commands (S-20).
+/// All TerminalX control tokens, SSH agent sockets, API keys, and shell/loader
+/// injection variables (`BASH_ENV`, `NODE_OPTIONS`, `DYLD_*`, `LD_*`, etc.) are stripped.
+const VERIFY_SAFE_ENV_KEYS: &[&str] = &[
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "SHELL",
+    "LANG",
+    "TERM",
+    "TMPDIR",
+    "TEMP",
+    "TMP",
+    "CARGO_HOME",
+    "RUSTUP_HOME",
+    "GOPATH",
+    "GOMODCACHE",
+    "NVM_DIR",
+    "PYENV_ROOT",
+    "VIRTUAL_ENV",
+    "XDG_CACHE_HOME",
+    "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
+    "CI",
+    "NO_COLOR",
+    "SYSTEMROOT",
+    "COMSPEC",
+    "PATHEXT",
+    "USERPROFILE",
+];
+
+fn verify_safe_env() -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for (key, value) in std::env::vars() {
+        let allowed = VERIFY_SAFE_ENV_KEYS.contains(&key.as_str()) || key.starts_with("LC_");
+        if allowed {
+            out.push((key, value));
+        }
+    }
+    out.push(("PATH".into(), crate::binpath::login_path()));
+    out.push(("GIT_TERMINAL_PROMPT".into(), "0".into()));
+    // Prevent git pushes or ext/fd transport execution even from repo test scripts.
+    out.push(("GIT_CONFIG_COUNT".into(), "3".into()));
+    out.push(("GIT_CONFIG_KEY_0".into(), format!("url.{}.pushInsteadOf", super::guard::REFUSED_URL)));
+    out.push(("GIT_CONFIG_VALUE_0".into(), String::new()));
+    out.push(("GIT_CONFIG_KEY_1".into(), "protocol.ext.allow".into()));
+    out.push(("GIT_CONFIG_VALUE_1".into(), "never".into()));
+    out.push(("GIT_CONFIG_KEY_2".into(), "protocol.fd.allow".into()));
+    out.push(("GIT_CONFIG_VALUE_2".into(), "never".into()));
+    out
+}
+
 /// Run one command at the root of a checkout, as a worker was told it would be run: a
 /// worker's worktree for its gates, the lead's checkout for a merged result (`merge`).
+///
+/// S-20: Enforces fail-closed `guard::refused` checks, canonical directory
+/// validation, sanitized non-secret environment isolation, and bounded timeout.
 pub(super) fn run_command(cwd: &std::path::Path, run: &str, project: bool, timeout: Duration) -> CommandRun {
     let started = Instant::now();
+    let timeout = timeout.clamp(Duration::from_secs(1), COMMAND_TIMEOUT);
     // What no worker of a run may do, a check of its result does not do either.
     if let Some((_, found)) = super::guard::refused(run) {
-        return CommandRun { run: run.to_string(), project, exit_code: None, passed: false, millis: 0, output: Some(format!("TerminalX did not run it: `{found}` pushes, merges or deploys, and a check of a result does none of those.")), on_base: None };
+        return CommandRun { run: run.to_string(), project, exit_code: None, passed: false, millis: 0, output: Some(format!("TerminalX did not run it: `{found}` is refused by worker/verification safety rules.")), on_base: None };
     }
+    let canonical_cwd = match crate::paths::canonicalize(cwd) {
+        Ok(dir) if dir.is_dir() => dir,
+        Ok(_) => return CommandRun { run: run.to_string(), project, exit_code: None, passed: false, millis: 0, output: Some(format!("Verification working directory `{}` is not a directory.", cwd.display())), on_base: None },
+        Err(error) => return CommandRun { run: run.to_string(), project, exit_code: None, passed: false, millis: 0, output: Some(format!("Verification working directory `{}` could not be resolved: {error}", cwd.display())), on_base: None },
+    };
     // A plan's commands are POSIX shell, as a worker ran them: on Windows,
     // in Git for Windows' sh.
     #[cfg(unix)]
@@ -671,8 +732,17 @@ pub(super) fn run_command(cwd: &std::path::Path, run: &str, project: bool, timeo
     };
     let mut process = std::process::Command::new(sh);
     // Both streams in the order they were written: the end of a test run is on either.
-    process.args(["-c", &format!("exec 2>&1\n{run}")]).current_dir(cwd);
-    process.env("PATH", crate::binpath::login_path());
+    process
+        .args(["-c", &format!("exec 2>&1\n{run}")])
+        .current_dir(&canonical_cwd)
+        .stdin(std::process::Stdio::null())
+        .env_clear()
+        .envs(verify_safe_env());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        process.process_group(0);
+    }
     let (exit_code, output) = match crate::git::capture_within(process, timeout) {
         Ok(out) => (out.status.code(), String::from_utf8_lossy(&out.stdout).into_owned()),
         Err(error) if error.kind() == std::io::ErrorKind::TimedOut => (None, format!("The command did not finish within {} minutes and was stopped.", timeout.as_secs().max(60) / 60)),
@@ -1590,5 +1660,43 @@ mod tests {
         assert!(checking("run-check", "session").is_some(), "another piece is free");
         drop(first);
         assert!(!is_checking("run-check", "store") && checking("run-check", "store").is_some());
+    }
+
+    /// S-20: `verify::run_command` enforces fail-closed shell guardrails, strips
+    /// sensitive host/control environment variables, and injects no-push git config.
+    #[cfg(unix)]
+    #[test]
+    fn run_command_strips_secrets_and_blocks_opaque_shell_s20() {
+        let dir = tempfile::tempdir().unwrap();
+        // Opaque / bypass shell constructs must be refused without executing.
+        for blocked in [
+            "sh -xc 'git push'",
+            "sh -c -- 'git push'",
+            "sh <<EOF\necho hi\nEOF",
+            "sh <<< 'echo hi'",
+            "CMD=git; $CMD push",
+        ] {
+            let result = run_command(dir.path(), blocked, false, Duration::from_secs(10));
+            assert!(!result.passed && result.exit_code.is_none(), "expected refusal for: {blocked}");
+        }
+        // Non-existent working directory is rejected cleanly.
+        let missing = run_command(&dir.path().join("does-not-exist"), "true", false, Duration::from_secs(10));
+        assert!(!missing.passed && missing.exit_code.is_none());
+
+        // Safe environment list never includes control tokens, SSH agent, or API keys.
+        std::env::set_var("TERMINALX_NEXT_TOKEN", "secret-master-token-xyz");
+        std::env::set_var("GH_TOKEN", "ghp_secret12345678901234567890");
+        std::env::set_var("BASH_ENV", "/tmp/evil.sh");
+        let safe = verify_safe_env();
+        std::env::remove_var("TERMINALX_NEXT_TOKEN");
+        std::env::remove_var("GH_TOKEN");
+        std::env::remove_var("BASH_ENV");
+        assert!(!safe.iter().any(|(k, _)| k == "TERMINALX_NEXT_TOKEN" || k == "GH_TOKEN" || k == "BASH_ENV"));
+        assert!(safe.iter().any(|(k, v)| k == "GIT_CONFIG_COUNT" && v == "3"));
+        assert!(safe.iter().any(|(k, v)| k == "GIT_TERMINAL_PROMPT" && v == "0"));
+
+        // Legitimate safe check command still passes.
+        let ok = run_command(dir.path(), "echo verify-ok", false, Duration::from_secs(10));
+        assert!(ok.passed && ok.exit_code == Some(0));
     }
 }

@@ -42,6 +42,16 @@ pub const HELPER_APP_PATH_ENV: &str = "TERMINALX_COMPUTER_MACOS_HELPER_APP_PATH"
 pub const REQUIRED_PROTOCOL_VERSION: u64 = 1;
 /// The error an action on TerminalX's own windows answers.
 pub const OWN_APP_PROTECTED: &str = "own_app_protected";
+/// The released TerminalX bundle identifier; never automated even in dev/test builds.
+pub const RELEASE_APP_BUNDLE_ID: &str = "com.terminalx.next";
+/// Case-insensitive selector fragments identifying TerminalX / Raccoon windows or bundles.
+const OWN_APP_SELECTOR_FRAGMENTS: &[&str] = &[
+    "terminalx",
+    "terminal-x",
+    "terminal x",
+    "com.terminalx",
+    "raccoon",
+];
 /// Escape hatch for TerminalX's own UI tests: a test build started with this
 /// set to `1` may drive its own windows. It is read from this process's own
 /// environment, once, and only in a debug build. A child process (an agent)
@@ -60,16 +70,82 @@ fn own_windows_allowed(test_build: bool, value: Option<&str>) -> bool {
     test_build && value == Some("1")
 }
 
-/// True when an `--app pid:<n>` selector names this very process. Names and
-/// bundle ids are resolved by the provider, which refuses them itself on
-/// macOS; this catches the unambiguous case before anything is started.
+/// True when `params["app"]` targets this process or TerminalX/Raccoon by PID,
+/// app name, bundle id, or window title selector.
+///
+/// The released app identifier (`com.terminalx.next`) is unconditionally
+/// protected even when `allow_own_windows` is true (mirroring macOS
+/// `OwnAppProtection.swift`).
+pub(crate) fn targets_own_app(
+    params: &Value,
+    this_pid: u32,
+    app_identifier: Option<&str>,
+    allow_own_windows: bool,
+) -> bool {
+    let Some(raw) = params.get("app").and_then(Value::as_str) else {
+        return false;
+    };
+    let normalized = raw.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return false;
+    }
+    if normalized == RELEASE_APP_BUNDLE_ID || normalized.contains(RELEASE_APP_BUNDLE_ID) {
+        return true;
+    }
+    if allow_own_windows {
+        return false;
+    }
+    if let Some(pid_text) = normalized.strip_prefix("pid:").map(str::trim) {
+        if pid_text.parse::<u32>().ok() == Some(this_pid) {
+            return true;
+        }
+    } else if normalized.parse::<u32>().ok() == Some(this_pid) {
+        return true;
+    }
+    if let Some(id) = app_identifier.map(str::trim).filter(|s| !s.is_empty()) {
+        let lower_id = id.to_ascii_lowercase();
+        if normalized == lower_id || normalized.contains(&lower_id) {
+            return true;
+        }
+    }
+    OWN_APP_SELECTOR_FRAGMENTS
+        .iter()
+        .any(|fragment| normalized.contains(fragment))
+}
+
+/// True when an `--app` selector names this process or TerminalX/Raccoon.
+#[cfg(test)]
 fn targets_this_process(params: &Value, this_pid: u32) -> bool {
-    params
-        .get("app")
-        .and_then(Value::as_str)
-        .and_then(|app| app.trim().strip_prefix("pid:"))
-        .and_then(|pid| pid.parse::<u32>().ok())
-        == Some(this_pid)
+    targets_own_app(params, this_pid, None, false)
+}
+
+/// Metadata describing this TerminalX host process, attached by the trusted
+/// Rust bridge to Linux/Windows helper operations so they enforce the same
+/// `own_app_protected` isolation as macOS `OwnAppProtection.swift`.
+pub fn own_app_context(app_identifier: Option<&str>) -> Value {
+    let pid = std::process::id();
+    let exe_path = std::env::current_exe()
+        .ok()
+        .map(|p| std::fs::canonicalize(&p).unwrap_or(p))
+        .map(|p| p.to_string_lossy().into_owned());
+    let exe_name = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()));
+    #[cfg(unix)]
+    let process_group_id = Some(unsafe { libc::getpgrp() } as u32);
+    #[cfg(not(unix))]
+    let process_group_id: Option<u32> = None;
+    json!({
+        "pid": pid,
+        "processGroupId": process_group_id,
+        "executablePath": exe_path,
+        "executableName": exe_name,
+        "appIdentifier": app_identifier,
+        "releaseBundleId": RELEASE_APP_BUNDLE_ID,
+        "appNames": ["TerminalX", "TerminalX Next", "Raccoon"],
+        "windowClasses": ["terminalx", "terminalx-next", RELEASE_APP_BUNDLE_ID, "raccoon"],
+        "allowOwnWindowsForTests": own_windows_allowed_for_tests(),
+    })
 }
 
 fn own_app_protected() -> ComputerError {
@@ -414,11 +490,16 @@ impl ComputerService {
             ));
         }
         // TerminalX's own windows are the person's to operate, always, not
-        // only while a question is open (PRO-90). The helper enforces this for
-        // every selector; this is the same answer without starting it.
-        if ActionMethod::from_wire(method).is_some()
-            && !own_windows_allowed_for_tests()
-            && targets_this_process(&params, std::process::id())
+        // only while a question is open (PRO-90). Reject actions as well as
+        // observation/listing (`getAppState`, `listWindows`) targeting this
+        // process or TerminalX/Raccoon before any provider is invoked.
+        if (ActionMethod::from_wire(method).is_some() || matches!(method, "getAppState" | "listWindows"))
+            && targets_own_app(
+                &params,
+                std::process::id(),
+                self.app_identifier().as_deref(),
+                own_windows_allowed_for_tests(),
+            )
         {
             return Err(own_app_protected());
         }
@@ -505,8 +586,9 @@ impl ComputerService {
     fn start_provider(&self) -> Result<Option<Box<dyn ComputerProvider>>, ComputerError> {
         if let Some(platform) = desktop_script::Platform::current() {
             let resources = self.resource_dir.lock().unwrap_or_else(|p| p.into_inner()).clone();
+            let identifier = self.app_identifier();
             return Ok(desktop_script::script_path(platform, resources.as_deref())
-                .map(|path| Box::new(desktop_script::DesktopScriptProvider::new(platform, path)) as Box<dyn ComputerProvider>));
+                .map(|path| Box::new(desktop_script::DesktopScriptProvider::new(platform, path).with_app_identifier(identifier)) as Box<dyn ComputerProvider>));
         }
         if !cfg!(target_os = "macos") || !macos_native::is_macos_14_or_newer() {
             return Ok(None);
@@ -703,34 +785,97 @@ mod tests {
     }
 
     #[test]
-    fn an_action_on_this_apps_own_pid_is_refused_with_its_own_code() {
+    fn an_action_or_observation_on_this_app_or_terminalx_is_refused_with_own_app_protected() {
         let service = ComputerService::new(None);
-        let own = format!("pid:{}", std::process::id());
-        for method in ["click", "typeText", "pressKey", "hotkey", "pasteText", "setValue", "performSecondaryAction", "scroll", "drag"] {
-            for selector in [own.clone(), format!("  {own} ")] {
+        let own_pid = std::process::id();
+        let own = format!("pid:{own_pid}");
+        let bare = own_pid.to_string();
+        let methods = [
+            "click",
+            "typeText",
+            "pressKey",
+            "hotkey",
+            "pasteText",
+            "setValue",
+            "performSecondaryAction",
+            "scroll",
+            "drag",
+            "getAppState",
+            "listWindows",
+        ];
+        for method in methods {
+            for selector in [
+                own.clone(),
+                format!("  {own} "),
+                format!("PID:{own_pid}"),
+                bare.clone(),
+                "TerminalX".into(),
+                "TerminalX Next".into(),
+                "TerminalX — workspace".into(),
+                "com.terminalx.next".into(),
+                "com.terminalx.dev".into(),
+                "Raccoon".into(),
+                "raccoon.exe".into(),
+            ] {
                 let error = service
-                    .call(method, serde_json::json!({ "app": selector, "elementIndex": 1, "x": 1, "y": 1 }), "r")
+                    .call(
+                        method,
+                        serde_json::json!({ "app": selector, "elementIndex": 1, "x": 1, "y": 1 }),
+                        "r",
+                    )
                     .unwrap_err();
-                assert_eq!(error.code, OWN_APP_PROTECTED, "{method}");
+                assert_eq!(error.code, OWN_APP_PROTECTED, "{method} selector={selector}");
                 assert!(error.message.contains("self-ui authorize"), "{method}");
                 assert!(error.recovery().contains("person-approved"), "{method}");
             }
         }
-        // Looking at the app is not an action, and another process is not this app.
-        let looked = service.call("getAppState", serde_json::json!({ "app": own }), "r");
-        assert!(looked.err().is_none_or(|error| error.code != OWN_APP_PROTECTED));
-        let other = service.call("click", serde_json::json!({ "app": "pid:1", "elementIndex": 1 }), "r");
-        assert!(other.err().is_none_or(|error| error.code != OWN_APP_PROTECTED));
+        // Unrelated apps (including system Terminal) are not refused as own-app.
+        for benign in ["pid:1", "Finder", "Terminal", "com.apple.Terminal"] {
+            let other = service.call("click", serde_json::json!({ "app": benign, "elementIndex": 1 }), "r");
+            assert!(other.err().is_none_or(|error| error.code != OWN_APP_PROTECTED), "benign={benign}");
+        }
     }
 
     #[test]
-    fn only_a_pid_selector_for_this_process_is_decided_here() {
+    fn own_app_selectors_cover_pid_name_bundle_and_window_titles() {
         assert!(targets_this_process(&serde_json::json!({ "app": "pid:42" }), 42));
-        assert!(targets_this_process(&serde_json::json!({ "app": " pid:42\n" }), 42));
+        assert!(targets_this_process(&serde_json::json!({ "app": " PID:42\n" }), 42));
+        assert!(targets_this_process(&serde_json::json!({ "app": "42" }), 42));
+        assert!(targets_this_process(&serde_json::json!({ "app": "TerminalX" }), 42));
+        assert!(targets_this_process(&serde_json::json!({ "app": "Terminal-X Dev" }), 42));
+        assert!(targets_this_process(&serde_json::json!({ "app": "Terminal X" }), 42));
+        assert!(targets_this_process(&serde_json::json!({ "app": "com.terminalx.next" }), 42));
+        assert!(targets_this_process(&serde_json::json!({ "app": "Raccoon — Approval" }), 42));
+        assert!(targets_own_app(
+            &serde_json::json!({ "app": "com.custom.host" }),
+            42,
+            Some("com.custom.host"),
+            false
+        ));
+        // Release bundle id remains protected even when test escape hatch is enabled.
+        assert!(targets_own_app(
+            &serde_json::json!({ "app": "com.terminalx.next" }),
+            42,
+            None,
+            true
+        ));
+        assert!(!targets_own_app(
+            &serde_json::json!({ "app": "pid:42" }),
+            42,
+            None,
+            true
+        ));
         assert!(!targets_this_process(&serde_json::json!({ "app": "pid:43" }), 42));
-        assert!(!targets_this_process(&serde_json::json!({ "app": "TerminalX" }), 42));
+        assert!(!targets_this_process(&serde_json::json!({ "app": "Terminal" }), 42));
+        assert!(!targets_this_process(&serde_json::json!({ "app": "com.apple.Terminal" }), 42));
         assert!(!targets_this_process(&serde_json::json!({ "app": 42 }), 42));
         assert!(!targets_this_process(&serde_json::json!({}), 42));
+
+        let ctx = own_app_context(Some("com.terminalx.dev"));
+        assert_eq!(ctx["pid"], std::process::id());
+        assert_eq!(ctx["appIdentifier"], "com.terminalx.dev");
+        assert_eq!(ctx["releaseBundleId"], RELEASE_APP_BUNDLE_ID);
+        assert!(ctx["executablePath"].as_str().is_some_and(|s| !s.is_empty()));
     }
 
     #[test]

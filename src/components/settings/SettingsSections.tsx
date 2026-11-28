@@ -653,7 +653,7 @@ function Changelog() {
   return (
     <div className="flex flex-col gap-2">
       <div className="prose-chat rounded-lg bg-well px-3 py-2 text-[13px]">
-        <Markdown text={(all ? RELEASES : RELEASES.slice(0, FIRST_SHOWN)).join("\n")} />
+        <Markdown text={(all ? RELEASES : RELEASES.slice(0, FIRST_SHOWN)).join("\n")} webLinksOnly remoteImages={false} />
       </div>
       {!all && earlier > 0 && (
         <Button variant="ghost" size="sm" className="self-start" onClick={() => setAll(true)}>

@@ -616,6 +616,8 @@ export function EditorPane({ entry, visible, embedded = false }: { entry: FileEd
             text={docText}
             className="prose-preview max-w-[624px]"
             linkContext={cloud ? undefined : linkContext}
+            webLinksOnly
+            remoteImages={false}
           />
         </div>
       )}

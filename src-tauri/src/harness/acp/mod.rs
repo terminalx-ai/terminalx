@@ -42,10 +42,20 @@ struct PermissionAnswer {
     allowed: bool,
 }
 
+struct PendingFsWrite {
+    raw_id: Value,
+    path: String,
+    content: String,
+}
+
 struct PermissionRequest {
     id: u64,
     choices: HashMap<String, Option<bool>>,
+    fs_write: Option<PendingFsWrite>,
 }
+
+const ACP_MAX_READ_BYTES: u64 = 10 * 1024 * 1024;
+const ACP_MAX_WRITE_BYTES: usize = 10 * 1024 * 1024;
 
 /// A single nonblocking pipe attempt, performed inside the owner's short
 /// original-context admission. The owner must release every gate on return.
@@ -297,18 +307,26 @@ impl Acp {
     /// old allow must not remove a newer deny for the same provider request.
     pub(crate) fn answer_carried(&mut self, request_id: &str, option_id: &str,
         context: OperationContext) -> anyhow::Result<ProviderAction> {
-        let ask = self.asks.get(request_id).ok_or_else(|| anyhow::anyhow!("ACP ask is no longer pending"))?;
+        let Some(ask) = self.asks.get(request_id) else {
+            anyhow::bail!("ACP ask is no longer pending");
+        };
         let id = ask.id;
         let allowed = self.answer_choice(request_id, option_id)
             .ok_or_else(|| anyhow::anyhow!("ACP permission option has no unambiguous outcome"))?;
         anyhow::ensure!(matches!(context.correlation(), Correlation::Approval { ask_id, provider_request, .. }
             if ask_id == request_id && provider_request == &id.to_string()), "ACP approval attempt identity changed");
+        let fs_write = self.asks.get(request_id).and_then(|ask| ask.fs_write.as_ref()).map(|fw| (fw.raw_id.clone(), fw.path.clone(), fw.content.clone()));
         if let Some(old) = self.carriers.answers.insert(request_id.into(), PermissionAnswer { context: context.clone(), allowed }) {
             if old.context.operation_id() != context.operation_id() { old.context.withdraw(); }
         }
-        let outcome = if option_id == "raccoon:cancel" { json!({"outcome":"cancelled"}) }
-            else { json!({"outcome":"selected", "optionId":option_id}) };
-        Ok(ProviderAction { context, action: Action::Write(json!({"jsonrpc":"2.0", "id":id, "result":{"outcome":outcome}}).to_string()) })
+        let line = if let Some((raw_id, path, content)) = fs_write {
+            self.finish_fs_write(&raw_id, &path, &content, allowed)
+        } else {
+            let outcome = if option_id == "raccoon:cancel" { json!({"outcome":"cancelled"}) }
+                else { json!({"outcome":"selected", "optionId":option_id}) };
+            json!({"jsonrpc":"2.0", "id":id, "result":{"outcome":outcome}}).to_string()
+        };
+        Ok(ProviderAction { context, action: Action::Write(line) })
     }
 
     pub(crate) fn answer_current(&self, context: &OperationContext) -> bool {
@@ -435,13 +453,45 @@ impl Acp {
         self.start_with_delivery(text, images, None)
     }
 
+    fn is_read_only_mode(&self) -> bool {
+        let mode = self.mode.trim().to_ascii_lowercase();
+        if mode == "plan" || mode.contains("readonly") || mode.contains("read-only") || mode.contains("read_only") {
+            return true;
+        }
+        self.current_mode.as_deref().is_some_and(|m| {
+            let m = m.to_ascii_lowercase();
+            m.contains("plan") || m.contains("readonly") || m.contains("read-only") || m.contains("read_only")
+        })
+    }
+
+    fn requires_write_approval(&self) -> bool {
+        !matches!(
+            self.mode.trim(),
+            "auto" | "acceptEdits" | "accept_edits" | "bypassPermissions" | "bypass" | "dontAsk" | "dont_ask"
+        )
+    }
+
+    fn finish_fs_write(&self, raw_id: &Value, path: &str, content: &str, allowed: bool) -> String {
+        if !allowed {
+            return json!({"jsonrpc": "2.0", "id": raw_id, "error": {"code": -32000, "message": "Permission denied for fs/write_text_file"}}).to_string();
+        }
+        if self.is_read_only_mode() {
+            return json!({"jsonrpc": "2.0", "id": raw_id, "error": {"code": -32000, "message": "fs/write_text_file is disabled in read-only/plan mode"}}).to_string();
+        }
+        match safe_write_text_file(&self.cwd, path, content) {
+            Ok(()) => json!({"jsonrpc": "2.0", "id": raw_id, "result": Value::Null}).to_string(),
+            Err(err) => json!({"jsonrpc": "2.0", "id": raw_id, "error": {"code": -32000, "message": format!("{path}: {err}")}}).to_string(),
+        }
+    }
+
     pub fn start_with_delivery(&mut self, text: String, images: Vec<(String, String)>, delivery: Option<Delivery>) -> Vec<Action> {
         self.stashed = Some(Stashed { text, images, delivery });
         if self.opening { return Vec::new(); }
         self.opening = true;
+        let can_write = !self.is_read_only_mode();
         let params = json!({
             "protocolVersion": 1,
-            "clientCapabilities": {"fs": {"readTextFile": true, "writeTextFile": true}, "terminal": false},
+            "clientCapabilities": {"fs": {"readTextFile": true, "writeTextFile": can_write}, "terminal": false},
             "clientInfo": {"name": "raccoon", "title": "TerminalX", "version": env!("CARGO_PKG_VERSION")},
         });
         vec![Action::Write(self.request("initialize", params, Pending::Initialize))]
@@ -597,10 +647,13 @@ impl Acp {
 
     /// Answer a permission request with one of the agent's own options.
     pub fn answer(&mut self, request_id: &str, option_id: &str) -> Option<Vec<Action>> {
-        self.answer_choice(request_id, option_id)?;
-        let id = self.asks.remove(request_id)?.id;
+        let allowed = self.answer_choice(request_id, option_id)?;
+        let ask = self.asks.remove(request_id)?;
+        if let Some(fs) = ask.fs_write {
+            return Some(vec![Action::Write(self.finish_fs_write(&fs.raw_id, &fs.path, &fs.content, allowed))]);
+        }
         let outcome = if option_id == "raccoon:cancel" { json!({"outcome": "cancelled"}) } else { json!({"outcome": "selected", "optionId": option_id}) };
-        Some(vec![Action::Write(json!({"jsonrpc": "2.0", "id": id, "result": {"outcome": outcome}}).to_string())])
+        Some(vec![Action::Write(json!({"jsonrpc": "2.0", "id": ask.id, "result": {"outcome": outcome}}).to_string())])
     }
 
     #[cfg(test)]
@@ -807,7 +860,7 @@ impl Acp {
                 let tool_use_id = tc["toolCallId"].as_str().unwrap_or("").to_string();
                 let input = if tc["rawInput"].is_null() { json!({"locations": tc["locations"]}) } else { tc["rawInput"].clone() };
                 if let Some(old) = self.carriers.answers.remove(&request_id) { old.context.withdraw(); }
-                self.asks.insert(request_id.clone(), PermissionRequest { id: rid, choices });
+                self.asks.insert(request_id.clone(), PermissionRequest { id: rid, choices, fs_write: None });
                 let mut out = self.flush();
                 out.push(Action::Emit(Payload::PermissionRequested {
                     cwd: None,
@@ -824,7 +877,7 @@ impl Acp {
             }
             "fs/read_text_file" => {
                 let path = params["path"].as_str().unwrap_or("");
-                match std::fs::read_to_string(path) {
+                match safe_read_text_file(&self.cwd, path) {
                     Ok(text) => {
                         let start = params["line"].as_u64().map(|l| l.saturating_sub(1) as usize).unwrap_or(0);
                         let limit = params["limit"].as_u64().map(|l| l as usize);
@@ -841,11 +894,53 @@ impl Acp {
             "fs/write_text_file" => {
                 let path = params["path"].as_str().unwrap_or("");
                 let content = params["content"].as_str().unwrap_or("");
-                let done = std::path::Path::new(path).parent().map(|p| std::fs::create_dir_all(p).is_ok()).unwrap_or(true) && std::fs::write(path, content).is_ok();
-                if done {
-                    vec![reply(Value::Null)]
-                } else {
-                    vec![fail(-32000, format!("could not write {path}"))]
+                if self.is_read_only_mode() {
+                    return vec![fail(-32000, "fs/write_text_file is disabled in read-only/plan mode".into())];
+                }
+                if content.len() > ACP_MAX_WRITE_BYTES {
+                    return vec![fail(-32000, format!("{path}: content exceeds maximum write size of {ACP_MAX_WRITE_BYTES} bytes"))];
+                }
+                if let Err(e) = resolve_write_relative(&self.cwd, path) {
+                    return vec![fail(-32000, format!("{path}: {e}"))];
+                }
+                if self.requires_write_approval() {
+                    let rid = id.as_u64().unwrap_or(0);
+                    let request_id = format!("acp:{id}");
+                    let options = vec![
+                        PermissionOption { id: "allow".into(), label: "Allow".into(), kind: PermissionOptionKind::AllowOnce },
+                        PermissionOption { id: "deny".into(), label: "Deny".into(), kind: PermissionOptionKind::Deny },
+                    ];
+                    let choices = HashMap::from([("allow".into(), Some(true)), ("deny".into(), Some(false))]);
+                    if let Some(old) = self.carriers.answers.remove(&request_id) { old.context.withdraw(); }
+                    self.asks.insert(
+                        request_id.clone(),
+                        PermissionRequest {
+                            id: rid,
+                            choices,
+                            fs_write: Some(PendingFsWrite {
+                                raw_id: id.clone(),
+                                path: path.to_string(),
+                                content: content.to_string(),
+                            }),
+                        },
+                    );
+                    let mut out = self.flush();
+                    out.push(Action::Emit(Payload::PermissionRequested {
+                        cwd: Some(self.cwd.clone()),
+                        request_id,
+                        tool_use_id: format!("fs-write:{id}"),
+                        tool_name: "edit".into(),
+                        input: json!({"path": path}),
+                        title: Some(format!("Write {path}")),
+                        description: Some("ACP agent requested fs/write_text_file".into()),
+                        reason: None,
+                        options,
+                    }));
+                    return out;
+                }
+                match safe_write_text_file(&self.cwd, path, content) {
+                    Ok(()) => vec![reply(Value::Null)],
+                    Err(e) => vec![fail(-32000, format!("{path}: {e}"))],
                 }
             }
             _ => vec![fail(-32601, "unsupported request".into())],
@@ -942,6 +1037,240 @@ impl Acp {
         out.push(Action::Emit(Payload::ModelRequestStarted));
         out
     }
+}
+
+/// Read a UTF-8 text file strictly confined inside `cwd`, rejecting `..`
+/// escapes, symlink escapes (via `workspace_file::open` `O_NOFOLLOW`),
+/// non-regular files, and files exceeding `ACP_MAX_READ_BYTES`.
+fn safe_read_text_file(cwd: &str, raw_path: &str) -> anyhow::Result<String> {
+    use std::io::Read;
+    use std::path::{Component, Path, PathBuf};
+
+    anyhow::ensure!(!raw_path.is_empty() && !raw_path.contains('\0'), "invalid file path");
+    let root = crate::paths::canonicalize(Path::new(cwd))
+        .map_err(|e| anyhow::anyhow!("workspace root unavailable: {e}"))?;
+    anyhow::ensure!(root.is_dir(), "workspace root is not a directory");
+
+    let requested = Path::new(raw_path);
+    anyhow::ensure!(
+        !requested.components().any(|c| matches!(c, Component::ParentDir)),
+        "path traversal is not permitted"
+    );
+    let candidate: PathBuf = if requested.is_relative() {
+        root.join(requested)
+    } else {
+        requested.to_path_buf()
+    };
+    let canonical = crate::paths::canonicalize(&candidate)
+        .map_err(|e| anyhow::anyhow!("cannot resolve path: {e}"))?;
+    anyhow::ensure!(canonical.starts_with(&root), "path escapes workspace root");
+    anyhow::ensure!(canonical != root, "cannot read workspace root directory as a file");
+
+    let file = crate::workspace_file::open(&root, &canonical)
+        .map_err(|e| anyhow::anyhow!("refused to open file safely: {e}"))?;
+    let meta = file.metadata()?;
+    anyhow::ensure!(meta.is_file(), "target is not a regular file");
+    anyhow::ensure!(
+        meta.len() <= ACP_MAX_READ_BYTES,
+        "file exceeds maximum read size of {ACP_MAX_READ_BYTES} bytes"
+    );
+
+    let mut bytes = Vec::new();
+    file.take(ACP_MAX_READ_BYTES + 1).read_to_end(&mut bytes)?;
+    anyhow::ensure!(
+        bytes.len() as u64 <= ACP_MAX_READ_BYTES,
+        "file exceeds maximum read size of {ACP_MAX_READ_BYTES} bytes"
+    );
+    String::from_utf8(bytes).map_err(|_| anyhow::anyhow!("file is not valid UTF-8"))
+}
+
+/// Validate and map `raw_path` to `(canonical_root, relative_inside_root)` for
+/// writing, rejecting traversal, out-of-workspace paths, and any symlink
+/// along the existing prefix inside the workspace.
+fn resolve_write_relative(cwd: &str, raw_path: &str) -> anyhow::Result<(std::path::PathBuf, std::path::PathBuf)> {
+    use std::path::{Component, Path, PathBuf};
+
+    anyhow::ensure!(!raw_path.is_empty() && !raw_path.contains('\0'), "invalid file path");
+    let root = crate::paths::canonicalize(Path::new(cwd))
+        .map_err(|e| anyhow::anyhow!("workspace root unavailable: {e}"))?;
+    anyhow::ensure!(root.is_dir(), "workspace root is not a directory");
+
+    let requested = Path::new(raw_path);
+    anyhow::ensure!(
+        !requested.components().any(|c| matches!(c, Component::ParentDir)),
+        "path traversal is not permitted"
+    );
+
+    let raw_rel: PathBuf = if requested.is_relative() {
+        requested.to_path_buf()
+    } else {
+        // Walk up to the deepest existing ancestor (stopping at symlinks too,
+        // including dangling symlinks).
+        let mut ancestor = requested.to_path_buf();
+        let mut tail = Vec::new();
+        while ancestor.symlink_metadata().is_err() {
+            let Some(name) = ancestor.file_name() else {
+                anyhow::bail!("path escapes workspace root");
+            };
+            tail.push(name.to_os_string());
+            let Some(parent) = ancestor.parent() else {
+                anyhow::bail!("path escapes workspace root");
+            };
+            ancestor = parent.to_path_buf();
+        }
+        tail.reverse();
+
+        // Allow `ancestor == Path::new(cwd)` even if cwd itself contains a symlink
+        // (e.g., `/var` -> `/private/var` on macOS), but never allow a symlink
+        // inside the workspace.
+        let anc_meta = ancestor.symlink_metadata()?;
+        if anc_meta.file_type().is_symlink() && ancestor != Path::new(cwd) {
+            anyhow::bail!("refused to write through symlink");
+        }
+        let canon_anc = crate::paths::canonicalize(&ancestor)
+            .map_err(|e| anyhow::anyhow!("cannot resolve ancestor: {e}"))?;
+        anyhow::ensure!(canon_anc.starts_with(&root), "path escapes workspace root");
+        let mut rel = canon_anc
+            .strip_prefix(&root)
+            .map_err(|_| anyhow::anyhow!("path escapes workspace root"))?
+            .to_path_buf();
+        for seg in tail {
+            rel.push(seg);
+        }
+        rel
+    };
+
+    let mut clean_rel = PathBuf::new();
+    for component in raw_rel.components() {
+        match component {
+            Component::Normal(name) => clean_rel.push(name),
+            Component::CurDir => {}
+            _ => anyhow::bail!("invalid relative workspace path"),
+        }
+    }
+    anyhow::ensure!(!clean_rel.as_os_str().is_empty(), "cannot overwrite workspace root directory");
+
+    // Pre-check that no existing component under `root` is a symlink.
+    let mut probe = root.clone();
+    for component in clean_rel.components() {
+        let Component::Normal(name) = component else {
+            anyhow::bail!("invalid relative workspace path");
+        };
+        probe.push(name);
+        if let Ok(meta) = probe.symlink_metadata() {
+            anyhow::ensure!(!meta.file_type().is_symlink(), "refused to write through symlink");
+        } else {
+            break;
+        }
+    }
+
+    Ok((root, clean_rel))
+}
+
+/// Write UTF-8 `content` strictly inside `cwd`, creating missing parent
+/// directories safely without ever following symlinks (`openat` + `O_NOFOLLOW`
+/// on Unix, handle final-path verification on Windows).
+fn safe_write_text_file(cwd: &str, raw_path: &str, content: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        content.len() <= ACP_MAX_WRITE_BYTES,
+        "content exceeds maximum write size of {ACP_MAX_WRITE_BYTES} bytes"
+    );
+    let (root, relative) = resolve_write_relative(cwd, raw_path)?;
+    write_relative_confined(&root, &relative, content.as_bytes())
+}
+
+#[cfg(unix)]
+fn write_relative_confined(root: &std::path::Path, relative: &std::path::Path, bytes: &[u8]) -> anyhow::Result<()> {
+    use std::ffi::CString;
+    use std::io::Write;
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::MetadataExt;
+    use std::path::Component;
+
+    let before = root.metadata()?;
+    let mut dir = crate::workspace_file::open_relative(
+        std::fs::File::open("/")?,
+        root.strip_prefix("/")?,
+    )?;
+    let opened = dir.metadata()?;
+    anyhow::ensure!(
+        before.dev() == opened.dev() && before.ino() == opened.ino(),
+        "workspace root directory changed"
+    );
+
+    let mut components = relative.components().peekable();
+    while let Some(component) = components.next() {
+        let Component::Normal(name) = component else {
+            anyhow::bail!("invalid workspace path");
+        };
+        let c_name = CString::new(name.as_bytes())?;
+        if components.peek().is_some() {
+            let flags = libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_DIRECTORY;
+            // SAFETY: `dir` is an open owned directory fd and `c_name` is NUL-terminated.
+            let mut fd = unsafe { libc::openat(dir.as_raw_fd(), c_name.as_ptr(), flags) };
+            if fd < 0 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::NotFound {
+                // SAFETY: create single missing directory component under `dir`.
+                let rc = unsafe { libc::mkdirat(dir.as_raw_fd(), c_name.as_ptr(), 0o755) };
+                if rc < 0 && std::io::Error::last_os_error().kind() != std::io::ErrorKind::AlreadyExists {
+                    return Err(std::io::Error::last_os_error().into());
+                }
+                // SAFETY: re-open newly created directory with O_NOFOLLOW | O_DIRECTORY.
+                fd = unsafe { libc::openat(dir.as_raw_fd(), c_name.as_ptr(), flags) };
+            }
+            if fd < 0 {
+                return Err(std::io::Error::last_os_error().into());
+            }
+            // SAFETY: `openat` returned a fresh owned fd.
+            dir = unsafe { std::fs::File::from_raw_fd(fd) };
+        } else {
+            let flags = libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK;
+            // SAFETY: open/create leaf file directly under `dir` with O_NOFOLLOW.
+            let fd = unsafe { libc::openat(dir.as_raw_fd(), c_name.as_ptr(), flags, 0o644 as libc::c_uint) };
+            if fd < 0 {
+                return Err(std::io::Error::last_os_error().into());
+            }
+            // SAFETY: `openat` returned a fresh owned fd.
+            let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+            anyhow::ensure!(file.metadata()?.is_file(), "target is not a regular file");
+            file.write_all(bytes)?;
+            file.flush()?;
+            return Ok(());
+        }
+    }
+    anyhow::bail!("empty relative workspace path")
+}
+
+#[cfg(windows)]
+fn write_relative_confined(root: &std::path::Path, relative: &std::path::Path, bytes: &[u8]) -> anyhow::Result<()> {
+    use std::io::Write;
+    use std::path::Component;
+
+    let mut cur = root.to_path_buf();
+    let mut components = relative.components().peekable();
+    while let Some(component) = components.next() {
+        let Component::Normal(name) = component else {
+            anyhow::bail!("invalid workspace path");
+        };
+        cur.push(name);
+        if components.peek().is_some() {
+            if let Ok(meta) = cur.symlink_metadata() {
+                anyhow::ensure!(!meta.file_type().is_symlink() && meta.is_dir(), "refused to traverse non-directory or symlink");
+            } else {
+                std::fs::create_dir(&cur)?;
+            }
+        }
+    }
+    if let Ok(meta) = cur.symlink_metadata() {
+        anyhow::ensure!(!meta.file_type().is_symlink(), "refused to write through symlink");
+    }
+    let mut file = crate::win::fs::open_plain(&cur, true, true)?;
+    let actual = crate::paths::simplified(&crate::win::fs::final_path(&file)?);
+    let expected_root = crate::paths::simplified(root);
+    anyhow::ensure!(actual.starts_with(&expected_root), "target escaped workspace root");
+    file.write_all(bytes)?;
+    file.flush()?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1184,5 +1513,146 @@ mod tests {
         assert!(emits(&ended).iter().any(|p| matches!(p, Payload::TurnCompleted { status: TurnStatus::Aborted, .. })));
         let next = writes(&a.prompt("next".into(), vec![]));
         assert_eq!(next.iter().find(|line| line["method"] == "session/prompt").unwrap()["params"]["prompt"][0]["text"], "next");
+    }
+
+    // ---- S-03 security regression tests ----
+
+    #[test]
+    fn fs_read_rejects_traversal_outside_cwd_and_oversized_files() {
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let secret = outside.path().join("secret.txt");
+        std::fs::write(&secret, "top-secret").unwrap();
+        let mut a = Acp::new(workspace.path().to_str().unwrap(), None, None, "auto");
+
+        // Absolute path outside workspace
+        let req = json!({"jsonrpc":"2.0","id":10,"method":"fs/read_text_file","params":{"path":secret}}).to_string();
+        let reply = writes(&a.handle(&req));
+        assert!(reply[0].get("error").is_some(), "outside absolute path must be rejected: {:?}", reply[0]);
+
+        // Relative `..` traversal
+        let req = json!({"jsonrpc":"2.0","id":11,"method":"fs/read_text_file","params":{"path":"../secret.txt"}}).to_string();
+        let reply = writes(&a.handle(&req));
+        assert!(reply[0].get("error").is_some(), "relative traversal must be rejected: {:?}", reply[0]);
+
+        // Oversized file inside workspace
+        let big = workspace.path().join("big.txt");
+        let file = std::fs::File::create(&big).unwrap();
+        file.set_len(ACP_MAX_READ_BYTES + 1).unwrap();
+        let req = json!({"jsonrpc":"2.0","id":12,"method":"fs/read_text_file","params":{"path":big}}).to_string();
+        let reply = writes(&a.handle(&req));
+        assert!(reply[0].get("error").is_some(), "oversized file must be rejected: {:?}", reply[0]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fs_read_and_write_reject_symlink_escapes_and_dangling_symlinks() {
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let outside_file = outside.path().join("victim.txt");
+        std::fs::write(&outside_file, "original").unwrap();
+
+        // File symlink pointing outside workspace
+        let file_link = workspace.path().join("escape.txt");
+        std::os::unix::fs::symlink(&outside_file, &file_link).unwrap();
+
+        // Directory symlink pointing outside workspace
+        let dir_link = workspace.path().join("escape_dir");
+        std::os::unix::fs::symlink(outside.path(), &dir_link).unwrap();
+
+        // Dangling symlink pointing to non-existent file outside workspace
+        let outside_new = outside.path().join("created.txt");
+        let dangling_link = workspace.path().join("dangling.txt");
+        std::os::unix::fs::symlink(&outside_new, &dangling_link).unwrap();
+
+        let mut a = Acp::new(workspace.path().to_str().unwrap(), None, None, "auto");
+
+        // Read through file symlink must fail
+        let req = json!({"jsonrpc":"2.0","id":20,"method":"fs/read_text_file","params":{"path":file_link}}).to_string();
+        assert!(writes(&a.handle(&req))[0].get("error").is_some());
+
+        // Write through file symlink must fail and leave victim untouched
+        let req = json!({"jsonrpc":"2.0","id":21,"method":"fs/write_text_file","params":{"path":file_link,"content":"pwned"}}).to_string();
+        assert!(writes(&a.handle(&req))[0].get("error").is_some());
+        assert_eq!(std::fs::read_to_string(&outside_file).unwrap(), "original");
+
+        // Write through directory symlink must fail
+        let req = json!({"jsonrpc":"2.0","id":22,"method":"fs/write_text_file","params":{"path":dir_link.join("new.txt"),"content":"pwned"}}).to_string();
+        assert!(writes(&a.handle(&req))[0].get("error").is_some());
+        assert!(!outside.path().join("new.txt").exists());
+
+        // Write through dangling symlink must fail and not create outside target
+        let req = json!({"jsonrpc":"2.0","id":23,"method":"fs/write_text_file","params":{"path":dangling_link,"content":"pwned"}}).to_string();
+        assert!(writes(&a.handle(&req))[0].get("error").is_some());
+        assert!(!outside_new.exists());
+
+        // Relative traversal on write must fail
+        let req = json!({"jsonrpc":"2.0","id":24,"method":"fs/write_text_file","params":{"path":"../escape.txt","content":"pwned"}}).to_string();
+        assert!(writes(&a.handle(&req))[0].get("error").is_some());
+    }
+
+    #[test]
+    fn fs_write_is_blocked_and_unadvertised_in_plan_mode() {
+        let workspace = tempfile::tempdir().unwrap();
+        let target = workspace.path().join("plan.txt");
+        let mut a = Acp::new(workspace.path().to_str().unwrap(), None, None, "plan");
+
+        // Initialize advertises writeTextFile: false in plan mode
+        let init = writes(&a.start("inspect".into(), vec![]));
+        assert_eq!(init[0]["params"]["clientCapabilities"]["fs"]["readTextFile"], true);
+        assert_eq!(init[0]["params"]["clientCapabilities"]["fs"]["writeTextFile"], false);
+
+        // fs/write_text_file is rejected even for a valid in-workspace path
+        let req = json!({"jsonrpc":"2.0","id":30,"method":"fs/write_text_file","params":{"path":target,"content":"nope"}}).to_string();
+        let reply = writes(&a.handle(&req));
+        assert!(reply[0].get("error").is_some());
+        assert!(!target.exists());
+
+        // Switching to plan mode mid-session also blocks writes
+        let mut b = Acp::new(workspace.path().to_str().unwrap(), None, None, "auto");
+        b.set_mode("plan");
+        let req = json!({"jsonrpc":"2.0","id":31,"method":"fs/write_text_file","params":{"path":target,"content":"nope"}}).to_string();
+        let reply = writes(&b.handle(&req));
+        assert!(reply[0].get("error").is_some());
+        assert!(!target.exists());
+    }
+
+    #[test]
+    fn fs_write_requires_permission_approval_in_manual_mode() {
+        let workspace = tempfile::tempdir().unwrap();
+        let target = workspace.path().join("manual.txt");
+        let mut a = Acp::new(workspace.path().to_str().unwrap(), None, None, "manual");
+
+        // Request emits a PermissionRequested card and does NOT write yet
+        let req = json!({"jsonrpc":"2.0","id":40,"method":"fs/write_text_file","params":{"path":target,"content":"approved-text"}}).to_string();
+        let acts = a.handle(&req);
+        assert!(writes(&acts).is_empty(), "must not reply before user decides");
+        assert!(!target.exists(), "must not write before approval");
+        let e = emits(&acts);
+        let Payload::PermissionRequested { request_id, .. } = e[0] else { panic!("expected PermissionRequested") };
+        assert_eq!(request_id, "acp:40");
+        assert!(a.has_ask(request_id));
+
+        // Denying returns a JSON-RPC error and does not write
+        let deny_reply = writes(&a.answer(request_id, "deny").unwrap());
+        assert_eq!(deny_reply[0]["id"], 40);
+        assert!(deny_reply[0].get("error").is_some());
+        assert!(!target.exists());
+
+        // Second request approved by user performs the write and replies with result: null
+        let req2 = json!({"jsonrpc":"2.0","id":41,"method":"fs/write_text_file","params":{"path":target,"content":"approved-text"}}).to_string();
+        let acts2 = a.handle(&req2);
+        let Payload::PermissionRequested { request_id: rid2, .. } = emits(&acts2)[0] else { panic!("expected PermissionRequested") };
+        let allow_reply = writes(&a.answer(rid2, "allow").unwrap());
+        assert_eq!(allow_reply[0]["id"], 41);
+        assert!(allow_reply[0].get("result").is_some());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "approved-text");
+
+        // Oversized write is rejected immediately without prompting
+        let huge = "x".repeat(ACP_MAX_WRITE_BYTES + 1);
+        let req3 = json!({"jsonrpc":"2.0","id":42,"method":"fs/write_text_file","params":{"path":target,"content":huge}}).to_string();
+        let acts3 = a.handle(&req3);
+        assert!(writes(&acts3)[0].get("error").is_some());
+        assert!(emits(&acts3).is_empty());
     }
 }

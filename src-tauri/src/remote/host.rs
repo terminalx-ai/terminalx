@@ -1733,10 +1733,13 @@ type Socket = crate::data_privacy::Socket;
 
 fn assign_agent() -> &'static ureq::Agent {
     static AGENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
-    AGENT.get_or_init(|| crate::data_privacy::http_agent().build())
+    AGENT.get_or_init(|| crate::data_privacy::http_agent().redirects(0).build())
 }
 
 async fn assign(director_url: &str, relay_token: &str, relay_host_id: &str) -> Result<(String, u64)> {
+    if !valid_relay_origin(director_url) {
+        bail!("relay director origin is not trusted");
+    }
     let url = format!("{}/v1/assign", director_url.trim_end_matches('/'));
     let token = relay_token.to_string();
     let host = relay_host_id.to_string();
@@ -1750,6 +1753,9 @@ async fn assign(director_url: &str, relay_token: &str, relay_host_id: &str) -> R
     })
     .await??;
     let cell_url = response["cellUrl"].as_str().ok_or_else(|| anyhow!("relay assignment lacks cellUrl"))?.to_string();
+    if !valid_relay_origin(&cell_url) {
+        bail!("relay assignment returned untrusted cellUrl");
+    }
     let epoch = response["assignmentEpoch"].as_u64().ok_or_else(|| anyhow!("relay assignment lacks assignmentEpoch"))?;
     Ok((cell_url, epoch))
 }
@@ -1923,12 +1929,83 @@ pub(crate) fn websocket_config() -> WebSocketConfig {
     WebSocketConfig::default().max_message_size(Some(4 * MAX_FRAME_BYTES)).max_frame_size(Some(4 * MAX_FRAME_BYTES))
 }
 
-/// `wss://` for HTTPS origins; plain `ws://` only for loopback development.
+const DEV_RELAY_DIRECTOR_URL_ENV: &str = "TERMINALX_DEV_RELAY_DIRECTOR_URL";
+
+/// Whether `origin` is a trusted canonical TerminalX relay origin (`director_url`
+/// or `cell_url`).
+///
+/// Release builds enforce `https://` pinned to TerminalX relay domains
+/// (`relay.terminalx.ai` / `*.terminalx.ai`). Debug and test builds also
+/// permit loopback (`http://` or `https://` on `127.0.0.1`, `localhost`,
+/// `[::1]`) and origins matching `TERMINALX_DEV_RELAY_DIRECTOR_URL`.
+pub(crate) fn valid_relay_origin(origin: &str) -> bool {
+    let allow_dev = cfg!(any(debug_assertions, test));
+    let dev_director = if allow_dev {
+        std::env::var(DEV_RELAY_DIRECTOR_URL_ENV).ok()
+    } else {
+        None
+    };
+    valid_relay_origin_for(origin, allow_dev, dev_director.as_deref())
+}
+
+pub(crate) fn valid_relay_origin_for(origin: &str, allow_dev: bool, dev_director: Option<&str>) -> bool {
+    let Ok(url) = url::Url::parse(origin) else { return false };
+    if url.origin().ascii_serialization() != origin
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.path() != "/"
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return false;
+    }
+    let Some(host) = url.host_str() else { return false };
+    let host_lc = host.to_ascii_lowercase();
+    if host_lc.starts_with('.') || host_lc.ends_with('.') || host_lc.contains("..") {
+        return false;
+    }
+    let loopback = matches!(host_lc.as_str(), "127.0.0.1" | "localhost" | "[::1]");
+    match url.scheme() {
+        "http" => allow_dev && loopback,
+        "https" => {
+            if host_lc == "relay.terminalx.ai" || host_lc.ends_with(".terminalx.ai") {
+                return true;
+            }
+            if !allow_dev {
+                return false;
+            }
+            if loopback {
+                return true;
+            }
+            if let Some(dev_host) = dev_director
+                .and_then(|raw| url::Url::parse(raw.trim()).ok())
+                .and_then(|u| u.host_str().map(|h| h.to_ascii_lowercase()))
+            {
+                if host_lc == dev_host {
+                    return true;
+                }
+                if let Some((_, parent)) = dev_host.split_once('.') {
+                    if parent.contains('.') && host_lc.ends_with(&format!(".{parent}")) {
+                        return true;
+                    }
+                }
+            }
+            false
+        }
+        _ => false,
+    }
+}
+
+/// `wss://` for trusted HTTPS relay origins; plain `ws://` only for loopback
+/// in debug/test builds.
 pub(crate) fn websocket_url(origin: &str, path: &str) -> Result<String> {
+    if !valid_relay_origin(origin) {
+        bail!("relay origin must be a trusted HTTPS TerminalX origin");
+    }
     let mut url = url::Url::parse(origin)?;
     match url.scheme() {
         "https" => url.set_scheme("wss").unwrap(),
-        "http" if matches!(url.host_str(), Some("127.0.0.1" | "localhost" | "[::1]")) => url.set_scheme("ws").unwrap(),
+        "http" if cfg!(any(debug_assertions, test)) && matches!(url.host_str(), Some("127.0.0.1" | "localhost" | "[::1]")) => url.set_scheme("ws").unwrap(),
         _ => bail!("relay origin must use HTTPS"),
     }
     url.set_path(path);
@@ -2435,8 +2512,67 @@ mod tests {
     #[test]
     fn plaintext_relay_is_loopback_only() {
         assert_eq!(websocket_url("http://127.0.0.1:4000", "/v1/host/control").unwrap(), "ws://127.0.0.1:4000/v1/host/control");
-        assert_eq!(websocket_url("https://relay.example", "/v1/connect/abc").unwrap(), "wss://relay.example/v1/connect/abc");
-        assert!(websocket_url("http://relay.example", "/v1/host/control").is_err());
+        assert_eq!(websocket_url("https://relay.terminalx.ai", "/v1/connect/abc").unwrap(), "wss://relay.terminalx.ai/v1/connect/abc");
+        assert_eq!(websocket_url("https://cell-1.relay.terminalx.ai", "/v1/connect/abc").unwrap(), "wss://cell-1.relay.terminalx.ai/v1/connect/abc");
+        assert!(websocket_url("http://relay.terminalx.ai", "/v1/host/control").is_err());
+        assert!(websocket_url("https://relay.example", "/v1/connect/abc").is_err());
+        assert!(websocket_url("http://169.254.169.254", "/v1/host/control").is_err());
+    }
+
+    #[test]
+    fn relay_origin_pinning_enforces_https_in_release_and_blocks_ssrf_and_redirects() {
+        // Release mode: strictly canonical https:// on *.terminalx.ai (no loopback HTTP!).
+        assert!(valid_relay_origin_for("https://relay.terminalx.ai", false, None));
+        assert!(valid_relay_origin_for("https://cell-us1.relay.terminalx.ai", false, None));
+        assert!(!valid_relay_origin_for("http://127.0.0.1:4000", false, None));
+        assert!(!valid_relay_origin_for("http://localhost:4000", false, None));
+        assert!(!valid_relay_origin_for("https://127.0.0.1:4000", false, None));
+        assert!(!valid_relay_origin_for("http://relay.terminalx.ai", false, None));
+        assert!(!valid_relay_origin_for("https://relay.terminalx.ai/", false, None));
+        assert!(!valid_relay_origin_for("https://relay.terminalx.ai/v1", false, None));
+        assert!(!valid_relay_origin_for("https://.terminalx.ai", false, None));
+        assert!(!valid_relay_origin_for("https://..terminalx.ai", false, None));
+        assert!(!valid_relay_origin_for("https://a..terminalx.ai", false, None));
+        assert!(!valid_relay_origin_for("https://relay.terminalx.ai.", false, None));
+        assert!(!valid_relay_origin_for("https://relay.terminalx.ai.evil.com", false, None));
+        assert!(!valid_relay_origin_for("https://169.254.169.254", false, None));
+        assert!(!valid_relay_origin_for("https://evil.example", false, Some("https://evil.example")));
+
+        // Dev/test mode: loopback HTTP/HTTPS and configured dev director are allowed; arbitrary origins are still rejected.
+        assert!(valid_relay_origin_for("http://127.0.0.1:4000", true, None));
+        assert!(valid_relay_origin_for("http://localhost:4000", true, None));
+        assert!(valid_relay_origin_for("https://relay.staging.example", true, Some("https://relay.staging.example")));
+        assert!(valid_relay_origin_for("https://cell-1.staging.example", true, Some("https://relay.staging.example")));
+        assert!(!valid_relay_origin_for("http://relay.staging.example", true, Some("https://relay.staging.example")));
+        assert!(!valid_relay_origin_for("https://unrelated.example", true, Some("https://relay.staging.example")));
+
+        // assign_agent must NOT follow 3xx redirects when sending Bearer relay tokens.
+        use std::io::{BufRead, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let redirect_target = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let target_addr = redirect_target.local_addr().unwrap();
+        redirect_target.set_nonblocking(true).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            while reader.read_line(&mut line).unwrap_or(0) > 0 && line != "\r\n" {
+                line.clear();
+            }
+            let _ = write!(
+                stream,
+                "HTTP/1.1 302 Found\r\nLocation: http://{target_addr}/steal\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+        });
+        let resp = assign_agent()
+            .post(&format!("http://{addr}/v1/assign"))
+            .set("authorization", "Bearer secret-relay-token")
+            .send_json(json!({ "v": 1, "relayHostId": "host" }))
+            .unwrap();
+        assert_eq!(resp.status(), 302, "assign_agent must not follow 3xx redirects");
+        assert!(redirect_target.accept().is_err(), "redirect target must never receive the token-bearing request");
+        server.join().unwrap();
     }
 
     #[test]

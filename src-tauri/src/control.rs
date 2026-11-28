@@ -165,7 +165,7 @@ pub fn call(
         })?;
     // The tab's own secret, for commands whose answer depends on which agent tab asks: the
     // session and tab a caller names are only claims.
-    if matches!(command, "review.comment" | "runs.takeOver") || command.starts_with("bots.") {
+    if matches!(command, "review.comment" | "runs.takeOver" | "runs.merge" | "runs.finish") || command.starts_with("bots.") {
         params["hookToken"] = json!(std::env::var(crate::hooks::TOKEN_ENV).unwrap_or_default());
     }
     let request = ControlRequest {
@@ -497,6 +497,13 @@ impl ControlService {
         if command == "local_vm.guest" {
             return Err(ControlError::new("unsupported", "No pinned guest is installed; no operation was routed.", None::<String>));
         }
+        // S-01, S-08, S-16: Resolve caller identity unconditionally from the
+        // authenticated scoped tab capability token and OS peer-PID ancestry
+        // BEFORE dispatching `local_vm.request`, `window::supported`, `runtime.*`,
+        // or any command handler, enforcing default-deny least privilege.
+        let window_proc = self.local_lifetime.as_ref().and_then(|lifetime| self.window_process(lifetime));
+        let caller = Caller::of(&self.manager, &params);
+        caller.gate_with_window(command, &params, window_proc)?;
         #[cfg(unix)]
         if command == "local_vm.request" {
             if !self.local_vm_available { return Err(ControlError::new("unsupported","This owner has no Local VM controller; no operation was sent.",None::<String>)); }
@@ -513,20 +520,13 @@ impl ControlService {
             let _admission = crate::local_vm::supervisor::admit(lifetime).map_err(ControlError::internal)?;
             return crate::local_vm::host::request(method, params["params"].clone()).map_err(ControlError::internal);
         }
-        // A run's worker stays within its limits on other machines too.
+        // A run's worker stays within its limits on other machines too (S-08: resolved caller).
         if let Some(action) = command.strip_prefix("machine.") {
-            refuse_limited_machine_caller(action, &params)?;
+            refuse_limited_machine_caller(&caller, action, &params)?;
         }
-        // A session working for a bot is held to it, whatever it says it is (PRO-468).
-        // As is one that acts outward with the owner's sign-in (PRO-489).
-        if matches!(command, "sessions.create" | "runs.create" | "runs.start" | "runs.sendBack" | "runs.widen" | "runs.checkFailed" | "runs.takeOver" | "pipelines.start" | "send" | "permissions.allow" | "cloud.sessions.create" | "cloud.send" | "cloud.resume")
-            || matches!(command, "pipelines.autoMerge" | "pipelines.resolveConflicts" | "pipelines.act" | "issues.comment" | "issues.create" | "issues.status" | "issues.assign" | "issues.label")
-            || command.starts_with("machine.")
-        {
-            let caller = Caller::of(&self.manager, &params);
-            caller.gate(command, &params)?;
-            // Work in a cloud workspace is held to the bot's access here, before the window hears of it (PRO-514).
-            if let Some(action) = command.strip_prefix("cloud.") {
+        // Work in a cloud workspace is held to the bot's access here, before the window hears of it (PRO-514).
+        if let Some(action) = command.strip_prefix("cloud.") {
+            if matches!(command, "cloud.sessions.create" | "cloud.send" | "cloud.resume") {
                 return caller.cloud(action, params, |params| self.execute_gated(command, params, request_id));
             }
         }
@@ -693,6 +693,8 @@ impl ControlService {
                     return Ok(json!({ "work": self.manager.retire_work() }));
                 }
                 if command == "runtime.stopAllIfIdle" {
+                    let mut params = params;
+                    self.refuse_runtime_lifecycle(lifetime, command, &mut params)?;
                     {
                         // No turn, start or send is admitted between the check and the stop.
                         let _admission = crate::issue_pipeline::admission::lock();
@@ -712,10 +714,14 @@ impl ControlService {
                 // Replacing this runtime in place, keeping everything it runs (#765).
                 #[cfg(unix)]
                 if command == "runtime.handover.plan" {
+                    let mut params = params;
+                    self.refuse_runtime_lifecycle(lifetime, command, &mut params)?;
                     return crate::local_runtime::handover::plan(lifetime, &params);
                 }
                 #[cfg(unix)]
                 if command == "runtime.handover" {
+                    let mut params = params;
+                    self.refuse_runtime_lifecycle(lifetime, command, &mut params)?;
                     return crate::local_runtime::handover::begin(lifetime, params);
                 }
                 if command == "runtime.liveness" {
@@ -731,8 +737,12 @@ impl ControlService {
                     return Ok(liveness);
                 }
                 if command == "runtime.stopAll" {
+                    let mut params = params;
+                    self.refuse_runtime_lifecycle(lifetime, command, &mut params)?;
                     return crate::local_runtime::stop_all(&self.manager, lifetime, params);
                 }
+                let mut params = params;
+                self.refuse_runtime_lifecycle(lifetime, command, &mut params)?;
                 return lifetime.command(command, params);
             }
         }
@@ -1515,12 +1525,12 @@ impl ControlService {
     fn runs(&self, command: &str, params: Value) -> Result<Value, ControlError> {
         use crate::orchestration::{engine, host::ManagerHost, plan::Plan, store};
         let host = ManagerHost::new(self.sink.clone(), self.manager.clone());
-        // The session the command runs in, when it runs in one the app knows:
-        // where the kernel places the caller, else the one it names (PRO-468).
+        // The session the command runs in, resolved unconditionally from the
+        // authenticated scoped tab token and OS peer-PID ancestry (S-08).
         let placement = Caller::of(&self.manager, &params);
-        let caller = placement.session(&params);
+        let caller = placement.resolved_session(&params);
         // A run's worker leads no run and steers none, its own lead's included: it may read them.
-        if matches!(command, "runs.create" | "runs.start" | "runs.stop" | "runs.merge" | "runs.sendBack" | "runs.takeOver" | "runs.finish" | "runs.widen" | "runs.note" | "runs.skip" | "runs.cleanup") && caller.as_ref().is_some_and(crate::orchestration::guard::limited) {
+        if matches!(command, "runs.create" | "runs.start" | "runs.stop" | "runs.merge" | "runs.sendBack" | "runs.takeOver" | "runs.finish" | "runs.widen" | "runs.note" | "runs.skip" | "runs.cleanup") && placement.is_orchestration_worker(&params) {
             return Err(ControlError::new("forbidden", "A worker of an orchestration run does not create, start, stop, merge, steer or clean up a run. Report what is ready; the lead decides what happens next.", None::<String>));
         }
         if command == "runs.create" {
@@ -1550,7 +1560,7 @@ impl ControlService {
             return Ok(json!({"runs": runs}));
         }
         // A worker does not judge a piece, its own or another's: that is its lead's, and TerminalX's.
-        let from_worker = caller.as_ref().is_some_and(|caller| caller.run_worker());
+        let from_worker = placement.is_orchestration_worker(&params);
         let run = match optional_string(&params, "run") {
             Some(selector) => {
                 let mut matching = store::matching(&selector).map_err(ControlError::internal)?;
@@ -1616,9 +1626,9 @@ impl ControlService {
                 self.manager.accepting_work().map_err(ControlError::internal)?;
                 let mut options = crate::orchestration::merge::Options::new(engine::By::Cli);
                 // Only the lead's own conversation is not waited for: its turn is the one asking.
-                // A command from any other session waits for the lead's turn like everyone's.
-                options.from_lead = params["caller"]["session"].as_str() == Some(run.lead.session_id.as_str())
-                    && run.lead.tab_id.as_deref().is_none_or(|tab| params["caller"]["tab"].as_str() == Some(tab));
+                // S-08: verified from scoped tab token, OS peer-PID placement, or tab launch secret —
+                // never from self-reported `params["caller"]` alone.
+                options.from_lead = placement.verified_matches_session(&run.lead.session_id, run.lead.tab_id.as_deref(), &self.manager, &params);
                 options.skip = params["skip"].as_array().into_iter().flatten().filter_map(|piece| piece.as_str().map(str::to_owned)).collect();
                 options.recheck = params["recheck"].as_bool().unwrap_or(false);
                 let merged = crate::orchestration::merge::merge(&host, &run.id, &options).map_err(ControlError::of_run)?;
@@ -1639,20 +1649,14 @@ impl ControlService {
                     "runs.takeOver" => {
                         self.manager.accepting_work().map_err(ControlError::internal)?;
                         // Only the run's own lead, from its own conversation, takes a piece of an approved
-                        // plan over itself. The session and tab the caller names are claims any process
-                        // can make: the lead's tab is proved by its own secret, else it is not the lead.
-                        let from_lead = match (params["caller"]["session"].as_str(), params["caller"]["tab"].as_str()) {
-                            (Some(session), Some(tab)) => session == run.lead.session_id
-                                && run.lead.tab_id.as_deref().is_none_or(|lead_tab| lead_tab == tab)
-                                && self.manager.authenticates_cli(session, tab, params["hookToken"].as_str().unwrap_or_default()),
-                            _ => false,
-                        };
+                        // plan over itself. Verified from scoped tab token, OS peer-PID placement, or tab launch secret (S-08).
+                        let from_lead = placement.verified_matches_session(&run.lead.session_id, run.lead.tab_id.as_deref(), &self.manager, &params);
                         let run = engine::take_over(&host, &run.id, &piece, engine::By::Cli, from_lead).map_err(ControlError::of_run)?;
                         Ok(json!({"run": engine::shown(&run), "piece": piece}))
                     }
                     "runs.finish" => {
                         self.manager.accepting_work().map_err(ControlError::internal)?;
-                        let from_lead = params["caller"]["session"].as_str() == Some(run.lead.session_id.as_str());
+                        let from_lead = placement.verified_matches_session(&run.lead.session_id, None, &self.manager, &params);
                         let finished = engine::finish(&host, &run.id, &piece, engine::By::Cli, from_lead).map_err(ControlError::of_run)?;
                         Ok(json!({"run": engine::shown(&finished.run), "piece": finished.piece, "commit": finished.commit, "checks": finished.checks}))
                     }
@@ -2069,9 +2073,10 @@ impl ControlService {
             }
         };
         // A session a run's worker starts has the worker's limits, whoever it names as its
-        // parent, or none: marked before anything is sent to it (`orchestration::guard`).
+        // parent, or none: marked before anything is sent to it (`orchestration::guard`, S-08).
         let mut entry = entry;
-        if !entry.run_worker() && p.caller["session"].as_str().and_then(|id| index::get(id).ok()).is_some_and(|caller| crate::orchestration::guard::limited(&caller)) {
+        let caller_params = json!({"caller": p.caller});
+        if !entry.run_worker() && bot_caller.is_orchestration_worker(&caller_params) {
             entry = index::update_session(&entry.id, |session| {
                 session.mark_run_worker();
                 Ok(session.clone())
@@ -2189,8 +2194,9 @@ impl ControlService {
     fn pipelines(&self, command: &str, params: Value) -> Result<Value, ControlError> {
         use crate::issue_pipeline::{engine, store};
         // A run's worker changes no pipeline, its own or anyone's: each of these can push a
-        // branch, merge it, or let a merge through (`orchestration::guard`). It may still read them.
-        if !matches!(command, "pipelines.list" | "pipelines.show") && params["caller"]["session"].as_str().and_then(|id| index::get(id).ok()).is_some_and(|caller| crate::orchestration::guard::limited(&caller)) {
+        // branch, merge it, or let a merge through (`orchestration::guard`, S-08). It may still read them.
+        let caller = Caller::of(&self.manager, &params);
+        if !matches!(command, "pipelines.list" | "pipelines.show") && caller.is_orchestration_worker(&params) {
             return Err(ControlError::new("forbidden", "A worker of an orchestration run does not start, steer or merge a pipeline. Report what is ready; the lead decides what happens to it.", None::<String>));
         }
         if command == "pipelines.start" {
@@ -2777,12 +2783,11 @@ impl ControlService {
 /// starts here is marked a worker as it is made; one on a machine cannot be.
 const LIMITED_MACHINE_ACTIONS: [&str; 3] = ["add", "remove", "sessions.create"];
 
-fn refuse_limited_machine_caller(action: &str, params: &Value) -> Result<(), ControlError> {
+fn refuse_limited_machine_caller(caller: &Caller, action: &str, params: &Value) -> Result<(), ControlError> {
     if !LIMITED_MACHINE_ACTIONS.contains(&action) {
         return Ok(());
     }
-    let limited = params["caller"]["session"].as_str().and_then(|id| index::get(id).ok()).is_some_and(|caller| crate::orchestration::guard::limited(&caller));
-    if limited {
+    if caller.is_orchestration_worker(params) {
         return Err(ControlError::new(
             "forbidden",
             "A worker of an orchestration run does not pair machines or start sessions on them. Report what the piece needs; the lead decides.",
@@ -3141,6 +3146,126 @@ impl ControlService {
         // SAFETY: getpid has no preconditions.
         let runtime = unsafe { libc::getpid() };
         pid != runtime && !crate::serve_cli::consent::descends_from(pid, runtime) && matches!(self.manager.session_of_process(pid), Ok(None))
+    }
+
+    /// Gate `runtime.handover.plan`, `runtime.handover`, `runtime.stopAll`,
+    /// `runtime.stopAllIfIdle`, and `lifetime.command` (`runtime.attach`/`detach`)
+    /// behind owner/window consent (S-02). Unconditionally refuses any caller
+    /// originating from a scoped tab token, an agent pane, a bot, or a child /
+    /// descendant process of `terminalx-serve`.
+    fn refuse_runtime_lifecycle(
+        &self,
+        lifetime: &crate::local_runtime::Lifetime,
+        command: &str,
+        params: &mut Value,
+    ) -> Result<(), ControlError> {
+        if crate::hooks::caller_capability().is_some() {
+            return Err(ControlError::new(
+                "forbidden",
+                format!("An agent tab cannot invoke {command}."),
+                Some("Only the TerminalX desktop window or the owner in their own terminal may manage runtime lifecycle.".into()),
+            ));
+        }
+        #[cfg(unix)]
+        {
+            use crate::serve_cli::consent;
+            let witnessed = params.get(consent::PARAM).is_some();
+            let window = current_window();
+            let verify_consent = |params: &mut Value| -> Result<(), ControlError> {
+                let run = self
+                    .endpoint
+                    .socket
+                    .parent()
+                    .ok_or_else(|| ControlError::internal("the control socket has no directory"))?;
+                consent::verify_for(run, params, &window)
+            };
+            let pid = match crate::hooks::caller() {
+                crate::hooks::Peer::InProcess => {
+                    if witnessed {
+                        verify_consent(params)?;
+                    }
+                    return Ok(());
+                }
+                crate::hooks::Peer::Unreadable => return Err(gone()),
+                crate::hooks::Peer::Pid(pid) => pid,
+            };
+            if !consent::alive(pid) {
+                return Err(gone());
+            }
+            // SAFETY: getpid has no preconditions.
+            let runtime = unsafe { libc::getpid() };
+            if pid == runtime
+                || consent::descends_from(pid, runtime)
+                || consent::judge(pid, runtime, &consent::runtime_terminals(runtime)).is_some()
+            {
+                return Err(ControlError::new(
+                    "forbidden",
+                    format!("Only the owner or TerminalX window may invoke {command}; processes started by this runtime are refused."),
+                    Some("Run runtime updates or restarts from the TerminalX window or your own terminal.".into()),
+                ));
+            }
+            match self.manager.session_of_process(pid) {
+                Ok(Some(_)) => {
+                    return Err(ControlError::new(
+                        "forbidden",
+                        format!("A process running inside a TerminalX pane cannot invoke {command}."),
+                        Some("Run runtime updates or restarts from the TerminalX window or your own terminal.".into()),
+                    ));
+                }
+                Err(error) => {
+                    log::warn!("refused {command} from process {pid}: could not place caller ({error:#})");
+                    return Err(ControlError::new(
+                        "person_required",
+                        format!("TerminalX could not verify the caller for {command}."),
+                        Some("Try again from the TerminalX window or your own terminal.".into()),
+                    ));
+                }
+                Ok(None) => {}
+            }
+            let caller = Caller::of_process(&self.manager, params, Some(pid));
+            if caller.bot.is_some() {
+                return Err(caller.forbidden(&format!("invoke {command}")));
+            }
+            if witnessed {
+                verify_consent(params)?;
+                return Ok(());
+            }
+            let known_window = self.window_process(lifetime);
+            if is_the_window(known_window, pid) || own_terminal(pid) {
+                return Ok(());
+            }
+            if matches!(window, consent::Window::Headless) {
+                return Err(ControlError::new(
+                    "person_required",
+                    format!("On a headless runtime, {command} requires a person's own terminal or verified consent."),
+                    Some("Run this command from your own terminal.".into()),
+                ));
+            }
+            // Desktop runtime without a terminal: if another live window is already
+            // recognised, refuse an unrecognised detached caller.
+            if let Some((win_pid, _)) = known_window {
+                if consent::alive(win_pid) {
+                    return Err(ControlError::new(
+                        "person_required",
+                        format!("Only the attached TerminalX window or a person's terminal may invoke {command}."),
+                        Some("Use the TerminalX window or run this from your own terminal.".into()),
+                    ));
+                }
+            }
+            if crate::bots::enabled_cached() && !matches!(command, "runtime.attach" | "runtime.detach") {
+                return Err(ControlError::new(
+                    "person_required",
+                    format!("While Bots is on, {command} requires the recognised TerminalX window, a person's terminal, or verified owner consent."),
+                    Some("Use the TerminalX window or run this from your own terminal.".into()),
+                ));
+            }
+            Ok(())
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (lifetime, command, params);
+            Ok(())
+        }
     }
 }
 
@@ -3531,6 +3656,9 @@ struct Caller {
     session: Option<String>,
     /// Where the kernel places the caller among the runtime's panes, whatever it works for.
     placed: Option<crate::session::Placed>,
+    /// The cryptographically verified per-tab capability token, when the request
+    /// authenticated with a scoped tab token instead of the master token (S-01).
+    cap: Option<crate::hooks::TabCapability>,
     /// The process the kernel says sent the command; `None` in-process or off unix.
     #[cfg_attr(not(unix), allow(dead_code))]
     peer: Option<i32>,
@@ -3541,29 +3669,133 @@ struct Caller {
     incomplete: bool,
 }
 
+/// Verified read-only control commands allowed for restricted scoped tabs,
+/// bots, and unplaced callers under default-deny (S-01, S-16).
+const READ_ONLY_COMMANDS: &[&str] = &[
+    "status",
+    "config.show",
+    "projects.list",
+    "sessions.list",
+    "sessions.show",
+    "sessions.usage",
+    "sessions.report",
+    "sessions.children",
+    "tabs.list",
+    "read",
+    "wait",
+    "permissions.list",
+    "worktrees.list",
+    "review.comments",
+    "issues.list",
+    "issues.view",
+    "pipelines.list",
+    "pipelines.show",
+    "runs.list",
+    "runs.show",
+    "bots.list",
+    "bots.show",
+    "cloud.status",
+    "cloud.projects.list",
+    "cloud.sessions.list",
+    "cloud.read",
+    "cloud.wait",
+    "machine.list",
+    "machine.status",
+    "machine.projects.list",
+    "machine.sessions.list",
+    "machine.tabs.list",
+    "machine.read",
+    "machine.wait",
+    "machine.permissions.list",
+    "machine.worktrees.list",
+    "vm.inventory",
+    "vm.status",
+];
+
+/// Bot self-service commands scoped to the calling bot itself.
+const BOT_SELF_SERVICE_COMMANDS: &[&str] = &[
+    "bots.memory.list",
+    "bots.memory.add",
+    "bots.memory.forget",
+    "bots.memory.tidy",
+    "bots.items.list",
+    "bots.items.show",
+    "bots.items.add",
+    "bots.items.set",
+    "bots.items.ask",
+    "bots.items.plan",
+    "bots.items.ask-merge",
+    "bots.items.check",
+    "bots.items.comment",
+    "bots.items.done",
+    "bots.handoff",
+    "bots.tell",
+    "bots.handoffs",
+    "bots.suggest",
+    "bots.post",
+    "bots.reply",
+    "bots.message",
+    "bots.dutyOff",
+    "bots.pause",
+    "bots.pauseAll",
+];
+
+fn permission_mode_rank(mode: &str) -> u8 {
+    match mode {
+        "plan" => 0,
+        "manual" => 1,
+        "acceptEdits" => 2,
+        "auto" | "bypassPermissions" => 3,
+        // Unknown modes fail closed as restricted.
+        _ => 0,
+    }
+}
+
+fn bot_access_rank(access: &crate::bots::BotAccess) -> u8 {
+    match access.effective() {
+        crate::bots::BotAccess::ReadReport | crate::bots::BotAccess::Other(_) => 0,
+        crate::bots::BotAccess::AskOutward => 1,
+        crate::bots::BotAccess::Full => 2,
+    }
+}
+
+fn cap_bot_access(raw: &str) -> (crate::bots::BotAccess, bool) {
+    match raw {
+        "full" => (crate::bots::BotAccess::Full, false),
+        "askOutward" => (crate::bots::BotAccess::AskOutward, false),
+        "paused" => (crate::bots::BotAccess::ReadReport, true),
+        _ => (crate::bots::BotAccess::ReadReport, false),
+    }
+}
+
 impl Caller {
     fn of(manager: &SessionManager, params: &Value) -> Self {
         match crate::hooks::caller() {
             crate::hooks::Peer::Pid(pid) => Self::of_process(manager, params, Some(pid)),
             crate::hooks::Peer::InProcess => Self::of_process(manager, params, None),
-            // A sender that cannot be read is one that is gone.
+            // A sender that cannot be read is one that is gone (unconditional, S-08).
             crate::hooks::Peer::Unreadable => {
                 let mut caller = Self::of_process(manager, params, None);
-                caller.gone = crate::bots::enabled();
+                caller.gone = true;
                 caller
             }
         }
     }
 
     fn of_process(manager: &SessionManager, params: &Value, peer: Option<i32>) -> Self {
-        // With Bots off nothing is looked up: the command is what it says, as before.
-        if !crate::bots::enabled() {
-            return Self { bot: None, name: String::new(), paused: false, access: crate::bots::BotAccess::Full, verified: false, session: None, placed: None, peer: None, gone: false, incomplete: false };
-        }
+        let cap = crate::hooks::caller_capability();
+        // S-08: Always resolve OS peer-PID ancestry unconditionally, even when
+        // `!bots::enabled()`, so restricted workers/tabs cannot spoof `params["caller"]`.
         #[cfg(unix)]
-        let (placing, gone) = (peer.map(|pid| manager.session_of_process(pid)).transpose(), peer.is_some_and(|pid| !crate::serve_cli::consent::alive(pid)));
+        let (placing, gone) = (
+            peer.map(|pid| manager.session_of_process(pid)).transpose(),
+            peer.is_some_and(|pid| !crate::serve_cli::consent::alive(pid)),
+        );
         #[cfg(not(unix))]
-        let (placing, gone): (anyhow::Result<Option<Option<crate::session::Placed>>>, bool) = { let _ = (peer, manager); (Ok(None), false) };
+        let (placing, gone): (anyhow::Result<Option<Option<crate::session::Placed>>>, bool) = {
+            let _ = peer;
+            (Ok(None), false)
+        };
         let (placed, mut incomplete) = match placing {
             Ok(placed) => (placed.flatten(), false),
             Err(error) => {
@@ -3582,42 +3814,177 @@ impl Caller {
             },
             None => None,
         };
-        let nobody = Self { bot: None, name: String::new(), paused: false, access: crate::bots::BotAccess::Full, verified: false, session: None, placed: placed.clone(), peer, gone, incomplete };
-        // A placed caller's claim is not read: it is where it is.
-        let claimed = if placed.is_some() { None } else { params["caller"]["session"].as_str().and_then(|id| index::get(id).ok()) };
+        let cap_entry = cap.as_ref().and_then(|c| index::get(&c.session_id).ok());
+        let nobody = Self {
+            bot: None,
+            name: String::new(),
+            paused: false,
+            access: crate::bots::BotAccess::Full,
+            verified: false,
+            session: None,
+            placed: placed.clone(),
+            cap: cap.clone(),
+            peer,
+            gone,
+            incomplete,
+        };
+        if !crate::bots::enabled() {
+            return nobody;
+        }
+        // A kernel-placed or token-authenticated caller's self-reported claim is never trusted.
+        let claimed = if placed.is_some() || cap.is_some() {
+            None
+        } else {
+            params["caller"]["session"].as_str().and_then(|id| index::get(id).ok())
+        };
         let proved = || match (claimed.as_ref(), params["caller"]["tab"].as_str()) {
             (Some(session), Some(tab)) => manager.authenticates_cli(&session.id, tab, params["hookToken"].as_str().unwrap_or_default()),
             _ => false,
         };
-        let (id, verified, session) = match placed_entry.as_ref().and_then(|entry| crate::bots::chat::acting_bot(entry).map(|id| (id, entry.id.clone()))) {
+        let (id, verified, session) = match placed_entry
+            .as_ref()
+            .and_then(|entry| crate::bots::chat::acting_bot(entry).map(|id| (id, entry.id.clone())))
+        {
             Some((id, session)) => (id, true, session),
-            None => match claimed.as_ref().and_then(|entry| crate::bots::chat::acting_bot(entry).map(|id| (id, entry.id.clone()))) {
-                Some((id, session)) => (id, proved(), session),
-                None => return nobody,
+            None => match cap_entry
+                .as_ref()
+                .and_then(|entry| crate::bots::chat::acting_bot(entry).map(|id| (id, entry.id.clone())))
+                .or_else(|| {
+                    cap.as_ref()
+                        .and_then(|c| c.bot_id.clone().map(|id| (id, c.session_id.clone())))
+                }) {
+                Some((id, session)) => (id, true, session),
+                None => match claimed
+                    .as_ref()
+                    .and_then(|entry| crate::bots::chat::acting_bot(entry).map(|id| (id, entry.id.clone())))
+                {
+                    Some((id, session)) => (id, proved(), session),
+                    None => return nobody,
+                },
             },
         };
-        let (name, paused, access) = match crate::store::bots::get(&id) {
+        let (name, mut paused, mut access) = match crate::store::bots::get(&id) {
             Ok(Some(bot)) => (bot.name, bot.paused.is_some(), bot.access.effective()),
-            // A bot that is gone leaves an ordinary session behind.
+            // A bot that is gone leaves an ordinary session behind unless the token bound it.
             Ok(None) => return nobody,
             Err(_) => ("Its bot".to_owned(), true, crate::bots::BotAccess::ReadReport),
         };
-        Self { bot: Some(id), name, paused, access, verified, session: Some(session), placed, peer, gone, incomplete }
-    }
-
-    /// The session the command runs in: where the kernel places it, else the one it names.
-    fn session(&self, params: &Value) -> Option<index::SessionEntry> {
-        match &self.placed {
-            Some(placed) => placed.session.as_deref().and_then(|session| index::get(session).ok()),
-            None => params["caller"]["session"].as_str().and_then(|id| index::get(id).ok()),
+        // Enforce the tighter of live bot access and capability-token access (S-01).
+        if let Some(raw) = cap.as_ref().and_then(|c| c.bot_access.as_deref()) {
+            let (cap_access, cap_paused) = cap_bot_access(raw);
+            if cap_paused {
+                paused = true;
+            }
+            if bot_access_rank(&cap_access) < bot_access_rank(&access) {
+                access = cap_access;
+            }
         }
+        Self { bot: Some(id), name, paused, access, verified, session: Some(session), placed, cap, peer, gone, incomplete }
     }
 
-    /// The caller's tab in [`Self::session`].
+    /// The session the command runs in, resolved from authenticated capability
+    /// token or kernel PID placement; only falls back to `params["caller"]` for
+    /// in-process callers (never for socket peers, S-08).
+    fn resolved_session(&self, params: &Value) -> Option<index::SessionEntry> {
+        if let Some(cap) = &self.cap {
+            return index::get(&cap.session_id).ok();
+        }
+        if let Some(placed) = &self.placed {
+            return placed.session.as_deref().and_then(|session| index::get(session).ok());
+        }
+        if self.peer.is_some() {
+            return None;
+        }
+        params["caller"]["session"].as_str().and_then(|id| index::get(id).ok())
+    }
+
+    /// Backwards-compatible alias for callers inside `control.rs`.
+    #[allow(dead_code)]
+    fn session(&self, params: &Value) -> Option<index::SessionEntry> {
+        self.resolved_session(params)
+    }
+
+    /// The caller's tab in [`Self::resolved_session`].
     fn tab(&self, params: &Value) -> Option<String> {
-        match &self.placed {
-            Some(placed) => placed.tab.clone(),
-            None => params["caller"]["tab"].as_str().map(str::to_owned),
+        if let Some(cap) = &self.cap {
+            return Some(cap.tab_id.clone());
+        }
+        if let Some(placed) = &self.placed {
+            return placed.tab.clone();
+        }
+        if self.peer.is_some() {
+            return None;
+        }
+        params["caller"]["tab"].as_str().map(str::to_owned)
+    }
+
+    /// Whether the caller is a limited orchestration worker (S-08): checks the
+    /// capability token role, kernel-placed session, and (only in-process) claim.
+    fn is_orchestration_worker(&self, params: &Value) -> bool {
+        if self
+            .cap
+            .as_ref()
+            .is_some_and(|cap| matches!(cap.orchestration_role.as_str(), "worker" | "verifier"))
+        {
+            return true;
+        }
+        if let Some(placed) = &self.placed {
+            if placed
+                .session
+                .as_deref()
+                .and_then(|id| index::get(id).ok())
+                .is_some_and(|entry| crate::orchestration::guard::limited(&entry))
+            {
+                return true;
+            }
+        }
+        if let Some(cap) = &self.cap {
+            if index::get(&cap.session_id)
+                .ok()
+                .is_some_and(|entry| crate::orchestration::guard::limited(&entry))
+            {
+                return true;
+            }
+        }
+        // Only for in-process callers (no socket peer and no scoped token) may
+        // `params["caller"]["session"]` further tighten limits.
+        if self.peer.is_none() && self.cap.is_none() && self.placed.is_none() {
+            if params["caller"]["session"]
+                .as_str()
+                .and_then(|id| index::get(id).ok())
+                .is_some_and(|entry| crate::orchestration::guard::limited(&entry))
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Whether the caller cryptographically or via OS kernel placement proves
+    /// it is running inside `(session_id, expected_tab)` (S-08). Never trusts
+    /// unverified `params["caller"]` alone.
+    fn verified_matches_session(
+        &self,
+        session_id: &str,
+        expected_tab: Option<&str>,
+        manager: &SessionManager,
+        params: &Value,
+    ) -> bool {
+        if let Some(cap) = &self.cap {
+            return cap.session_id == session_id
+                && expected_tab.is_none_or(|tab| cap.tab_id == tab);
+        }
+        if let Some(placed) = &self.placed {
+            return placed.session.as_deref() == Some(session_id)
+                && expected_tab.is_none_or(|tab| placed.tab.as_deref() == Some(tab));
+        }
+        match (params["caller"]["session"].as_str(), params["caller"]["tab"].as_str()) {
+            (Some(session), Some(tab)) => {
+                session == session_id
+                    && expected_tab.is_none_or(|lead_tab| lead_tab == tab)
+                    && manager.authenticates_cli(session, tab, params["hookToken"].as_str().unwrap_or_default())
+            }
+            _ => false,
         }
     }
 
@@ -3625,7 +3992,7 @@ impl Caller {
     /// own (not one of the runtime's): asked only when it matters.
     fn unplaced_without_terminal(&self) -> bool {
         #[cfg(unix)]
-        return self.placed.is_none() && self.peer.is_some_and(|pid| !own_terminal(pid));
+        return self.placed.is_none() && self.cap.is_none() && self.peer.is_some_and(|pid| !own_terminal(pid));
         #[cfg(not(unix))]
         false
     }
@@ -3635,7 +4002,7 @@ impl Caller {
     /// terminal, as far as the kernel can say (`person_terminal`).
     fn in_a_terminal_of_its_own(&self) -> bool {
         #[cfg(unix)]
-        return self.placed.is_none() && self.peer.is_some_and(own_terminal);
+        return self.placed.is_none() && self.cap.is_none() && self.peer.is_some_and(own_terminal);
         #[cfg(not(unix))]
         false
     }
@@ -3649,7 +4016,7 @@ impl Caller {
         if self.incomplete {
             return Err(ControlError::new(
                 "person_required",
-                "TerminalX could not tell where the process that sent this runs, so while Bots is on it is not done.",
+                "TerminalX could not tell where the process that sent this runs, so this action is not allowed.",
                 Some("Try again from TerminalX itself, or from a terminal of your own.".into()),
             ));
         }
@@ -3657,7 +4024,7 @@ impl Caller {
     }
 
     /// Refused unless only a person could have sent it from here: not a
-    /// bot's session, and not a process with no tab and no terminal.
+    /// bot's session, not a scoped agent tab, and not a process with no tab and no terminal.
     fn person_only(&self, what: &str) -> Result<(), ControlError> {
         self.refuse_gone()?;
         if self.bot.is_some() {
@@ -3665,6 +4032,13 @@ impl Caller {
                 "forbidden",
                 format!("A bot, and a session a bot started, does not {what}. Only your owner does, in TerminalX."),
                 Some("Tell your owner what you need and why; do not try another way.".into()),
+            ));
+        }
+        if self.cap.is_some() {
+            return Err(ControlError::new(
+                "forbidden",
+                format!("An agent tab cannot {what}. Only a person may do this in TerminalX or their own terminal."),
+                Some("Tell your owner what you need and why.".into()),
             ));
         }
         if self.unplaced_without_terminal() {
@@ -3830,37 +4204,219 @@ impl Caller {
         )
     }
 
-    /// What a session working for a bot may not do outside the bots
-    /// commands (PRO-468): start work while the bot is paused, start work
-    /// that could not be held to its access (another computer, an issue
-    /// pipeline), approve a permission, prompt a
-    /// session that does not work for the same bot, or, unless it has full
-    /// access, act outward with the owner's sign-in: steer or merge an issue
-    /// pipeline, or write to an issue (PRO-489).
+    /// Enforce least privilege for a scoped per-tab capability token (S-01).
+    /// Runs BEFORE every command handler (`local_vm.request`, `window::supported`,
+    /// `runtime.*`, and mutating session/project/worktree/permission RPCs).
+    fn gate_scoped_tab(&self, cap: &crate::hooks::TabCapability, command: &str, params: &Value) -> Result<(), ControlError> {
+        let deny = |why: String| {
+            ControlError::new(
+                "forbidden",
+                why,
+                Some("Agent tabs use scoped least-privilege credentials and cannot invoke privileged control surfaces.".into()),
+            )
+        };
+        // Unconditionally forbidden for EVERY agent tab regardless of permission mode.
+        if matches!(command, "permissions.allow" | "permissions.deny" | "local_vm.request")
+            || command.starts_with("computer.selfUi.")
+            || matches!(command, "window.open" | "window.quit" | "window.stopAllAndQuit" | "window.terminalCounters")
+        {
+            return Err(deny(format!("Agent tabs cannot invoke `{command}`.")));
+        }
+        if command.starts_with("runtime.") {
+            let allowed_bot_read = self.bot.is_some()
+                && (runtime_read(command, params) || own_duties_read(command, params, self.bot.as_deref()));
+            if !allowed_bot_read {
+                return Err(deny(format!("Agent tabs cannot invoke internal runtime command `{command}`.")));
+            }
+        }
+        // Compute effective permission mode as the most restrictive of the token's
+        // baked-in mode and the tab's current live mode.
+        let mut rank = permission_mode_rank(&cap.permission_mode);
+        if let Ok(entry) = index::get(&cap.session_id) {
+            if let Some(tab) = entry.tab(&cap.tab_id) {
+                rank = rank.min(permission_mode_rank(&tab.permission_mode));
+            }
+        }
+        let is_verifier = cap.orchestration_role == "verifier";
+        let is_worker = matches!(cap.orchestration_role.as_str(), "worker" | "verifier")
+            || self.is_orchestration_worker(params);
+        let restricted_mode = rank < 3 || is_verifier;
+
+        if restricted_mode {
+            if READ_ONLY_COMMANDS.contains(&command) {
+                return Ok(());
+            }
+            if command.starts_with("runtime.") && self.bot.is_some() {
+                return Ok(());
+            }
+            if self.bot.is_some() && BOT_SELF_SERVICE_COMMANDS.contains(&command) {
+                return Ok(());
+            }
+            // Allow `review.comment` only when scoped to the caller's own session/tab.
+            if command == "review.comment" && !is_verifier {
+                let target_session = params["sessionId"].as_str().or(params["session"].as_str());
+                let target_tab = params["tabId"].as_str().or(params["tab"].as_str());
+                if target_session.is_none_or(|s| s == cap.session_id)
+                    && target_tab.is_none_or(|t| t == cap.tab_id)
+                {
+                    return Ok(());
+                }
+            }
+            return Err(deny(format!(
+                "Tab {} in `{}` mode cannot invoke `{command}` (default-deny for restricted tabs).",
+                cap.tab_id,
+                if is_verifier { "verifier" } else { cap.permission_mode.as_str() }
+            )));
+        }
+        if is_worker {
+            if matches!(
+                command,
+                "projects.add"
+                    | "projects.remove"
+                    | "worktrees.delete"
+                    | "worktrees.rename"
+                    | "sessions.stop"
+                    | "sessions.archive"
+                    | "sessions.unarchive"
+                    | "sessions.create"
+                    | "runs.create"
+                    | "runs.start"
+                    | "runs.stop"
+                    | "runs.merge"
+                    | "runs.sendBack"
+                    | "runs.takeOver"
+                    | "runs.finish"
+                    | "runs.widen"
+                    | "runs.note"
+                    | "runs.skip"
+                    | "runs.cleanup"
+                    | "runs.checkFailed"
+                    | "pipelines.start"
+                    | "pipelines.autoMerge"
+                    | "pipelines.resolveConflicts"
+                    | "pipelines.act"
+            ) || command.starts_with("share.")
+                || command.strip_prefix("machine.").is_some_and(|a| LIMITED_MACHINE_ACTIONS.contains(&a))
+            {
+                return Err(deny(format!("An orchestration worker tab cannot invoke `{command}`.")));
+            }
+        }
+        Ok(())
+    }
+
+    /// Unified default-deny authorization gate executed BEFORE `local_vm.request`,
+    /// `window::supported`, `runtime.*`, and all command handlers (S-01, S-16).
+    #[cfg(test)]
     fn gate(&self, command: &str, params: &Value) -> Result<(), ControlError> {
+        self.gate_with_window(command, params, None)
+    }
+
+    fn gate_with_window(&self, command: &str, params: &Value, window: Option<(i32, u64)>) -> Result<(), ControlError> {
+        // Check gone/unplaced peer early when Bots is enabled (or caller carries a scoped token).
+        if crate::bots::enabled() || self.cap.is_some() {
+            if self.gone {
+                return Err(gone());
+            }
+            if self.incomplete {
+                return self.refuse_gone();
+            }
+        }
+        // S-01: Scoped per-tab capability token enforcement.
+        if let Some(cap) = &self.cap {
+            self.gate_scoped_tab(cap, command, params)?;
+        }
+        // S-16: Default-deny for bot callers.
+        if let Some(bot) = self.bot.as_deref() {
+            return self.gate_bot(bot, command, params);
+        }
+        // S-16: Default-deny for unplaced processes without a terminal (excluding
+        // the recognised desktop window and runtime.* commands which have their
+        // own owner/window gates).
+        #[cfg(unix)]
+        let recognised_window = self.peer.is_some_and(|pid| is_the_window(window, pid));
+        #[cfg(not(unix))]
+        let recognised_window = {
+            let _ = window;
+            false
+        };
+        if !recognised_window && !command.starts_with("runtime.") {
+            return self.gate_unplaced(command, params);
+        }
+        Ok(())
+    }
+
+    /// Default-deny gate for bot callers (S-16): explicitly allowlists only
+    /// verified read-only commands, bot self-service commands, and access-checked
+    /// bot workflows. Blocks `local_vm.request`, `window::supported` (`browser.*`,
+    /// `computer.*`, `share.*`, `computer.selfUi.*`), `projects.add/remove`,
+    /// `sessions.stop/archive`, `worktrees.delete`, `runs.merge/stop/cleanup`, etc.
+    fn gate_bot(&self, bot: &str, command: &str, params: &Value) -> Result<(), ControlError> {
         self.refuse_gone()?;
-        let Some(bot) = self.bot.as_deref() else { return self.gate_unplaced(command, params) };
+        // 1. Always allow verified read-only commands.
+        if READ_ONLY_COMMANDS.contains(&command) {
+            return Ok(());
+        }
+        // 2. Allow bot self-service commands (which enforce bot ownership & access internally).
+        if BOT_SELF_SERVICE_COMMANDS.contains(&command) {
+            return Ok(());
+        }
+        // 3. Allow strictly read-only runtime queries (`refuse_bot_runtime_call` still scopes items).
+        if command.starts_with("runtime.") {
+            if runtime_read(command, params) || own_duties_read(command, params, Some(bot)) {
+                return Ok(());
+            }
+            if matches!(
+                command,
+                "runtime.handover.plan"
+                    | "runtime.handover"
+                    | "runtime.stopAll"
+                    | "runtime.stopAllIfIdle"
+                    | "runtime.attach"
+                    | "runtime.detach"
+            ) {
+                return Err(self.forbidden(&format!("invoke `{command}`")));
+            }
+            if current_window().keyed() {
+                return Err(ControlError::new(
+                    "person_required",
+                    format!("Only the TerminalX window may invoke `{command}` while Bots is on."),
+                    Some("Do this in the TerminalX window.".into()),
+                ));
+            }
+            return Err(self.forbidden(&format!("invoke `{command}` through the runtime directly")));
+        }
+        // 4. Explicit allowlist of controlled bot workflow actions (everything else is DENIED).
         match command {
             "sessions.create" => self.refuse_while_paused("start sessions"),
             "runs.create" => {
                 self.refuse_while_paused("start runs")?;
-                // Its runs' workers work for it, through their lead: the lead is the caller's own session.
                 match optional_string(params, "lead") {
-                    Some(lead) if resolve_session(&lead).ok().map(|lead| lead.id) != self.session => Err(self.forbidden("lead a run from another session")),
+                    Some(lead) if resolve_session(&lead).ok().map(|lead| lead.id) != self.session => {
+                        Err(self.forbidden("lead a run from another session"))
+                    }
                     _ => Ok(()),
                 }
             }
-            // Which run is settled in `runs`, where the run is found.
-            "runs.start" | "runs.sendBack" | "runs.widen" | "runs.checkFailed" | "runs.takeOver" => self.refuse_while_paused("start or steer runs"),
-            "pipelines.start" => Err(self.forbidden("start an issue pipeline: its sessions could not be held to the bot's access")),
+            "runs.start" => self.refuse_while_paused("start or steer runs"),
+            "runs.sendBack" | "runs.widen" | "runs.checkFailed" | "runs.takeOver" => {
+                self.refuse_while_paused("start or steer runs")?;
+                if self.access != crate::bots::BotAccess::Full {
+                    return Err(self.forbidden(&format!("steer runs (`{command}`) without full access")));
+                }
+                Ok(())
+            }
+            "runs.merge" | "runs.stop" | "runs.finish" | "runs.note" | "runs.skip" | "runs.cleanup" => {
+                self.refuse_while_paused("steer or merge runs")?;
+                if self.access != crate::bots::BotAccess::Full {
+                    return Err(self.forbidden(&format!("mutate or merge runs (`{command}`) without full access")));
+                }
+                Ok(())
+            }
             "pipelines.autoMerge" | "pipelines.resolveConflicts" => self.refuse_outward("change how an issue pipeline merges"),
-            // Stopping one, or looking at its pull request again, sends nothing anywhere.
             "pipelines.act" if OUTWARD_SAFE_ACTIONS.contains(&params["action"].as_str().unwrap_or_default()) => Ok(()),
             "pipelines.act" => self.refuse_outward("move an issue pipeline on: it pushes, reviews and merges"),
             "issues.comment" | "issues.create" | "issues.status" | "issues.assign" | "issues.label" => self.refuse_outward("write to an issue"),
-            // Held to the bot's access as its local sessions are (PRO-514): how, in `Self::cloud`.
             "cloud.sessions.create" | "cloud.send" | "cloud.resume" => self.refuse_cloud_while_paused(),
-            "permissions.allow" => Err(self.forbidden("approve permissions: only a person's answer counts")),
             "send" => {
                 self.refuse_while_paused("prompt sessions")?;
                 let target = resolve_target(&required_string(params, "target")?)?;
@@ -3870,42 +4426,91 @@ impl Caller {
                     Err(self.forbidden("prompt a session that does not work for the same bot"))
                 }
             }
-            _ => match command.strip_prefix("machine.") {
-                Some(action) if !MACHINE_READS.contains(&action) => {
-                    Err(self.forbidden("act on another computer: it could not be held to the bot's access"))
+            "review.comment" => {
+                self.refuse_while_paused("post review comments")?;
+                if self.access != crate::bots::BotAccess::Full {
+                    return Err(self.forbidden("post review comments without full access"));
                 }
-                _ => Ok(()),
-            },
+                Ok(())
+            }
+            "permissions.deny" => Ok(()),
+            "permissions.allow" => Err(self.forbidden("approve permissions: only a person's answer counts")),
+            "pipelines.start" => Err(self.forbidden("start an issue pipeline: its sessions could not be held to the bot's access")),
+            _ if command.starts_with("machine.") => {
+                Err(self.forbidden("act on another computer: it could not be held to the bot's access"))
+            }
+            // DEFAULT-DENY: blocks `local_vm.request`, `window::supported` (`browser.*`,
+            // `computer.*`, `share.*`, `computer.selfUi.*`, `floating.*`, `window.*`),
+            // `projects.add/remove`, `sessions.stop/archive/rename/pin/status`,
+            // `worktrees.delete/rename`, `vm.start/stop/call/tools/screenshot`,
+            // `bots.create/rename/delete/resume/resumeAll`, and any future command.
+            other => Err(self.forbidden(&format!("invoke `{other}`"))),
         }
     }
 
-    /// A caller no tab holds and with no terminal starts no work, and acts
-    /// on nothing outward with the owner's sign-in (an issue write, a
-    /// pipeline's merge switches or any action but stop and refresh), while
-    /// any bot is paused: it may be a bot's process that left its tab behind
-    /// (PRO-489). That includes the owner's own script with no terminal
-    /// (launchd, cron, a CI runner), which can be run from a terminal or
-    /// once the bots are resumed. What only reads or steers is left to it.
+    /// Default-deny gate for unplaced processes with no controlling terminal of
+    /// their own (not the recognised desktop window, e.g. a detached helper
+    /// process left behind with `setsid`, S-16).
     fn gate_unplaced(&self, command: &str, params: &Value) -> Result<(), ControlError> {
-        let starts_work = match command {
-            "sessions.create" | "runs.create" | "runs.start" | "pipelines.start" | "send" | "permissions.allow" | "cloud.sessions.create" | "cloud.send" | "cloud.resume" => true,
-            // What acts outward with the owner's sign-in counts too (PRO-489).
-            "pipelines.autoMerge" | "pipelines.resolveConflicts" | "issues.comment" | "issues.create" | "issues.status" | "issues.assign" | "issues.label" => true,
-            "pipelines.act" => !OUTWARD_SAFE_ACTIONS.contains(&params["action"].as_str().unwrap_or_default()),
-            _ => command.strip_prefix("machine.").is_some_and(|action| !MACHINE_READS.contains(&action)),
-        };
-        if !crate::bots::enabled() || !starts_work || !self.unplaced_without_terminal() {
+        if !crate::bots::enabled() || !self.unplaced_without_terminal() {
             return Ok(());
         }
-        let paused = crate::store::bots::snapshot().map(|snapshot| snapshot.bots.iter().any(|bot| bot.paused.is_some())).unwrap_or(true);
-        if !paused {
+        // Always allow verified read-only commands and pausing bots.
+        if READ_ONLY_COMMANDS.contains(&command)
+            || matches!(command, "bots.pause" | "bots.pauseAll")
+            || (command == "pipelines.act" && OUTWARD_SAFE_ACTIONS.contains(&params["action"].as_str().unwrap_or_default()))
+        {
             return Ok(());
         }
-        Err(ControlError::new(
-            "bot_paused",
-            "A bot is paused, and this command came from a process outside every TerminalX pane with no terminal of its own, so it may be the bot's: it starts no work until the bots are resumed.",
-            Some("Run it in a terminal of your own or a TerminalX tab, or resume the paused bots in TerminalX first.".into()),
-        ))
+        // Privileged surfaces are denied by default for unplaced non-window,
+        // non-terminal callers whenever Bots is enabled.
+        let privileged_surface = command == "local_vm.request"
+            || (crate::local_runtime::window::supported(command) && !crate::local_runtime::window::read_only(command))
+            || matches!(
+                command,
+                "permissions.allow"
+                    | "permissions.deny"
+                    | "projects.add"
+                    | "projects.remove"
+                    | "sessions.stop"
+                    | "sessions.archive"
+                    | "sessions.unarchive"
+                    | "worktrees.delete"
+                    | "worktrees.rename"
+                    | "runs.merge"
+                    | "runs.stop"
+                    | "runs.cleanup"
+                    | "vm.start"
+                    | "vm.stop"
+                    | "vm.call"
+                    | "vm.tools"
+                    | "vm.screenshot"
+            );
+        if matches!(command, "bots.resume" | "bots.resumeAll") {
+            return Err(ControlError::new(
+                "person_required",
+                "Only a person may resume a bot, and this command came from a process outside every TerminalX pane with no terminal of its own.",
+                Some("Run it in a terminal of your own, or resume the bot in TerminalX.".into()),
+            ));
+        }
+        let paused = crate::store::bots::snapshot()
+            .map(|snapshot| snapshot.bots.iter().any(|bot| bot.paused.is_some()))
+            .unwrap_or(true);
+        if paused {
+            return Err(ControlError::new(
+                "bot_paused",
+                "A bot is paused, and this command came from a process outside every TerminalX pane with no terminal of its own, so it may be the bot's: it starts no work until the bots are resumed.",
+                Some("Run it in a terminal of your own or a TerminalX tab, or resume the paused bots in TerminalX first.".into()),
+            ));
+        }
+        if privileged_surface {
+            return Err(ControlError::new(
+                "person_required",
+                format!("`{command}` came from an unplaced process with no terminal of its own that is not the TerminalX window, so it is refused while Bots is on."),
+                Some("Run it in a terminal of your own or from the TerminalX window.".into()),
+            ));
+        }
+        Ok(())
     }
 
     /// A run steered by a bot's session is one its lead works for the same
@@ -3936,9 +4541,6 @@ fn gone() -> ControlError {
 /// The `pipelines.act` actions that send nothing anywhere: a bot may stop a
 /// pipeline, or have it look at its pull request again, whatever its access.
 const OUTWARD_SAFE_ACTIONS: &[&str] = &["stop", "refresh"];
-
-/// What a `machine.*` command only reads on another computer.
-const MACHINE_READS: &[&str] = &["list", "status", "projects.list", "sessions.list", "tabs.list", "read", "wait", "permissions.list", "worktrees.list"];
 
 /// [`person_terminal`] for a caller: a test stands in for a person at a terminal, which CI has none of.
 #[cfg(unix)]
@@ -5502,7 +6104,7 @@ mod tests {
             "id": "a-run", "lead": {"sessionId": "lead", "tabId": "t"}, "projectPath": "/fixture", "goal": "Something",
             "state": "running", "pieces": [], "workerMode": "plan", "created": "2026-11-20T09:00:00Z", "modified": "2026-11-20T09:00:00Z",
         })).unwrap();
-        let caller = |gone: bool, incomplete: bool| Caller { bot: None, name: String::new(), paused: false, access: crate::bots::BotAccess::Full, verified: false, session: None, placed: None, peer: Some(4242), gone, incomplete };
+        let caller = |gone: bool, incomplete: bool| Caller { bot: None, name: String::new(), paused: false, access: crate::bots::BotAccess::Full, verified: false, session: None, placed: None, peer: Some(4242), cap: None, gone, incomplete };
         caller(false, false).may_steer(&run).unwrap();
         assert_eq!(caller(true, false).may_steer(&run).unwrap_err().code, "person_required");
         let refused = caller(false, true).may_steer(&run).unwrap_err();
@@ -7338,6 +7940,283 @@ mod tests {
             LINEAR_INTEGRATION_RECOVERY,
             "Add an API key in TerminalX Settings → Integrations."
         );
+    }
+
+    /// S-01: Agent tabs receive scoped capability tokens (never the master
+    /// `TERMINALX_NEXT_TOKEN`), and restricted tabs (`plan`/`manual`/`acceptEdits`)
+    /// are held to least-privilege default-deny while read-only calls still work.
+    #[test]
+    fn scoped_tab_tokens_enforce_least_privilege_s01() {
+        let _home = crate::store::temp_home();
+        let (service, _sink) = headless_service();
+        let dir = tempfile::tempdir().unwrap();
+        let project = projects::add(dir.path().to_str().unwrap()).unwrap();
+        let session = crate::session_ops::create_session_entry(serde_json::from_value(json!({
+            "projectPath": project.path, "useWorktree": false,
+            "tab": {"harness": "claude", "permissionMode": "plan"},
+        })).unwrap()).unwrap();
+        let tab_id = session.tabs[0].id.clone();
+
+        // Minting a tab control token must never return the master token.
+        let scoped = service.manager.mint_tab_control_token(&session.id, &tab_id, "launch-1", Some("plan"));
+        assert_ne!(scoped, service.endpoint.token);
+        let cap = crate::hooks::verify_tab_token(&service.endpoint.token, &scoped).expect("valid scoped token");
+        assert_eq!(cap.session_id, session.id);
+        assert_eq!(cap.tab_id, tab_id);
+        assert_eq!(cap.permission_mode, "plan");
+
+        // Restricted tab (plan/manual/acceptEdits) is denied mutating/privileged RPCs.
+        for mode in ["plan", "manual", "acceptEdits"] {
+            let mut mode_cap = cap.clone();
+            mode_cap.permission_mode = mode.into();
+            crate::hooks::with_caller_capability(Some(mode_cap), || {
+                for forbidden in [
+                    ("permissions.allow", json!({"request": "req-1"})),
+                    ("permissions.deny", json!({"request": "req-1"})),
+                    ("sessions.create", json!({"quick": true, "agent": "claude", "prompt": "hi"})),
+                    ("send", json!({"target": session.id, "text": "hi"})),
+                    ("projects.add", json!({"path": "/tmp"})),
+                    ("projects.remove", json!({"project": project.path})),
+                    ("worktrees.delete", json!({"project": project.path, "worktree": "x"})),
+                    ("browser.goto", json!({"url": "https://example.com"})),
+                    ("computer.click", json!({"x": 1, "y": 1})),
+                    ("share.create", json!({"sessionId": session.id})),
+                    ("local_vm.request", json!({"method": "status", "params": {}})),
+                    ("runtime.stopAll", json!({"epoch": "e"})),
+                    ("runtime.handover", json!({"epoch": "e", "binary": "/tmp/x"})),
+                    ("runtime.handover.plan", json!({"epoch": "e"})),
+                    ("runtime.attach", json!({"protocol": 1})),
+                    ("runs.merge", json!({"run": "r1"})),
+                ] {
+                    let err = service.execute(forbidden.0, forbidden.1, "s01").unwrap_err();
+                    assert_eq!(err.code, "forbidden", "{mode} tab must be denied `{}`: {err:?}", forbidden.0);
+                }
+                // Legitimate read-only calls still succeed.
+                assert!(service.execute("status", json!({}), "s01-ok").is_ok(), "{mode} status");
+                assert!(service.execute("projects.list", json!({}), "s01-ok").is_ok(), "{mode} projects.list");
+                assert!(service.execute("permissions.list", json!({}), "s01-ok").is_ok(), "{mode} permissions.list");
+            });
+        }
+
+        // Even an unrestricted `bypassPermissions` tab token can NEVER self-approve
+        // permissions or invoke `runtime.*` / `local_vm.request` / `computer.selfUi.*`.
+        let mut bypass_cap = cap;
+        bypass_cap.permission_mode = "bypassPermissions".into();
+        crate::hooks::with_caller_capability(Some(bypass_cap), || {
+            for always_denied in [
+                ("permissions.allow", json!({"request": "req-1"})),
+                ("permissions.deny", json!({"request": "req-1"})),
+                ("local_vm.request", json!({"method": "status", "params": {}})),
+                ("computer.selfUi.authorize", json!({})),
+                ("runtime.stopAll", json!({"epoch": "e"})),
+                ("runtime.handover", json!({"epoch": "e", "binary": "/tmp/x"})),
+                ("runtime.attach", json!({"protocol": 1})),
+            ] {
+                let err = service.execute(always_denied.0, always_denied.1, "s01-bypass").unwrap_err();
+                assert_eq!(err.code, "forbidden", "bypass tab must be denied `{}`", always_denied.0);
+            }
+        });
+    }
+
+    /// S-02: `runtime.handover.plan`, `runtime.handover`, `runtime.stopAll`,
+    /// `runtime.stopAllIfIdle`, `runtime.attach`, and `runtime.detach` refuse
+    /// scoped tab tokens, agent panes, bots, and child processes of the runtime.
+    #[cfg(unix)]
+    #[test]
+    fn runtime_lifecycle_and_handover_refuse_pane_scoped_bot_and_child_callers_s02() {
+        let _home = crate::store::temp_home();
+        let (service, _sink) = headless_service();
+        let lifetime = crate::local_runtime::Lifetime::new(Duration::from_secs(60));
+        let epoch = lifetime.epoch().to_string();
+        let service = service.with_local_lifetime(lifetime);
+
+        let lifecycle_cmds = [
+            ("runtime.handover.plan", json!({"epoch": epoch})),
+            ("runtime.handover", json!({"epoch": epoch, "binary": "/tmp/evil"})),
+            ("runtime.stopAll", json!({"epoch": epoch})),
+            ("runtime.stopAllIfIdle", json!({"epoch": epoch})),
+            ("runtime.attach", json!({"protocol": 1})),
+            ("runtime.detach", json!({"epoch": epoch, "lease": "l1"})),
+        ];
+
+        // 1. Scoped tab token caller is refused on all lifecycle RPCs.
+        let cap = crate::hooks::TabCapability {
+            session_id: "s1".into(),
+            tab_id: "t1".into(),
+            launch_id: "l1".into(),
+            permission_mode: "bypassPermissions".into(),
+            bot_id: None,
+            bot_access: None,
+            orchestration_role: "standard".into(),
+        };
+        crate::hooks::with_caller_capability(Some(cap), || {
+            for (cmd, params) in &lifecycle_cmds {
+                let err = service.execute(cmd, params.clone(), "s02-cap").unwrap_err();
+                assert_eq!(err.code, "forbidden", "scoped token must be refused `{cmd}`: {err:?}");
+            }
+        });
+
+        // 2. Child process of this runtime (`descends_from`) is refused on all lifecycle RPCs.
+        let mut child = std::process::Command::new("/bin/sleep").arg("30").spawn().unwrap();
+        let child_pid = child.id() as i32;
+        crate::hooks::TEST_CALLER_PID.with(|c| c.set(Some(child_pid)));
+        for (cmd, params) in &lifecycle_cmds {
+            let err = service.execute(cmd, params.clone(), "s02-child").unwrap_err();
+            assert_eq!(err.code, "forbidden", "child process must be refused `{cmd}`: {err:?}");
+        }
+        crate::hooks::TEST_CALLER_PID.with(|c| c.set(None));
+        let _ = child.kill();
+        let _ = child.wait();
+
+        // 3. In-process / legitimate owner attach & detach still succeeds.
+        let lease = service.execute("runtime.attach", json!({"protocol": 1}), "s02-ok").unwrap();
+        assert!(lease["lease"].is_string());
+        service.execute("runtime.detach", lease, "s02-ok").unwrap();
+    }
+
+    /// S-08: Caller identity is resolved unconditionally from OS peer-PID ancestry
+    /// and/or scoped tab capability token even when `!bots::enabled()`; spoofing
+    /// or omitting `params["caller"]["session"]` cannot bypass worker guards.
+    #[cfg(unix)]
+    #[test]
+    fn orchestration_worker_identity_resolved_from_pid_and_token_even_with_bots_off_s08() {
+        let _home = crate::store::temp_home();
+        assert!(!crate::bots::enabled(), "Bots must be off by default for S-08 test");
+        let (service, sink) = headless_service();
+        let lifetime = crate::local_runtime::Lifetime::new(Duration::from_secs(60));
+        let service = service.with_local_lifetime(lifetime);
+
+        let dir = tempfile::tempdir().unwrap();
+        let project = projects::add(dir.path().to_str().unwrap()).unwrap();
+        let lead = crate::session_ops::create_session_entry(serde_json::from_value(json!({
+            "projectPath": project.path, "useWorktree": false, "tab": {"harness": "claude"},
+        })).unwrap()).unwrap();
+        let mut worker = crate::session_ops::create_session_entry(serde_json::from_value(json!({
+            "projectPath": project.path, "useWorktree": false, "tab": {"harness": "claude"},
+        })).unwrap()).unwrap();
+        worker = index::update_session(&worker.id, |s| {
+            s.mark_run_worker();
+            Ok(s.clone())
+        }).unwrap();
+
+        let run: crate::orchestration::Run = serde_json::from_value(json!({
+            "id": "run-s08",
+            "lead": {"sessionId": lead.id, "tabId": lead.tabs[0].id},
+            "projectPath": project.path,
+            "goal": "Test S-08",
+            "state": "running",
+            "pieces": [],
+            "workerMode": "plan",
+            "created": "2026-11-20T09:00:00Z",
+            "modified": "2026-11-20T09:00:00Z",
+        })).unwrap();
+        crate::orchestration::store::insert(&run).unwrap();
+
+        // Spawn a real process inside the worker's pane PTY.
+        let marker = format!("53.{}", std::process::id());
+        let script = format!("/bin/sh -c 'sleep {marker}; true'");
+        let pane_id = worker.tabs[0].pane_id();
+        let spec = crate::pty::PaneSpec { cwd: &worker.cwd, cols: 80, rows: 24, command: Some(&script), env: &[] };
+        service.manager.terminals().spawn(sink.clone(), &pane_id, spec).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let worker_pid = loop {
+            if let Some(pid) = service.manager.terminals().pid(&pane_id) {
+                if service.manager.session_of_process(pid as i32).ok().flatten().and_then(|p| p.session).as_deref() == Some(worker.id.as_str()) {
+                    break pid as i32;
+                }
+            }
+            assert!(Instant::now() < deadline, "worker pane process never appeared");
+            std::thread::sleep(Duration::from_millis(20));
+        };
+
+        // Spoof `caller.session = lead.id` (or omit `caller`) from the worker's PID while Bots is OFF!
+        crate::hooks::TEST_CALLER_PID.with(|c| c.set(Some(worker_pid)));
+        for spoofed_caller in [json!({"session": lead.id, "tab": lead.tabs[0].id}), json!({})] {
+            let resolved = Caller::of(&service.manager, &json!({"caller": spoofed_caller}));
+            assert_eq!(resolved.resolved_session(&json!({"caller": spoofed_caller})).map(|s| s.id), Some(worker.id.clone()), "PID ancestry wins over spoofed caller");
+            assert!(resolved.is_orchestration_worker(&json!({"caller": spoofed_caller})));
+            assert!(!resolved.verified_matches_session(&lead.id, Some(&lead.tabs[0].id), &service.manager, &json!({"caller": spoofed_caller})));
+
+            for (cmd, params) in [
+                ("runs.merge", json!({"run": run.id, "caller": spoofed_caller})),
+                ("runs.stop", json!({"run": run.id, "caller": spoofed_caller})),
+                ("runs.finish", json!({"run": run.id, "piece": "p", "caller": spoofed_caller})),
+                ("runs.create", json!({"plan": {}, "lead": lead.id, "caller": spoofed_caller})),
+                ("pipelines.start", json!({"target": lead.id, "caller": spoofed_caller})),
+                (concat!("machine.", "add"), json!({"machine": "m1", "caller": spoofed_caller})),
+                ("machine.sessions.create", json!({"machine": "m1", "caller": spoofed_caller})),
+            ] {
+                let err = service.execute(cmd, params, "s08").unwrap_err();
+                assert_eq!(err.code, "forbidden", "worker must be blocked from `{cmd}` even with Bots off: {err:?}");
+            }
+            // Worker can still read runs/pipelines.
+            assert!(service.execute("runs.list", json!({}), "s08-read").is_ok());
+        }
+        crate::hooks::TEST_CALLER_PID.with(|c| c.set(None));
+        service.manager.terminals().kill(&pane_id);
+    }
+
+    /// S-16: `Caller::gate` executes BEFORE `local_vm.request` and `window::supported`
+    /// and enforces default-deny for bots (paused, ReadReport, AskOutward) and
+    /// unplaced detached callers.
+    #[cfg(unix)]
+    #[test]
+    fn default_deny_blocks_window_local_vm_and_mutating_commands_for_bots_and_unplaced_s16() {
+        let marker = format!("59.{}", std::process::id());
+        let script = format!("/bin/sh -c 'sleep {marker}; true'");
+        let (_home, service, sink, bot_id, chat, _owners, pid) = bot_with_a_process(&script, &marker);
+        let lifetime = crate::local_runtime::Lifetime::new(Duration::from_secs(60));
+        let service = service.with_local_lifetime(lifetime).with_vm_controller();
+
+        crate::hooks::TEST_CALLER_PID.with(|c| c.set(Some(pid)));
+
+        for access in ["readReport", "askOutward"] {
+            let patch: crate::bots::BotPatch = serde_json::from_value(json!({"access": access})).unwrap();
+            crate::bots::update(sink.as_ref(), &bot_id, patch).unwrap();
+            for (cmd, params) in [
+                ("local_vm.request", json!({"method": "status", "params": {}})),
+                ("browser.goto", json!({"url": "https://example.com"})),
+                ("browser.eval", json!({"expression": "1+1"})),
+                ("computer.click", json!({"x": 10, "y": 10})),
+                ("computer.selfUi.authorize", json!({})),
+                ("share.create", json!({"sessionId": chat.id})),
+                ("window.quit", json!({})),
+                ("projects.add", json!({"path": "/tmp"})),
+                ("projects.remove", json!({"project": "/tmp"})),
+                ("sessions.stop", json!({"session": chat.id})),
+                ("sessions.archive", json!({"sessions": [chat.id]})),
+                ("worktrees.delete", json!({"project": "/tmp", "worktree": "w"})),
+                ("runs.merge", json!({"run": "r1"})),
+                ("runs.stop", json!({"run": "r1"})),
+                ("runs.cleanup", json!({"run": "r1"})),
+                ("permissions.allow", json!({"request": "req"})),
+                ("vm.call", json!({"tool": "bash", "arguments": "{}"})),
+            ] {
+                let err = service.execute(cmd, params, "s16").unwrap_err();
+                assert_eq!(err.code, "forbidden", "{access} bot must be denied `{cmd}`: {err:?}");
+            }
+            // Verified read-only commands still pass!
+            assert!(service.execute("status", json!({}), "s16-read").is_ok(), "{access} status");
+            assert!(service.execute("projects.list", json!({}), "s16-read").is_ok(), "{access} projects.list");
+            assert!(service.execute("bots.list", json!({}), "s16-read").is_ok(), "{access} bots.list");
+        }
+
+        // Paused bot is also denied `local_vm.request`, `browser.*`, `computer.*`, `share.*`, and mutating ops.
+        crate::bots::pause(sink.as_ref(), &bot_id, crate::bots::OWNER).unwrap();
+        for (cmd, params) in [
+            ("local_vm.request", json!({"method": "status", "params": {}})),
+            ("browser.goto", json!({"url": "https://example.com"})),
+            ("computer.listApps", json!({})),
+            ("share.create", json!({"sessionId": chat.id})),
+            ("projects.add", json!({"path": "/tmp"})),
+            ("worktrees.delete", json!({"project": "/tmp", "worktree": "w"})),
+        ] {
+            let err = service.execute(cmd, params, "s16-paused").unwrap_err();
+            assert_eq!(err.code, "forbidden", "paused bot must be denied `{cmd}`: {err:?}");
+        }
+
+        crate::hooks::TEST_CALLER_PID.with(|c| c.set(None));
+        service.manager.terminals().kill(&chat.tabs[0].pane_id());
     }
 }
 

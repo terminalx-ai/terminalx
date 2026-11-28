@@ -193,7 +193,7 @@ function DiffEditorContent({ entry, visible }: { entry: DiffEditorEntry; visible
           : !error && <p role="status" className="p-4 text-sm text-muted-foreground">Loading file diff…</p>}
       </div>)}
       {previewed && <div className={cn("absolute inset-0", mode !== "preview" && "hidden")}>
-        {media ? <MediaPane entry={fileEntry} visible={visible && mode === "preview"} /> : <div className="h-full overflow-auto scrollbar-thin px-6 py-4 select-text"><Markdown text={pair?.after ?? ""} className="prose-chat" linkContext={editorLinkContext(entry)} /></div>}
+        {media ? <MediaPane entry={fileEntry} visible={visible && mode === "preview"} /> : <div className="h-full overflow-auto scrollbar-thin px-6 py-4 select-text"><Markdown text={pair?.after ?? ""} className="prose-chat" linkContext={editorLinkContext(entry)} webLinksOnly remoteImages={false} /></div>}
       </div>}
       {editing && <div className={cn("absolute inset-0", mode !== "edit" && "hidden")}><EditorPane entry={fileEntry} visible={visible && mode === "edit"} embedded /></div>}
     </div>

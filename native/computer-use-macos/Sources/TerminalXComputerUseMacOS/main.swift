@@ -1091,6 +1091,18 @@ final class Provider {
         guard isSettable(record.element, kAXValueAttribute as String) else {
             throw ProviderError.coded("value_not_settable", "element \(record.index) is not settable")
         }
+        let sensitive = isSensitiveElement(record.element)
+        if sensitive {
+            let result = AXUIElementSetAttributeValue(record.element, kAXValueAttribute as CFString, expected as CFString)
+            guard result == .success else {
+                throw ProviderError.coded("accessibility_error", "AXUIElementSetAttributeValue failed with \(result.rawValue)")
+            }
+            return actionMetadata(
+                path: "accessibility",
+                actionName: "AXSetValue",
+                verification: SensitiveFieldRedaction.redactedSensitiveVerification(property: "value", verified: false)
+            )
+        }
         let current = rawAttributeValue(record.element, kAXValueAttribute as String)
         let coercion = AttributeValueCoercion(existingValue: current, requested: expected)
         let result: AXError
@@ -1116,7 +1128,11 @@ final class Provider {
         case .unsupported:
             verification = unverifiedAction(reason: "readback_unsupported", expected: expected)
         }
-        return actionMetadata(path: "accessibility", actionName: "AXSetValue", verification: verification)
+        return actionMetadata(
+            path: "accessibility",
+            actionName: "AXSetValue",
+            verification: SensitiveFieldRedaction.redactVerification(verification, isSensitive: isSensitiveElement(record.element))
+        )
     }
 
     private func typeText(params: [String: JSONValue]) throws -> [String: Any] {
@@ -2082,6 +2098,16 @@ private func screenIndex(for bounds: CGRect) -> Int? {
 private func coordinatePoint(params: [String: JSONValue], xKey: String, yKey: String, snapshot: Snapshot) throws -> CGPoint {
     let x = try requiredNumber(params, xKey)
     let y = try requiredNumber(params, yKey)
+    guard x >= 0,
+          y >= 0,
+          x <= Double(snapshot.windowBounds.width),
+          y <= Double(snapshot.windowBounds.height)
+    else {
+        throw ProviderError.coded(
+            "invalid_argument",
+            "\(xKey) and \(yKey) (\(x), \(y)) are out of window bounds [0, \(Double(snapshot.windowBounds.width))] x [0, \(Double(snapshot.windowBounds.height))]"
+        )
+    }
     return CGPoint(
         x: snapshot.windowBounds.minX + x,
         y: snapshot.windowBounds.minY + y
@@ -2514,8 +2540,11 @@ private final class AXSnapshotReader {
             guard values.count < limit, depth <= maxDepth else { return }
             let role = stringAttribute(node, kAXRoleAttribute as String) ?? ""
             if role == kAXStaticTextRole as String || role == "AXLink" {
+                let valueCandidate = isSecureTextElement(node, role: role)
+                    ? SensitiveFieldRedaction.redactedPlaceholder
+                    : stringAttribute(node, kAXValueAttribute as String)
                 for candidate in [
-                    stringAttribute(node, kAXValueAttribute as String),
+                    valueCandidate,
                     stringAttribute(node, kAXTitleAttribute as String),
                     stringAttribute(node, kAXDescriptionAttribute as String),
                 ] {
@@ -2625,21 +2654,61 @@ private final class AXSnapshotReader {
     }
 
     private func isSecureTextElement(_ element: AXUIElement, role: String) -> Bool {
-        guard SnapshotRenderHeuristics.shouldProbeSecureTextMetadata(role: role) else {
-            return false
+        if role == "AXSecureTextField" {
+            return true
         }
-        let haystack = [
-            role,
-            stringAttribute(element, kAXSubroleAttribute as String) ?? "",
-            stringAttribute(element, kAXTitleAttribute as String) ?? "",
-            stringAttribute(element, kAXDescriptionAttribute as String) ?? "",
-            placeholderString(element) ?? "",
-        ].joined(separator: " ").lowercased()
-        return haystack.contains("secure") ||
-            haystack.contains("password") ||
-            haystack.contains("passcode") ||
-            haystack.contains("verification code") ||
-            haystack.contains("one-time code")
+        let subrole = stringAttribute(element, kAXSubroleAttribute as String)
+        if subrole == "AXSecureTextField" {
+            return true
+        }
+        if SnapshotRenderHeuristics.shouldProbeSecureTextMetadata(role: role),
+           SensitiveFieldRedaction.isSensitiveMetadata(
+               role: role,
+               subrole: subrole,
+               title: stringAttribute(element, kAXTitleAttribute as String),
+               description: stringAttribute(element, kAXDescriptionAttribute as String),
+               placeholder: placeholderString(element),
+               identifier: stringAttribute(element, kAXIdentifierAttribute as String)
+                   ?? stringAttribute(element, "AXDOMIdentifier")
+           ) {
+            return true
+        }
+        return hasSensitiveAncestor(element)
+    }
+
+    private func hasSensitiveAncestor(_ element: AXUIElement, maxDepth: Int = 16) -> Bool {
+        var current = element
+        for _ in 0..<maxDepth {
+            guard let parent = copyElementAttribute(current, kAXParentAttribute as String) else {
+                break
+            }
+            let parentRole = stringAttribute(parent, kAXRoleAttribute as String) ?? ""
+            if SensitiveFieldRedaction.topLevelAncestorRoles.contains(parentRole) {
+                break
+            }
+            if SensitiveFieldRedaction.isSensitiveMetadata(
+                role: parentRole,
+                subrole: stringAttribute(parent, kAXSubroleAttribute as String),
+                title: stringAttribute(parent, kAXTitleAttribute as String),
+                description: stringAttribute(parent, kAXDescriptionAttribute as String),
+                placeholder: placeholderString(parent),
+                identifier: stringAttribute(parent, kAXIdentifierAttribute as String)
+                    ?? stringAttribute(parent, "AXDOMIdentifier")
+            ) {
+                return true
+            }
+            current = parent
+        }
+        return false
+    }
+
+    private func copyElementAttribute(_ element: AXUIElement, _ attribute: String) -> AXUIElement? {
+        guard let value = copyAttribute(element, attribute),
+              CFGetTypeID(value) == AXUIElementGetTypeID()
+        else {
+            return nil
+        }
+        return unsafeBitCast(value, to: AXUIElement.self)
     }
 
     private func plainTextSubtreeSnippets(_ element: AXUIElement, limit: Int, maxDepth: Int) -> [String]? {
@@ -2662,8 +2731,11 @@ private final class AXSnapshotReader {
             if role == kAXStaticTextRole as String || role == "AXLink" {
                 sawText = true
                 if values.count < limit {
+                    let valueCandidate = isSecureTextElement(node, role: role)
+                        ? SensitiveFieldRedaction.redactedPlaceholder
+                        : stringAttribute(node, kAXValueAttribute as String)
                     for candidate in [
-                        stringAttribute(node, kAXValueAttribute as String),
+                        valueCandidate,
                         stringAttribute(node, kAXTitleAttribute as String),
                         stringAttribute(node, kAXDescriptionAttribute as String),
                     ] {
@@ -3203,9 +3275,42 @@ private enum Input {
     }
 }
 
+private func isSensitiveElement(_ element: AXUIElement, maxAncestorDepth: Int = 16) -> Bool {
+    var current: AXUIElement? = element
+    for depth in 0...maxAncestorDepth {
+        guard let node = current else { break }
+        let role = rawStringAttribute(node, kAXRoleAttribute as String) ?? ""
+        if depth > 0 && SensitiveFieldRedaction.topLevelAncestorRoles.contains(role) {
+            break
+        }
+        if SensitiveFieldRedaction.isSensitiveMetadata(
+            role: role,
+            subrole: rawStringAttribute(node, kAXSubroleAttribute as String),
+            title: rawStringAttribute(node, kAXTitleAttribute as String),
+            description: rawStringAttribute(node, kAXDescriptionAttribute as String),
+            placeholder: rawStringAttribute(node, "AXPlaceholderValue")
+                ?? rawStringAttribute(node, "AXPlaceholder"),
+            identifier: rawStringAttribute(node, kAXIdentifierAttribute as String)
+                ?? rawStringAttribute(node, "AXDOMIdentifier")
+        ) {
+            return true
+        }
+        guard let parentValue = rawAttributeValue(node, kAXParentAttribute as String),
+              CFGetTypeID(parentValue) == AXUIElementGetTypeID()
+        else {
+            break
+        }
+        current = unsafeBitCast(parentValue, to: AXUIElement.self)
+    }
+    return false
+}
+
 private enum TextInput {
     static func replaceSelection(_ element: AXUIElement, with text: String) -> [String: Any]? {
-        guard isSettable(element, kAXValueAttribute as String),
+        // Why: never read, splice, or echo plaintext from a password/sensitive field;
+        // returning nil falls through to synthetic/clipboard input without readback.
+        guard !isSensitiveElement(element),
+              isSettable(element, kAXValueAttribute as String),
               let current = rawStringAttribute(element, kAXValueAttribute as String)
         else {
             return nil
@@ -3223,14 +3328,25 @@ private enum TextInput {
         guard rawStringAttribute(element, kAXValueAttribute as String) == next else {
             return nil
         }
-        return verifiedAction(
-            property: "focusedText",
-            expected: text,
-            actualPreview: preview(next)
+        return SensitiveFieldRedaction.redactVerification(
+            verifiedAction(
+                property: "focusedText",
+                expected: text,
+                actualPreview: preview(next)
+            ),
+            isSensitive: isSensitiveElement(element)
         )
     }
 
     static func selectAll(_ element: AXUIElement) -> Bool {
+        if isSensitiveElement(element) {
+            guard let count = (rawAttributeValue(element, kAXNumberOfCharactersAttribute as String) as? NSNumber)?.intValue,
+                  count >= 0
+            else {
+                return false
+            }
+            return setSelectedTextRange(element, CFRange(location: 0, length: count))
+        }
         guard let current = rawStringAttribute(element, kAXValueAttribute as String) else {
             return false
         }
@@ -3238,6 +3354,15 @@ private enum TextInput {
     }
 
     static func selectionVerification(_ element: AXUIElement) -> [String: Any] {
+        if isSensitiveElement(element) {
+            if let count = (rawAttributeValue(element, kAXNumberOfCharactersAttribute as String) as? NSNumber)?.intValue,
+               let selectedRange = selectedTextRange(element),
+               selectedRange.location == 0,
+               selectedRange.length == count {
+                return SensitiveFieldRedaction.redactedSensitiveVerification(property: "selection", verified: true)
+            }
+            return SensitiveFieldRedaction.redactedSensitiveVerification(property: "selection", verified: false)
+        }
         guard let current = rawStringAttribute(element, kAXValueAttribute as String),
               let selectedRange = selectedTextRange(element),
               selectedRange.location == 0,
@@ -3245,7 +3370,10 @@ private enum TextInput {
         else {
             return unverifiedAction(reason: "provider_unavailable")
         }
-        return verifiedAction(property: "selection", actualPreview: preview(current))
+        return SensitiveFieldRedaction.redactVerification(
+            verifiedAction(property: "selection", actualPreview: preview(current)),
+            isSensitive: isSensitiveElement(element)
+        )
     }
 
     private static func selectedTextRange(_ element: AXUIElement) -> CFRange? {

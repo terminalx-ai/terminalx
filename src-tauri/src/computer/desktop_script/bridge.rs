@@ -275,16 +275,17 @@ fn execute_observed(
 // specific argument, missing dependency, stale window, and screenshot errors.
 static ERRORS: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| {
     [
+        (r"own_app_protected|ownAppProtected", "own_app_protected"),
         (r"appNotFound|app not found", "app_not_found"),
         (r"appBlocked|app blocked", "app_blocked"),
         (r"unsupported capability|hotkey.*require|paste_text requires|modified clicks require xdotool|GDK is required for non-character key synthesis", "unsupported_capability"),
-        (r"unsupported mouse button|unsupported scroll direction|unsupported (?:key|modifier)|windowId is not supported|must be a positive|must be a finite number|\b(?:x|y|from_x|from_y|to_x|to_y|pages|click_count|text|key|direction) is required\b", "invalid_argument"),
+        (r"invalid_argument|out of window bounds|within target window bounds|must be non-negative|unsupported mouse button|unsupported scroll direction|unsupported (?:key|modifier)|windowId is not supported|must be a positive|must be a finite number|\b(?:x|y|from_x|from_y|to_x|to_y|pages|click_count|text|key|direction) is required\b", "invalid_argument"),
         (r"ModuleNotFoundError: No module named 'gi'|PyGObject|python3-gi", "missing_gi"),
         (r"not a valid secondary action|action.*not supported", "action_not_supported"),
         (r"value is not settable|not settable", "value_not_settable"),
         (r"stale element|fresh element index", "element_not_found"),
         (r"windowStale|window stale", "window_stale"),
-        (r"window_not_focused|keyboard input requires.*window.*focused|target window.*focused", "window_not_focused"),
+        (r"window_not_focused|occluded by another window|no visible window owns screen coordinate|keyboard input requires.*window.*focused|target window.*focused", "window_not_focused"),
         (r"screenshot_failed|screenshot.*failed|screen recording|payload cap", "screenshot_failed"),
         (r"window_not_found|No top-level(?: AT-SPI| UI Automation)? window|has no (?:on-screen |accessibility )?window|could not match accessibility window|unknown window(?:_index| id)?", "window_not_found"),
         (r"permission|desktop session|DBUS|XDG_RUNTIME_DIR|AT-SPI", "permission_denied"),
@@ -316,16 +317,23 @@ mod tests {
     #[test]
     fn maps_legacy_errors_in_priority_order() {
         for (text, code) in [
+            ("own_app_protected: cannot operate TerminalX", "own_app_protected"),
+            ("ownAppProtected", "own_app_protected"),
             ("appNotFound: editor", "app_not_found"),
             ("app blocked: Bitwarden", "app_blocked"),
             ("hotkey requires xdotool", "unsupported_capability"),
             ("unsupported mouse button", "invalid_argument"),
+            ("invalid_argument: x and y are out of window bounds", "invalid_argument"),
             ("not a valid secondary action", "action_not_supported"),
             ("value is not settable", "value_not_settable"),
             ("stale element AT-SPI", "element_not_found"),
             ("windowStale", "window_stale"),
             (
                 "keyboard input requires the window to be focused",
+                "window_not_focused",
+            ),
+            (
+                "screen coordinate (10, 20) is occluded by another window (pid 99)",
                 "window_not_focused",
             ),
             ("screenshot failed: permission", "screenshot_failed"),

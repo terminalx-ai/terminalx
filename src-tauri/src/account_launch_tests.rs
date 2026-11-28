@@ -226,7 +226,13 @@ fn a_claude_tab_on_an_added_account_runs_in_its_directory_trusts_there_and_switc
     assert_eq!(field(&tab, "launchedAccount"), Some(account.as_str()));
     let provider_id = tab.provider_session_id.clone().expect("the conversation has its id");
 
-    // Trust in the account's own `.claude.json`, not the person's.
+    // S-04: An unapproved checkout gets onboarding only, never silent auto-trust.
+    let config: Value = serde_json::from_slice(&std::fs::read(dir.join(".claude.json")).unwrap()).unwrap();
+    assert_eq!(config["hasCompletedOnboarding"], true);
+    assert!(config["projects"][rig.checkout()].is_null(), "unapproved checkout must not be silently auto-trusted");
+    // After explicit hash-bound approval, trust goes in the account's own `.claude.json`, not the person's.
+    claude::trust::approve(rig.checkout()).unwrap();
+    claude::trust::prepare_in(&dir, rig.checkout()).unwrap();
     let config: Value = serde_json::from_slice(&std::fs::read(dir.join(".claude.json")).unwrap()).unwrap();
     assert_eq!(config["projects"][rig.checkout()]["hasTrustDialogAccepted"], true);
     let person = PathBuf::from(store::state_home_env().unwrap()).join("test-user-home/.claude.json");
@@ -357,9 +363,14 @@ fn a_tab_that_asks_for_no_account_starts_on_this_macs_login_as_before() {
     assert_eq!(field(&tab, "launchedAccount"), None, "nothing is written for This Mac's login");
     assert_eq!(tab.unknown, before.unknown);
     assert!(crate::agent_keys::running("claude").into_iter().find(|tab| tab.session_id == rig.session).unwrap().current, "counted as on the login new tabs get");
-    // Trust where it always went.
+    // S-04: Onboarding goes in the person's config; trust only after explicit approval.
     let person = PathBuf::from(store::state_home_env().unwrap()).join("test-user-home/.claude.json");
-    let config: Value = serde_json::from_slice(&std::fs::read(person).unwrap()).unwrap();
+    let config: Value = serde_json::from_slice(&std::fs::read(&person).unwrap()).unwrap();
+    assert_eq!(config["hasCompletedOnboarding"], true);
+    assert!(config["projects"][rig.checkout()].is_null(), "unapproved checkout must not be silently auto-trusted");
+    claude::trust::approve(rig.checkout()).unwrap();
+    claude::trust::prepare(rig.checkout()).unwrap();
+    let config: Value = serde_json::from_slice(&std::fs::read(&person).unwrap()).unwrap();
     assert_eq!(config["projects"][rig.checkout()]["hasTrustDialogAccepted"], true);
     assert_eq!(account_dirs(CliKind::Claude, Some(&tab)), (None, None));
     assert!(crate::session_ops::session_account_env(&index::get(rig.session).unwrap()).is_empty());

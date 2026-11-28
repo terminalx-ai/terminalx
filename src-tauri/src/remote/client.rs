@@ -73,6 +73,8 @@ pub fn decode_pairing_code(code: &str) -> Result<PairingOffer> {
     let offer: PairingOffer = serde_json::from_value(value).context("incomplete pairing offer")?;
     if !valid_base64url_32(&offer.relay.invite_token)
         || offer.relay.relay_host_id.len() != 16
+        || !super::host::valid_relay_origin(&offer.relay.director_url)
+        || !super::host::valid_relay_origin(&offer.relay.cell_url)
         || !matches!(offer.scope.as_str(), "runtime" | "session")
         || offer.device_token.is_empty()
     {
@@ -842,7 +844,7 @@ mod tests {
             json!({
                 "v": 2, "endpoint": "relay:abcdefghijklmnop", "deviceToken": "device-token-0123456789", "publicKeyB64": general_purpose::STANDARD.encode([1u8; 32]),
                 "scope": "runtime", "identityMode": "authenticate",
-                "relay": { "v": 1, "directorUrl": "https://relay.example", "cellUrl": "https://cell.example", "assignmentEpoch": 3,
+                "relay": { "v": 1, "directorUrl": "https://relay.terminalx.ai", "cellUrl": "https://cell-1.relay.terminalx.ai", "assignmentEpoch": 3,
                     "relayHostId": "abcdefghijklmnop", "inviteToken": invite, "inviteExpiresAt": 1, "e2eeFraming": 2 }
             })
             .to_string(),
@@ -858,6 +860,25 @@ mod tests {
         assert!(decode_pairing_code(&offer_code("short")).is_err());
         let v1 = general_purpose::URL_SAFE_NO_PAD.encode(json!({ "v": 1 }).to_string());
         assert!(decode_pairing_code(&v1).is_err());
+        // Untrusted or plaintext HTTP relay origins must be rejected.
+        for (director, cell) in [
+            ("http://relay.terminalx.ai", "https://cell-1.relay.terminalx.ai"),
+            ("https://relay.terminalx.ai", "http://cell-1.relay.terminalx.ai"),
+            ("https://evil.example", "https://cell-1.relay.terminalx.ai"),
+            ("https://relay.terminalx.ai", "https://169.254.169.254"),
+            ("https://relay.terminalx.ai.evil.com", "https://cell-1.relay.terminalx.ai"),
+        ] {
+            let bad = general_purpose::URL_SAFE_NO_PAD.encode(
+                json!({
+                    "v": 2, "endpoint": "relay:abcdefghijklmnop", "deviceToken": "device-token-0123456789", "publicKeyB64": general_purpose::STANDARD.encode([1u8; 32]),
+                    "scope": "runtime", "identityMode": "authenticate",
+                    "relay": { "v": 1, "directorUrl": director, "cellUrl": cell, "assignmentEpoch": 3,
+                        "relayHostId": "abcdefghijklmnop", "inviteToken": invite, "inviteExpiresAt": 1, "e2eeFraming": 2 }
+                })
+                .to_string(),
+            );
+            assert!(decode_pairing_code(&bad).is_err(), "{director} / {cell}");
+        }
     }
 
     #[test]
@@ -880,7 +901,7 @@ mod tests {
             json!({
                 "v": 2, "endpoint": "relay:abcdefghijklmnop", "deviceToken": "device-token-0123456789", "publicKeyB64": general_purpose::STANDARD.encode([1u8; 32]),
                 "scope": "runtime", "identityMode": "authenticate",
-                "relay": { "v": 1, "directorUrl": "https://relay.example", "cellUrl": "https://cell.example", "assignmentEpoch": 3,
+                "relay": { "v": 1, "directorUrl": "https://relay.terminalx.ai", "cellUrl": "https://cell-1.relay.terminalx.ai", "assignmentEpoch": 3,
                     "relayHostId": "abcdefghijklmnop", "inviteToken": invite, "inviteExpiresAt": now_ms() + 600_000, "e2eeFraming": 2 }
             })
             .to_string(),

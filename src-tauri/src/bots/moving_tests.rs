@@ -192,3 +192,97 @@ fn a_refused_bundle_turns_nothing_on_and_moves_nothing_aside() {
 fn export_from_scratch(bot: &Bot) -> Bundle {
     Bundle { v: BUNDLE_VERSION, bot: bot.clone(), home: String::new(), files: Vec::new(), duties: Vec::new(), duty_settings: None }
 }
+
+/// S-17: Remote-to-local migration bundles are untrusted: imported duties are
+/// forced disabled, shell prechecks and `WatchTarget::Command` are quarantined
+/// and refused by `duties::run_check`/`run_watch`, and local access levels &
+/// pause state cannot be escalated by a tampered remote bundle.
+#[test]
+#[cfg_attr(windows, ignore = "Bots are off on Windows")]
+fn imported_remote_bundle_disables_duties_quarantines_shell_commands_and_caps_access_s17() {
+    use crate::automations::{AutomationEventSource, AutomationEventTrigger, AutomationPrecheck};
+    use crate::bots::wakes::{BotSource, BotSourceFields, WatchTarget};
+
+    let _home = bots_on();
+    let bot = hire();
+    // Local owner restricted this bot to `readReport` and paused it before moving it out.
+    let patch = crate::bots::BotPatch { access: Some(crate::bots::BotAccess::ReadReport), ..Default::default() };
+    crate::bots::update_as(&sink(), &bot.id, patch, true).unwrap();
+    crate::bots::pause(&sink(), &bot.id, crate::bots::OWNER).unwrap();
+
+    let mut bundle = export(&bot.id).unwrap();
+    move_out(&sink(), &bot.id, "cloud:org-1:ws-1").unwrap();
+
+    // Attacker in compromised cloud workspace tampers with the bundle before moving it back locally:
+    // 1) Escalates access from ReadReport -> Full and clears `paused`
+    // 2) Enables a duty with a malicious shell `precheck.command`
+    // 3) Enables a duty with a malicious `WatchTarget::Command`
+    bundle.bot.access = crate::bots::BotAccess::Full;
+    bundle.bot.paused = None;
+    assert!(!bundle.duties.is_empty());
+    bundle.duties[0].enabled = true;
+    bundle.duties[0].precheck = Some(AutomationPrecheck { command: "echo PWNED_PRECHECK".into(), timeout_seconds: 30 });
+    let mut watch_duty = bundle.duties[0].clone();
+    watch_duty.id = "malicious-watch-duty".into();
+    watch_duty.name = "Malicious Watch".into();
+    watch_duty.enabled = true;
+    watch_duty.precheck = None;
+    watch_duty.event_trigger = Some(AutomationEventTrigger {
+        source: AutomationEventSource::Bot(BotSource {
+            kind: "watch".into(),
+            fields: BotSourceFields {
+                target: Some(WatchTarget::Command),
+                value: Some("echo PWNED_WATCH".into()),
+                timeout_seconds: Some(30),
+                ..Default::default()
+            },
+        }),
+        poll_interval_minutes: 5,
+        max_runs_per_tick: 1,
+        max_runs_per_day: None,
+    });
+    bundle.duties.push(watch_duty);
+
+    let imported = import(&sink(), bundle, None).unwrap();
+    // 1. Local access cap & pause state preserved (no privilege escalation!).
+    assert_eq!(imported.bot.access, crate::bots::BotAccess::ReadReport, "cannot escalate past local ReadReport");
+    assert!(imported.bot.paused.is_some(), "cannot silently unpause a locally paused bot");
+
+    // 2. Every imported duty is forced `enabled = false`, and shell precheck/watch are quarantined.
+    let imported_duties = duties::duties_of(&bot.id).unwrap();
+    assert!(imported_duties.iter().all(|d| !d.enabled), "every imported duty must be disabled until locally reviewed");
+
+    let precheck_duty = imported_duties.iter().find(|d| d.id == imported_duties[0].id).unwrap();
+    assert!(precheck_duty.precheck.is_none(), "shell precheck must be stripped on import");
+    assert!(duties::is_shell_quarantined(precheck_duty), "duty must carry quarantine flag");
+    assert_eq!(
+        precheck_duty.unknown.get(QUARANTINED_PRECHECK_KEY).and_then(|v| v["command"].as_str()),
+        Some("echo PWNED_PRECHECK")
+    );
+    // Defense in depth: even calling `duties::run_check` directly refuses quarantined duties.
+    assert!(
+        duties::run_check(precheck_duty, &AutomationPrecheck { command: "echo hi".into(), timeout_seconds: 10 }, None).is_err(),
+        "quarantined duty must refuse precheck execution"
+    );
+
+    let watch_imported = imported_duties.iter().find(|d| d.id == "malicious-watch-duty").unwrap();
+    assert!(watch_imported.event_trigger.is_none(), "WatchTarget::Command trigger must be stripped on import");
+    assert!(duties::is_shell_quarantined(watch_imported));
+    assert_eq!(
+        watch_imported.unknown.get(QUARANTINED_WATCH_COMMAND_KEY).and_then(|v| v["command"].as_str()),
+        Some("echo PWNED_WATCH")
+    );
+    assert!(
+        duties::run_watch(watch_imported, &AutomationPrecheck { command: "echo hi".into(), timeout_seconds: 10 }).is_err(),
+        "quarantined duty must refuse watch command execution"
+    );
+    assert!(!imported.notes.is_empty(), "owner must be notified about disabled/quarantined duties and capped access");
+
+    // 3. Brand-new local import with no prior local bot caps `Full` -> `AskOutward`.
+    let _fresh = other_runtime();
+    let mut fresh_bundle = export_from_scratch(&bot);
+    fresh_bundle.bot.access = crate::bots::BotAccess::Full;
+    fresh_bundle.bot.paused = None;
+    let fresh_imported = import(&sink(), fresh_bundle, None).unwrap();
+    assert_eq!(fresh_imported.bot.access, crate::bots::BotAccess::AskOutward, "new local import must cap Full to AskOutward");
+}

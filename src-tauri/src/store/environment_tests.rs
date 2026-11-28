@@ -17,23 +17,23 @@ fn plain_values_live_in_the_index_and_secrets_only_in_the_keychain() {
     let dir = tempfile::tempdir().unwrap();
     let secrets = MemorySecrets::default();
     let store = Store { root: dir.path().into(), secrets: &secrets };
-    store.save(USER, vec![input("API_TOKEN", "tok-private-1", true), input("NODE_OPTIONS", "--max-old-space-size=8192", false)], None).unwrap();
-    store.save("repository:/repo/.git", vec![input("NODE_OPTIONS", "--inspect", false)], None).unwrap();
+    store.save(USER, vec![input("API_TOKEN", "tok-private-1", true), input("APP_OPTIONS", "--max-old-space-size=8192", false)], None).unwrap();
+    store.save("repository:/repo/.git", vec![input("APP_OPTIONS", "--inspect", false)], None).unwrap();
     let index = std::fs::read_to_string(dir.path().join("environment.json")).unwrap();
     assert!(index.contains("--max-old-space-size=8192"), "the plain value is stored plainly");
     assert!(!index.contains("tok-private-1"));
 
     let launch = store.resolve(Some("repository:/repo/.git".into())).unwrap();
     assert_eq!(launch.values["API_TOKEN"], "tok-private-1");
-    assert_eq!(launch.values["NODE_OPTIONS"], "--inspect", "the repository overrides Personal");
-    assert_eq!(store.resolve(None).unwrap().values["NODE_OPTIONS"], "--max-old-space-size=8192");
+    assert_eq!(launch.values["APP_OPTIONS"], "--inspect", "the repository overrides Personal");
+    assert_eq!(store.resolve(None).unwrap().values["APP_OPTIONS"], "--max-old-space-size=8192");
 
     // A name is in one place only; an edit can move it between them.
     assert!(store.save(USER, vec![input("API_TOKEN", "again", false)], None).is_err());
-    store.save(USER, vec![input("NODE_OPTIONS", "now-a-secret", true)], Some("NODE_OPTIONS")).unwrap();
+    store.save(USER, vec![input("APP_OPTIONS", "now-a-secret", true)], Some("APP_OPTIONS")).unwrap();
     let index = std::fs::read_to_string(dir.path().join("environment.json")).unwrap();
     assert!(!index.contains("now-a-secret") && !index.contains("--max-old-space-size"));
-    assert_eq!(store.resolve(None).unwrap().values["NODE_OPTIONS"], "now-a-secret");
+    assert_eq!(store.resolve(None).unwrap().values["APP_OPTIONS"], "now-a-secret");
 
     // A scope with only plain values needs no Keychain item at all.
     let only_plain = MemorySecrets::default();
@@ -115,7 +115,7 @@ fn no_secret_value_reaches_settings_files_logs_or_the_diagnostics_export() {
     let secrets = MemorySecrets::default();
     let store = Store { root: dir.path().into(), secrets: &secrets };
     let repo = "repository:/code/app/.git";
-    store.save(USER, vec![input("OPENAI_API_KEY", SECRET, true), input("NODE_OPTIONS", "--inspect", false)], None).unwrap();
+    store.save(USER, vec![input("OPENAI_API_KEY", SECRET, true), input("APP_OPTIONS", "--inspect", false)], None).unwrap();
     store.save(repo, vec![input("STRIPE_SECRET_KEY", SECRET, true)], None).unwrap();
     // Failures name the variable, never the value.
     for error in [
@@ -168,7 +168,7 @@ fn fields_a_newer_build_wrote_survive_a_save_here() {
     let dir = tempfile::tempdir().unwrap();
     let secrets = MemorySecrets::default();
     let store = Store { root: dir.path().into(), secrets: &secrets };
-    store.save(USER, vec![input("NODE_OPTIONS", "--inspect", false)], None).unwrap();
+    store.save(USER, vec![input("APP_OPTIONS", "--inspect", false)], None).unwrap();
     let path = dir.path().join("environment.json");
     let mut index: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
     index[USER]["futureField"] = serde_json::json!({"kept": true});
@@ -208,4 +208,45 @@ fn watch_state_skips_unchanged_environment_and_wakes_on_change_or_retry() {
     super::super::write_atomic(&env_path, br#"{"user":{"names":[],"revision":"r1"}}"#).unwrap();
     let stamp2 = super::super::file_stamp(&env_path).unwrap();
     assert!(watch.should_refresh(stamp2, true, &attempts, now));
+}
+
+#[test]
+fn dangerous_loader_shell_and_interpreter_env_vars_are_rejected() {
+    for blocked in [
+        "BASH_ENV",
+        "ENV",
+        "ZDOTDIR",
+        "IFS",
+        "CDPATH",
+        "SHELL",
+        "SHELLOPTS",
+        "BASHOPTS",
+        "PROMPT_COMMAND",
+        "NODE_OPTIONS",
+        "NODE_PATH",
+        "PYTHONSTARTUP",
+        "PYTHONPATH",
+        "RUBYOPT",
+        "PERL5OPT",
+        "GIT_SSH_COMMAND",
+        "GIT_EXEC_PATH",
+        "DYLD_INSERT_LIBRARIES",
+        "DYLD_LIBRARY_PATH",
+        "LD_PRELOAD",
+        "LD_LIBRARY_PATH",
+        "LD_AUDIT",
+        "BASH_FUNC_x",
+        "OPENCODE_SERVER_PASSWORD",
+    ] {
+        assert!(
+            validate_name(blocked).is_err(),
+            "dangerous variable {blocked} must be rejected by validate_name"
+        );
+    }
+    for allowed in ["API_URL", "DATABASE_URL", "APP_OPTIONS", "OPENAI_API_KEY", "EDITOR"] {
+        assert!(
+            validate_name(allowed).is_ok(),
+            "benign variable {allowed} should remain allowed"
+        );
+    }
 }

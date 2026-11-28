@@ -117,7 +117,7 @@ export function MarkdownEditor({
           />
         ) : value.trim() ? (
           <div className="max-h-80 min-h-16 overflow-y-auto scrollbar-thin">
-            <Markdown text={value} />
+            <Markdown text={value} webLinksOnly remoteImages={false} />
           </div>
         ) : (
           <div className="min-h-16 text-[13px] text-faint">Nothing to preview.</div>

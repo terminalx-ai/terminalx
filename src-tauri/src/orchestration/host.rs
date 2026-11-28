@@ -997,9 +997,9 @@ mod tests {
         // At the fork, not at the result nor in the worker's worktree.
         assert!(dir.starts_with(root.path()));
         assert_eq!(git(&dir, &["rev-parse", "HEAD"]), fork);
-        let ran = super::verify::run_command(&dir, "sh check.sh", false, std::time::Duration::from_secs(10));
+        let ran = super::verify::run_command(&dir, "grep -qx good state", false, std::time::Duration::from_secs(10));
         assert_eq!((ran.passed, ran.exit_code), (false, Some(1)));
-        assert!(super::verify::run_command(&worker, "sh check.sh", false, std::time::Duration::from_secs(10)).passed);
+        assert!(super::verify::run_command(&worker, "grep -qx good state", false, std::time::Duration::from_secs(10)).passed);
         // What a command leaves in it goes before the next check; what is ignored stays.
         std::fs::write(dir.join("left-over"), "x").unwrap();
         std::fs::create_dir_all(dir.join("target")).unwrap();

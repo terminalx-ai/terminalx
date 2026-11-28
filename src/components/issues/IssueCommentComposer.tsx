@@ -97,7 +97,7 @@ function OutgoingItem({ post, author, onRetry, onDiscard }: { post: OutgoingComm
           )}
         </div>
         <div className={cn("mt-0.5 text-[13px]", !failed && !post.posted && "opacity-60")}>
-          <Markdown text={post.body} />
+          <Markdown text={post.body} webLinksOnly remoteImages={false} />
         </div>
         {failed && (
           <div role="alert" className="mt-1.5 flex flex-wrap items-center gap-2 rounded-md bg-destructive/10 px-2 py-1.5 text-[11px] text-destructive">

@@ -60,7 +60,7 @@ export function IssueMarkdownEditor({
         />
       ) : (
         <div className="min-h-40 rounded-md px-3 py-2 hairline" data-testid="markdown-preview">
-          {value.trim() ? <Markdown text={value} /> : <div className="text-sm text-faint">Nothing to preview.</div>}
+          {value.trim() ? <Markdown text={value} webLinksOnly remoteImages={false} /> : <div className="text-sm text-faint">Nothing to preview.</div>}
         </div>
       )}
     </div>

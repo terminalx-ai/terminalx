@@ -32,8 +32,44 @@ const CITED_FILE_HREF_PREFIX = "streamdown:terminalx-file/";
 const EXTERNAL_DOCUMENT_EXTENSIONS = new Set([
   "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "pages", "numbers", "key",
   "odt", "ods", "odp", "rtf", "epub", "mobi",
-  "zip", "gz", "bz2", "xz", "7z", "rar", "tar", "dmg", "iso", "exe", "dll", "bin",
+  "zip", "gz", "bz2", "xz", "7z", "rar", "tar",
 ]);
+
+/**
+ * S-05 / S-25: Executable, script, bundle, shortcut, disk image, HTML, and SVG
+ * extensions that must NEVER be launched via OS default handlers.
+ */
+const BLOCKED_EXTERNAL_EXTENSIONS = new Set([
+  "app", "command", "tool", "action", "workflow", "applescript", "scpt", "scptd", "osax",
+  "pkg", "mpkg", "dmg", "iso", "img", "webloc", "inetloc", "term", "terminal",
+  "mobileconfig", "prefpane", "kext", "plugin", "bundle", "framework", "xpc", "service",
+  "qlgenerator", "mdimporter", "saver",
+  "sh", "bash", "zsh", "fish", "csh", "tcsh", "ksh", "dash",
+  "py", "pyw", "rb", "pl", "pm", "php", "js", "mjs", "cjs", "ts", "mts", "cts", "lua", "awk",
+  "jar", "jnlp", "desktop", "appimage", "run", "bin", "elf", "so", "dylib", "out",
+  "deb", "rpm", "flatpak", "snap",
+  "exe", "bat", "cmd", "com", "msi", "msp", "mst", "msu",
+  "ps1", "psm1", "psd1", "vbs", "vbe", "vba", "wsf", "wsh", "hta", "scr", "pif",
+  "cpl", "msc", "inf", "reg", "lnk", "url", "dll", "sys", "ocx", "drv", "scf",
+  "settingcontent-ms", "appref-ms", "library-ms", "searchconnector-ms",
+  "html", "htm", "xhtml", "xht", "mhtml", "mht", "shtml", "svg", "svgz", "swf", "xml", "xsl", "xslt",
+]);
+
+export const BLOCKED_EXTERNAL_PATH_MESSAGE =
+  "Executable, script, bundle, HTML, and SVG files cannot be opened directly with a system application. Reveal the file in your file manager instead.";
+
+/** Whether `path` (or any bundle ancestor segment such as `Evil.app/...`) is blocked from direct OS launch. */
+export function isBlockedExternalPath(path: string): boolean {
+  const clean = path.split(/[?#]/)[0] ?? "";
+  for (const segment of clean.split(/[\\/]+/)) {
+    if (!segment) continue;
+    const dot = segment.lastIndexOf(".");
+    if (dot <= 0 || dot === segment.length - 1) continue;
+    const ext = segment.slice(dot + 1).toLowerCase();
+    if (BLOCKED_EXTERNAL_EXTENSIONS.has(ext)) return true;
+  }
+  return false;
+}
 
 /** Keep untrusted destinations inert while Streamdown sanitises the Markdown AST. */
 export function routedChatHref(href: string): string {
@@ -219,10 +255,12 @@ export async function openChatLink(destination: ChatLinkDestination, context: Ch
 
   const info = await inspectChatFile(destination, context);
   if (info.kind === "directory") {
+    if (isBlockedExternalPath(info.path)) throw new Error(BLOCKED_EXTERNAL_PATH_MESSAGE);
     await fs.openPath(info.path);
   } else if (canOpenInternally(info)) {
     openFile(context.sessionId, info.root, info.rel, destination.line ? { line: destination.line, col: destination.col } : undefined, context.cwd);
   } else {
+    if (isBlockedExternalPath(info.path)) throw new Error(BLOCKED_EXTERNAL_PATH_MESSAGE);
     await fs.openPath(info.path);
   }
 }
@@ -237,7 +275,12 @@ export async function openChatLinkExternally(destination: ChatLinkDestination, c
   if (destination.kind === "web" || destination.kind === "application") return openUrl(destination.href);
   if (destination.kind !== "local") throw new Error(destination.kind === "rejected" ? destination.reason : "This destination cannot be opened externally.");
   const target = info ?? (await inspectChatFile(destination, context));
+  if (isBlockedExternalPath(target.path)) throw new Error(BLOCKED_EXTERNAL_PATH_MESSAGE);
   await fs.openPath(target.path);
+}
+
+export function chatLinkNeedsExternalOpen(info: LocalPathInfo): boolean {
+  return info.kind === "directory" || !canOpenInternally(info);
 }
 
 export async function revealChatLink(destination: ChatLinkDestination, context: ChatLinkContext, info?: LocalPathInfo): Promise<void> {

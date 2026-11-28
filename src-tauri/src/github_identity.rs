@@ -11,7 +11,7 @@
 //!
 //! Asking GitHub is a network round trip, so answers are kept for a while.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
@@ -68,12 +68,15 @@ fn look_up(cwd: &Path) -> GithubIdentity {
     let email = crate::git::run(cwd, &["config", "--get", "user.email"]).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
     let repo = remote.as_deref().and_then(crate::issues::github_repo_from_url);
     let remote_host = remote.as_deref().map(|url| remote_host_kind(url).to_string());
-    // Over SSH, the key the folder uses names the account. A remote on a host
-    // alias is asked by that alias; anything else by github.com, where the
-    // folder's own SSH configuration still applies, since it is asked from there.
-    let host = remote.as_deref().and_then(ssh_host).unwrap_or_else(|| "github.com".into());
-    let https = remote.as_deref().is_some_and(|url| url.starts_with("http://") || url.starts_with("https://"));
-    let greeted = if https { None } else { ssh_greeting(cwd, &host).as_deref().and_then(login_in_greeting) };
+    // Probe SSH only when origin is an explicit SSH remote on GitHub (or an
+    // explicitly configured `gh` host) with a validated hostname. Never fall
+    // back to contacting github.com on `file://`, HTTPS, missing, or unknown
+    // remotes.
+    let configured = configured_gh_hosts();
+    let greeted = ssh_probe_host(remote.as_deref(), &configured)
+        .and_then(|host| ssh_greeting(cwd, &host))
+        .as_deref()
+        .and_then(login_in_greeting);
     match greeted {
         Some(login) => GithubIdentity { login: Some(login), source: Some("ssh".into()), email, repo, remote_host },
         None => {
@@ -81,6 +84,74 @@ fn look_up(cwd: &Path) -> GithubIdentity {
             GithubIdentity { source: login.as_ref().map(|_| "gh".into()), login, email, repo, remote_host }
         }
     }
+}
+
+/// Hosts explicitly configured in `gh` (`GH_HOST`, `hosts.yml`, or legacy
+/// `config.yml`). Only host names are read; tokens are ignored.
+fn configured_gh_hosts() -> BTreeSet<String> {
+    let mut hosts = BTreeSet::new();
+    if let Ok(gh_host) = std::env::var("GH_HOST") {
+        let host = gh_host.trim().trim_end_matches('.').to_ascii_lowercase();
+        if !host.is_empty() && crate::ssh_containment::validate_hostname(&host).is_ok() {
+            hosts.insert(host);
+        }
+    }
+    let config_dir = [("GH_CONFIG_DIR", ""), ("XDG_CONFIG_HOME", "gh")]
+        .into_iter()
+        .find_map(|(key, suffix)| std::env::var_os(key).filter(|v| !v.is_empty()).map(|p| PathBuf::from(p).join(suffix)))
+        .or_else(|| {
+            #[cfg(windows)]
+            if let Some(path) = std::env::var_os("AppData").filter(|v| !v.is_empty()) {
+                return Some(PathBuf::from(path).join("GitHub CLI"));
+            }
+            dirs::home_dir().map(|home| home.join(".config/gh"))
+        });
+    if let Some(dir) = config_dir {
+        hosts.extend(configured_gh_hosts_in(&dir));
+    }
+    hosts
+}
+
+fn configured_gh_hosts_in(config_dir: &Path) -> BTreeSet<String> {
+    type Hosts = std::collections::BTreeMap<String, serde::de::IgnoredAny>;
+    #[derive(Deserialize, Default)]
+    struct Config { #[serde(default)] hosts: Hosts }
+    let hosts: Hosts = std::fs::read(config_dir.join("hosts.yml")).ok()
+        .and_then(|bytes| serde_yaml::from_slice(&bytes).ok()).unwrap_or_default();
+    let hosts = if hosts.is_empty() {
+        std::fs::read(config_dir.join("config.yml")).ok()
+            .and_then(|bytes| serde_yaml::from_slice::<Config>(&bytes).ok()).unwrap_or_default().hosts
+    } else {
+        hosts
+    };
+    hosts.into_keys()
+        .map(|host| host.trim().trim_end_matches('.').to_ascii_lowercase())
+        .filter(|host| crate::ssh_containment::validate_hostname(host).is_ok())
+        .collect()
+}
+
+/// Whether `remote` may be probed via SSH greeting, returning the validated
+/// SSH host/alias when allowed.
+///
+/// Multi-label `github.<other>` domains (such as `github.attacker.com`) are
+/// NOT probed unless explicitly listed in `configured_gh_hosts`; only
+/// `github.com`, `*.github.com` (with valid non-empty labels), single-label
+/// `github` / `github-*` SSH aliases, or explicitly configured `gh` hosts are
+/// permitted.
+fn ssh_probe_host(remote: Option<&str>, configured_gh_hosts: &BTreeSet<String>) -> Option<String> {
+    let url = remote?.trim();
+    if url.is_empty() {
+        return None;
+    }
+    let host = ssh_host(url)?;
+    crate::ssh_containment::validate_hostname(&host).ok()?;
+    let normalized = host.to_ascii_lowercase();
+    let single_label_github_alias = !normalized.contains('.')
+        && (normalized == "github"
+            || normalized.strip_prefix("github").is_some_and(|suffix| suffix.starts_with('-') && suffix.len() > 1));
+    let trusted_github_domain = normalized == "github.com" || normalized.ends_with(".github.com");
+    let allowed = trusted_github_domain || single_label_github_alias || configured_gh_hosts.contains(&normalized);
+    allowed.then_some(host)
 }
 
 /// Where a remote is hosted, by the name of its host: `github` (an SSH alias
@@ -177,25 +248,25 @@ pub fn active_login_in_status(text: &str) -> Option<String> {
 }
 
 fn ssh_greeting(cwd: &Path, host: &str) -> Option<String> {
+    crate::ssh_containment::validate_hostname(host).ok()?;
     let ssh = crate::binpath::resolve("ssh").unwrap_or_else(|| PathBuf::from("ssh"));
     let _request = crate::github_process::scope();
     let destination = format!("git@{host}");
     let command = || {
         let mut command = Command::new(&ssh);
         command.current_dir(cwd).env("PATH", crate::binpath::login_path())
-            .args(["-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-o", "StrictHostKeyChecking=accept-new",
-                "-o", "ControlMaster=no", "-o", "ControlPath=none", "-o", "ControlPersist=no"]);
+            .args(crate::ssh_containment::IDENTITY_PROBE_OPTIONS);
         command
     };
     // Destination control options do not constrain a nested ProxyJump client.
-    // Verify the effective route under the same request, before any connection.
+    // Verify the effective route and read-only host-key policy before any connection.
     let mut probe = command();
-    probe.args(["-G", &destination]);
+    probe.args(["-G", "--", &destination]);
     let configuration = crate::github_process::output(probe, SSH_PATIENCE, None).ok()?;
     if !configuration.status.success() { return None; }
-    crate::ssh_containment::direct_configuration(&configuration.stdout).ok()?;
+    crate::ssh_containment::direct_identity_probe_configuration(&configuration.stdout).ok()?;
     let mut command = command();
-    command.args(crate::ssh_containment::OPTIONS).arg(destination);
+    command.args(crate::ssh_containment::OPTIONS).args(["--", &destination]);
     // GitHub closes the greeting with exit 1; it is not a success check.
     let out = crate::github_process::output(command, SSH_PATIENCE, None).ok()?;
     let mut text = String::from_utf8_lossy(&out.stderr).into_owned();
@@ -287,5 +358,52 @@ mod tests {
         assert_eq!(active_login_in_status(second).as_deref(), Some("two"));
         assert_eq!(active_login_in_status("  ✓ Logged in to github.com as older-gh (oauth_token)\n  - Active account: true\n").as_deref(), Some("older-gh"));
         assert_eq!(active_login_in_status("You are not logged into any GitHub hosts. Run gh auth login to authenticate.\n"), None);
+    }
+
+    #[test]
+    fn ssh_probe_is_gated_on_github_or_configured_gh_hosts_and_never_falls_back() {
+        let empty = BTreeSet::new();
+        assert_eq!(ssh_probe_host(Some("git@github.com:owner/repo.git"), &empty).as_deref(), Some("github.com"));
+        assert_eq!(ssh_probe_host(Some("ssh://git@github.com/owner/repo.git"), &empty).as_deref(), Some("github.com"));
+        assert_eq!(ssh_probe_host(Some("git@ssh.github.com:owner/repo.git"), &empty).as_deref(), Some("ssh.github.com"));
+        assert_eq!(ssh_probe_host(Some("git@github-work:owner/repo.git"), &empty).as_deref(), Some("github-work"));
+        for blocked in [
+            None,
+            Some(""),
+            Some("file:///tmp/repo.git"),
+            Some("/tmp/local-bare.git"),
+            Some("../relative.git"),
+            Some("https://github.com/owner/repo.git"),
+            Some("http://github.com/owner/repo.git"),
+            Some("git@gitlab.com:group/repo.git"),
+            Some("git@bitbucket.org:team/repo.git"),
+            Some("git@attacker.invalid:owner/repo.git"),
+            Some("git@github.attacker.com:owner/repo.git"),
+            Some("ssh://git@github.evil.example/owner/repo.git"),
+            Some("git@.github.com:owner/repo.git"),
+            Some("git@..github.com:owner/repo.git"),
+            Some("ssh://git@169.254.169.254/owner/repo.git"),
+            Some("git@-oProxyCommand=id:owner/repo.git"),
+            Some("git@github.com.evil.test:owner/repo.git"),
+        ] {
+            assert_eq!(ssh_probe_host(blocked, &empty), None, "{blocked:?}");
+        }
+        let configured = BTreeSet::from(["ghe.corp.example".to_string(), "github.corp.example".to_string()]);
+        assert_eq!(ssh_probe_host(Some("git@ghe.corp.example:org/repo.git"), &configured).as_deref(), Some("ghe.corp.example"));
+        assert_eq!(ssh_probe_host(Some("git@github.corp.example:org/repo.git"), &configured).as_deref(), Some("github.corp.example"));
+        assert_eq!(ssh_probe_host(Some("https://ghe.corp.example/org/repo.git"), &configured), None);
+        assert_eq!(ssh_probe_host(Some("git@other.corp.example:org/repo.git"), &configured), None);
+    }
+
+    #[test]
+    fn configured_gh_hosts_reads_only_valid_host_names() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("hosts.yml"),
+            "ghe.corp.example:\n  user: dev\n  oauth_token: ignored\n-badhost:\n  user: bad\n",
+        ).unwrap();
+        let hosts = configured_gh_hosts_in(dir.path());
+        assert!(hosts.contains("ghe.corp.example"));
+        assert!(!hosts.contains("-badhost"));
     }
 }

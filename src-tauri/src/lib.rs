@@ -461,6 +461,7 @@ pub fn run() {
     let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| account::focus_main_window(app)));
     builder
         .manage(media::MediaServer::default())
+        .plugin(navigation_guard_plugin())
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
@@ -616,7 +617,7 @@ pub fn run() {
             work_claims.start(app.handle().clone());
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![
+        .invoke_handler(wrap_invoke_handler(tauri::generate_handler![
             transparency::reduce_transparency,
             configuration_commands::configuration_resolve,
             configuration_commands::settings_files_list,
@@ -1368,7 +1369,7 @@ pub fn run() {
             computer::computer_permission_status,
             computer::computer_open_permission,
             computer::computer_reset_permissions,
-        ])
+        ]))
         .on_menu_event(|app, event| {
             native_menu::dispatch(app, event.id().as_ref());
             if event.id().as_ref() == status::MENU_ID {
@@ -1388,6 +1389,9 @@ pub fn run() {
         })
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::DragDrop(drag) = event {
+                if let tauri::DragDropEvent::Drop { paths, .. } = drag {
+                    files::allow_explicit_paths(paths);
+                }
                 drag_text::on_drag_drop(drag);
             }
             // The floating window is a view, not the app: closing it puts it
@@ -1467,4 +1471,160 @@ pub fn run() {
                 state.browser.shutdown();
             }
         });
+}
+
+/// Only allow webviews to navigate to TerminalX's own app origin (plus the
+/// Vite dev server in debug builds). Blocks `javascript:`, `file:`, `data:`,
+/// `terminalx://`, and external `http:`/`https:` navigations from untrusted
+/// terminal links or injected markup.
+#[cfg(feature = "desktop")]
+pub(crate) fn is_allowed_webview_navigation(url: &tauri::Url) -> bool {
+    match url.scheme() {
+        "tauri" => url.host_str() == Some("localhost"),
+        "http" | "https" if url.host_str() == Some("tauri.localhost") => true,
+        #[cfg(debug_assertions)]
+        "http" if matches!(url.host_str(), Some("localhost" | "127.0.0.1")) && url.port() == Some(1420) => true,
+        _ => false,
+    }
+}
+
+#[cfg(feature = "desktop")]
+fn navigation_guard_plugin<R: tauri::Runtime>() -> tauri::plugin::TauriPlugin<R> {
+    tauri::plugin::Builder::new("navigation-guard")
+        .on_navigation(|webview, url| {
+            let allowed = is_allowed_webview_navigation(url);
+            if !allowed {
+                log::warn!("blocked webview navigation in {:?} to scheme {}", webview.label(), url.scheme());
+            }
+            allowed
+        })
+        .build()
+}
+
+/// Privileged commands enforced centrally at the Tauri invoke boundary so
+/// `floating` and `chat-*` windows cannot bypass `capabilities/floating.json`
+/// even for commands implemented in sub-modules.
+#[cfg(feature = "desktop")]
+pub(crate) fn is_main_window_only_command(command: &str) -> bool {
+    matches!(
+        command,
+        "app_update_check"
+            | "app_update_download"
+            | "app_update_apply"
+            | "local_runtime_restart"
+            | "local_runtime_restart_for_window"
+            | "local_runtime_replace"
+            | "local_runtime_plan_update"
+            | "local_runtime_hand_over_installed"
+            | "set_local_runtime_quit_behavior"
+            | "data_privacy_set"
+            | "open_local_path"
+            | "export_file"
+            | "save_attachment_copy"
+            | "configuration_write"
+            | "configuration_review"
+            | "open_settings_file"
+            | "update_user_preferences"
+            | "create_settings_file"
+            | "reset_user_setting"
+            | "environment_save"
+            | "environment_delete"
+            | "agent_login_save_key"
+            | "agent_login_remove_key"
+            | "agent_login_set_mode"
+            | "agent_login_set_base_url"
+            | "agent_login_import_shell"
+            | "agent_accounts_add_start"
+            | "agent_accounts_add_key"
+            | "agent_accounts_remove"
+            | "agent_accounts_set_default"
+            | "set_agent_executable"
+            | "opencode_connect"
+            | "opencode_disconnect"
+            | "install_cli_tool"
+            | "install_cli_skill"
+            | "computer_open_permission"
+            | "computer_reset_permissions"
+            | "machines_set_allow_operating"
+            | "machines_set_listen"
+            | "machines_create_code"
+            | "machines_approve"
+            | "machines_decline"
+            | "machines_revoke"
+            | "machines_disconnect"
+            | "machines_remove"
+            | "cloud_agent_purge_workspace"
+    )
+}
+
+#[cfg(feature = "desktop")]
+fn wrap_invoke_handler<R, F>(inner: F) -> impl Fn(tauri::ipc::Invoke<R>) -> bool + Send + Sync + 'static
+where
+    R: tauri::Runtime,
+    F: Fn(tauri::ipc::Invoke<R>) -> bool + Send + Sync + 'static,
+{
+    move |invoke| {
+        let cmd = invoke.message.command();
+        if is_main_window_only_command(cmd)
+            && commands::require_main_window_label(invoke.message.webview().label()).is_err()
+        {
+            invoke
+                .resolver
+                .reject("This action is only allowed from the main TerminalX window.");
+            return true;
+        }
+        inner(invoke)
+    }
+}
+
+#[cfg(all(test, feature = "desktop"))]
+mod navigation_guard_tests {
+    use super::{is_allowed_webview_navigation, is_main_window_only_command};
+
+    #[test]
+    fn webview_navigation_allows_only_app_origins() {
+        assert!(is_allowed_webview_navigation(&tauri::Url::parse("tauri://localhost/index.html").unwrap()));
+        assert!(is_allowed_webview_navigation(&tauri::Url::parse("https://tauri.localhost/index.html").unwrap()));
+        assert!(is_allowed_webview_navigation(&tauri::Url::parse("http://tauri.localhost/").unwrap()));
+        for blocked in [
+            "https://example.com/",
+            "http://127.0.0.1:8080/admin",
+            "file:///etc/passwd",
+            "javascript:alert(1)",
+            "terminalx://join/abc",
+            "data:text/html,<script>alert(1)</script>",
+            "tauri://evil.example/index.html",
+        ] {
+            let url = tauri::Url::parse(blocked).unwrap();
+            assert!(!is_allowed_webview_navigation(&url), "{blocked} must be blocked");
+        }
+    }
+
+    #[test]
+    fn floating_and_chat_windows_are_blocked_from_privileged_runtime_and_updater_commands() {
+        for privileged in [
+            "app_update_check",
+            "app_update_download",
+            "app_update_apply",
+            "local_runtime_restart",
+            "local_runtime_replace",
+            "export_file",
+            "open_local_path",
+            "data_privacy_set",
+            "configuration_write",
+        ] {
+            assert!(is_main_window_only_command(privileged), "{privileged} must require main window");
+        }
+        // Quick-chat commands remain allowed from floating/chat-* windows.
+        for floating_ok in [
+            "send_message",
+            "list_sessions",
+            "create_quick_chat",
+            "floating_hide",
+            "floating_open_in_main",
+            "local_runtime_status",
+        ] {
+            assert!(!is_main_window_only_command(floating_ok), "{floating_ok} must remain available to floating windows");
+        }
+    }
 }

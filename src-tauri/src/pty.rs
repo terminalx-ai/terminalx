@@ -1247,12 +1247,87 @@ fn npm_launcher_target(launcher: &std::path::Path) -> Option<Vec<String>> {
     Some(vec![node.to_string_lossy().into_owned(), script.to_string_lossy().into_owned()])
 }
 
+/// Single-quote a word for POSIX shells (`sh`, `bash`, `zsh`, `dash`, `ksh`).
+/// Do NOT pass POSIX-quoted strings directly to `fish -c` (in `fish`, `\`
+/// escapes `'` inside single quotes); use [`fish_quote`] or pass direct argv.
+pub(crate) fn posix_quote(text: &str) -> String {
+    format!("'{}'", text.replace('\'', "'\\''"))
+}
+
+/// Single-quote a word for `fish`, escaping both `\` and `'` inside `'...'`
+/// so `\'` sequences can never break out of single quotes.
+pub(crate) fn fish_quote(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push('\'');
+    for ch in text.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '\'' => out.push_str("\\'"),
+            _ => out.push(ch),
+        }
+    }
+    out.push('\'');
+    out
+}
+
+/// True when `shell` refers to the `fish` shell (by executable file name).
+pub(crate) fn is_fish_shell(shell: &str) -> bool {
+    std::path::Path::new(shell)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name == "fish" || name.eq_ignore_ascii_case("fish.exe"))
+}
+
+/// Build the argv passed to a Unix shell `sh` when launching an optional
+/// POSIX-quoted `command` in `cwd`.
+///
+/// - For structured commands (`posix_words` succeeds):
+///   - Applies untrusted Claude Code launch hardening (`--setting-sources user`).
+///   - For `fish`: re-quotes every argument with [`fish_quote`] so `\'` can never
+///     break out of single quotes.
+///   - For POSIX shells (`sh`, `bash`, `zsh`, `dash`, `ksh`): passes the exact
+///     argv via `-l -c 'exec "$@"' _ <argv...>` so the shell never re-parses
+///     untrusted argument text.
+/// - For complex shell scripts (`posix_words` returns `None`):
+///   - For `fish`: runs `exec /bin/sh -c <fish_quote(c)>` so POSIX script syntax
+///     and quotes are never misinterpreted by `fish`.
+///   - For POSIX shells: runs `-l -c "exec {c}"`.
+#[cfg(unix)]
+fn unix_shell_args(sh: &str, command: Option<&str>, cwd: &str) -> Vec<String> {
+    let known_shell = sh.ends_with("zsh") || sh.ends_with("bash") || sh.ends_with("fish") || (sh.ends_with("sh") && !sh.ends_with("pwsh"));
+    match command {
+        Some(c) if known_shell => {
+            if let Some(mut argv) = posix_words(c).filter(|w| !w.is_empty()) {
+                crate::harness::claude::pty::harden_untrusted_launch_argv(&mut argv, cwd);
+                if is_fish_shell(sh) {
+                    let quoted: Vec<String> = argv.iter().map(|w| fish_quote(w)).collect();
+                    vec!["-l".into(), "-c".into(), format!("exec {}", quoted.join(" "))]
+                } else {
+                    let mut args = Vec::with_capacity(argv.len() + 4);
+                    args.push("-l".into());
+                    args.push("-c".into());
+                    args.push("exec \"$@\"".into());
+                    args.push("_".into());
+                    args.extend(argv);
+                    args
+                }
+            } else if is_fish_shell(sh) {
+                vec!["-l".into(), "-c".into(), format!("exec /bin/sh -c {}", fish_quote(c))]
+            } else {
+                vec!["-l".into(), "-c".into(), format!("exec {c}")]
+            }
+        }
+        Some(c) => vec!["-c".into(), c.into()],
+        None if known_shell => vec!["-l".into()],
+        None => Vec::new(),
+    }
+}
+
 /// Split `command` into words as a POSIX shell would, for quoting only:
 /// `'...'`, `"..."` with `\` escapes, and `\` outside quotes. None when it
 /// uses anything a shell would expand or run (`$`, `` ` ``, `;`, `|`, `&`,
 /// `<`, `>`, `(`, `)`, `*`, `?`, `~` at a word's start) outside single quotes,
 /// or a quote is left open.
-#[cfg(windows)]
 pub(crate) fn posix_words(command: &str) -> Option<Vec<String>> {
     let mut words = Vec::new();
     let mut word = String::new();
@@ -1559,8 +1634,6 @@ impl Terminals {
         let pair = pty.openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 }).map_err(|e| anyhow!("openpty: {e}"))?;
         let sh = shell();
         let mut cmd = CommandBuilder::new(executable.map_or(std::ffi::OsStr::new(&sh), |program| program.executable));
-        // A login shell so PATH and prompts match the reader's own terminal.
-        let known_shell = sh.ends_with("zsh") || sh.ends_with("bash") || sh.ends_with("fish") || sh.ends_with("sh") && !sh.ends_with("pwsh");
         if let Some(program) = executable {
             for arg in program.args { cmd.arg(arg); }
             // A lifecycle hook is not a provider/CLI call on behalf of an agent.
@@ -1568,30 +1641,54 @@ impl Terminals {
                 if name.to_string_lossy().starts_with("RACCOON_") { cmd.env_remove(name); }
             }
             cmd.env_remove("TERMINALX_SESSION_ID");
-        } else { match command {
-            Some(c) if known_shell => {
-                cmd.arg("-l");
-                cmd.arg("-c");
-                cmd.arg(format!("exec {c}"));
+        } else {
+            #[cfg(unix)]
+            for arg in unix_shell_args(&sh, command, cwd) {
+                cmd.arg(arg);
             }
             #[cfg(windows)]
-            Some(c) => match direct_program(c) {
-                // An agent's launch line names its CLI by absolute path in
-                // POSIX quoting, which PowerShell and cmd do not read: the CLI
-                // is started itself, with those words as its arguments.
-                Some(argv) => cmd = CommandBuilder::from_argv(argv.into_iter().map(std::ffi::OsString::from).collect()),
-                None => for arg in windows_command_args(&sh, c) { cmd.arg(arg); },
-            },
-            #[cfg(unix)]
-            Some(c) => {
-                cmd.arg("-c");
-                cmd.arg(c);
+            {
+                let known_shell = sh.ends_with("zsh") || sh.ends_with("bash") || sh.ends_with("fish") || (sh.ends_with("sh") && !sh.ends_with("pwsh"));
+                match command {
+                    Some(c) if known_shell => {
+                        if let Some(mut argv) = posix_words(c).filter(|w| !w.is_empty()) {
+                            crate::harness::claude::pty::harden_untrusted_launch_argv(&mut argv, cwd);
+                            if is_fish_shell(&sh) {
+                                let quoted: Vec<String> = argv.iter().map(|w| fish_quote(w)).collect();
+                                cmd.arg("-l");
+                                cmd.arg("-c");
+                                cmd.arg(format!("exec {}", quoted.join(" ")));
+                            } else {
+                                cmd.arg("-l");
+                                cmd.arg("-c");
+                                cmd.arg("exec \"$@\"");
+                                cmd.arg("_");
+                                for arg in argv { cmd.arg(arg); }
+                            }
+                        } else if is_fish_shell(&sh) {
+                            cmd.arg("-l");
+                            cmd.arg("-c");
+                            cmd.arg(format!("exec /bin/sh -c {}", fish_quote(c)));
+                        } else {
+                            cmd.arg("-l");
+                            cmd.arg("-c");
+                            cmd.arg(format!("exec {c}"));
+                        }
+                    }
+                    Some(c) => match direct_program(c) {
+                        Some(mut argv) => {
+                            crate::harness::claude::pty::harden_untrusted_launch_argv(&mut argv, cwd);
+                            cmd = CommandBuilder::from_argv(argv.into_iter().map(std::ffi::OsString::from).collect());
+                        }
+                        None => for arg in windows_command_args(&sh, c) { cmd.arg(arg); },
+                    },
+                    None if known_shell => {
+                        cmd.arg("-l");
+                    }
+                    None => {}
+                }
             }
-            None if known_shell => {
-                cmd.arg("-l");
-            }
-            None => {}
-        } }
+        }
         cmd.cwd(cwd);
         let (session_env, uninherited) = session_environment(&environment.values);
         for (name, value) in &session_env {
@@ -4245,5 +4342,108 @@ time.sleep(60)
         terminals.spawn(sink, "tab:agent-1", agent_spec).unwrap();
         assert!(terminals.panes.lock().unwrap()["tab:agent-1"].screen_active.load(Ordering::Acquire));
         terminals.kill_all();
+    }
+
+    // ---- S-06 security regression tests ----
+
+    /// Minimal faithful parser for fish single-quoted strings (`\` escapes `\` and `'`).
+    fn parse_fish_single_quoted(s: &str) -> Result<String, String> {
+        let mut chars = s.chars();
+        if chars.next() != Some('\'') {
+            return Err("missing opening quote".into());
+        }
+        let mut out = String::new();
+        while let Some(c) = chars.next() {
+            match c {
+                '\\' => match chars.next() {
+                    Some(esc @ ('\\' | '\'')) => out.push(esc),
+                    Some(other) => {
+                        out.push('\\');
+                        out.push(other);
+                    }
+                    None => return Err("dangling backslash".into()),
+                },
+                '\'' => {
+                    if chars.next().is_some() {
+                        return Err(format!("broke out of fish single quotes in: {s}"));
+                    }
+                    return Ok(out);
+                }
+                other => out.push(other),
+            }
+        }
+        Err("unterminated single quote".into())
+    }
+
+    #[test]
+    fn fish_quote_neutralizes_backslash_quote_breakout_payloads() {
+        let payloads = [
+            r"foo\' ; touch /tmp/pwned ; echo '",
+            r"branch\'$(id)`id`",
+            r"a\\\'b'\''c",
+            r"/tmp/repo\'/worktree",
+            "title with 'single' and \\' and \\\\ and $HOME and (cmd)",
+        ];
+        for payload in payloads {
+            // Confirm why POSIX quoting breaks fish:
+            let posix = posix_quote(payload);
+            if payload.contains(r"\'") {
+                assert!(
+                    parse_fish_single_quoted(&posix).is_err(),
+                    "POSIX quote must fail fish parser on \\' payload: {posix}"
+                );
+            }
+            // Confirm fish_quote round-trips cleanly with zero breakout:
+            let fished = fish_quote(payload);
+            assert_eq!(
+                parse_fish_single_quoted(&fished).unwrap(),
+                payload,
+                "fish_quote failed round-trip for {payload:?}: {fished}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_shell_args_prevents_fish_injection_and_passes_direct_argv_on_posix() {
+        let _home = crate::store::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().to_str().unwrap();
+        let evil_title = r"PR #1 \' ; touch /tmp/pwned ; echo '";
+        let posix_cmd = format!(
+            "{} --session-id {} --name {} --settings {}",
+            posix_quote("/opt/claude"),
+            posix_quote("sid-1"),
+            posix_quote(evil_title),
+            posix_quote("{}")
+        );
+
+        // On POSIX shells (zsh/bash/sh), structured commands pass direct argv via `exec "$@"`.
+        let zsh_args = unix_shell_args("/bin/zsh", Some(&posix_cmd), cwd);
+        assert_eq!(zsh_args[0], "-l");
+        assert_eq!(zsh_args[1], "-c");
+        assert_eq!(zsh_args[2], "exec \"$@\"");
+        assert_eq!(zsh_args[3], "_");
+        assert_eq!(zsh_args[4], "/opt/claude");
+        assert!(zsh_args.contains(&evil_title.to_string()), "exact literal title passed as argv: {zsh_args:?}");
+        // Untrusted cwd also automatically receives `--setting-sources user` (S-04).
+        assert!(
+            zsh_args.windows(2).any(|w| w == ["--setting-sources", "user"]),
+            "untrusted claude launch must enforce --setting-sources user: {zsh_args:?}"
+        );
+
+        // On fish, structured commands are re-quoted with fish_quote (escaping both `\` and `'`).
+        let fish_args = unix_shell_args("/opt/homebrew/bin/fish", Some(&posix_cmd), cwd);
+        assert_eq!(fish_args[0], "-l");
+        assert_eq!(fish_args[1], "-c");
+        let exec_line = &fish_args[2];
+        assert!(exec_line.starts_with("exec "), "{exec_line}");
+        assert!(exec_line.contains(&fish_quote(evil_title)), "title must be fish-quoted: {exec_line}");
+        assert!(!exec_line.contains(&posix_quote(evil_title)), "must not leave raw POSIX quote in fish command: {exec_line}");
+
+        // Complex POSIX scripts on fish are wrapped in `/bin/sh -c <fish_quote>` instead of raw fish parsing.
+        let complex = r"echo 'a\' && exit 0";
+        let fish_complex = unix_shell_args("/usr/bin/fish", Some(complex), cwd);
+        assert_eq!(fish_complex[2], format!("exec /bin/sh -c {}", fish_quote(complex)));
     }
 }

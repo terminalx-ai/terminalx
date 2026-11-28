@@ -2,9 +2,12 @@ import { useCallback, useEffect, useMemo, useRef, useState, type AnchorHTMLAttri
 import type { ExtraProps } from "streamdown";
 import { Popover } from "radix-ui";
 import {
+  BLOCKED_EXTERNAL_PATH_MESSAGE,
   chatLinkCanOpenInternally,
   chatLinkCopyValue,
+  chatLinkNeedsExternalOpen,
   inspectChatFile,
+  isBlockedExternalPath,
   isCitedFileHref,
   openChatLink,
   openChatLinkExternally,
@@ -14,6 +17,7 @@ import {
   revealChatLink,
   type ChatLinkContext,
 } from "@/lib/chatLinks";
+import { openFile } from "@/lib/editors";
 import { getPrefs, setPrefs, usePrefs } from "@/lib/prefs";
 import type { LocalPathInfo } from "@/lib/api";
 import { Button } from "@/components/ui/button";
@@ -54,9 +58,12 @@ export function ChatLink({ context = EXTERNAL_CONTEXT, href = "", children, clas
   const [inspected, setInspected] = useState<{ identity: string; info: LocalPathInfo } | null>(null);
   const [inspecting, setInspecting] = useState<string | null>(null);
   const [chooserIdentity, setChooserIdentity] = useState<string | null>(null);
+  const [confirmExternal, setConfirmExternal] = useState<{ identity: string; info: LocalPathInfo } | null>(null);
   const [rememberChoice, setRememberChoice] = useState(false);
   const asksForBrowser = destination.kind === "web" && browserPreference === "ask";
   const chooserOpen = asksForBrowser && chooserIdentity === identity;
+  const confirmOpen = destination.kind === "local" && confirmExternal?.identity === identity ? confirmExternal.info : null;
+  const popoverOpen = chooserOpen || !!confirmOpen;
   const info = inspected?.identity === identity ? inspected.info : null;
 
   useEffect(() => {
@@ -64,6 +71,7 @@ export function ChatLink({ context = EXTERNAL_CONTEXT, href = "", children, clas
     setInspected(null);
     setInspecting(null);
     setChooserIdentity(null);
+    setConfirmExternal(null);
     setRememberChoice(false);
   }, [identity]);
 
@@ -97,6 +105,15 @@ export function ChatLink({ context = EXTERNAL_CONTEXT, href = "", children, clas
     run(() => copyText(chatLinkCopyValue(destination, info ?? undefined)));
   }, [destination, info, run]);
 
+  const requestExternalOpen = useCallback((resolved: LocalPathInfo) => {
+    setError(null);
+    if (isBlockedExternalPath(resolved.path)) {
+      setError(BLOCKED_EXTERNAL_PATH_MESSAGE);
+      return;
+    }
+    setConfirmExternal({ identity, info: resolved });
+  }, [identity]);
+
   const activate = (alternate = false) => {
     const browser = hasWorkspace ? getPrefs().linkBrowser : "system";
     if (destination.kind === "web") {
@@ -114,7 +131,33 @@ export function ChatLink({ context = EXTERNAL_CONTEXT, href = "", children, clas
       run(() => openChatLinkInBrowser(destination, context, browser));
       return;
     }
+    if (destination.kind === "local") {
+      run(async () => {
+        const resolved = await inspectChatFile(destination, context);
+        if (currentIdentity.current !== identity) return;
+        if (!chatLinkNeedsExternalOpen(resolved)) {
+          openFile(context.sessionId, resolved.root, resolved.rel, destination.line ? { line: destination.line, col: destination.col } : undefined, context.cwd);
+          return;
+        }
+        requestExternalOpen(resolved);
+      });
+      return;
+    }
     run(() => openChatLink(destination, context, element.current));
+  };
+
+  const confirmAndOpenExternal = () => {
+    const target = confirmOpen;
+    setConfirmExternal(null);
+    if (!target || destination.kind !== "local") return;
+    run(() => openChatLinkExternally(destination, context, target));
+  };
+
+  const revealConfirmed = () => {
+    const target = confirmOpen;
+    setConfirmExternal(null);
+    if (!target || destination.kind !== "local") return;
+    run(() => revealChatLink(destination, context, target));
   };
 
   const chooseBrowser = (browser: "system" | "terminalx") => {
@@ -162,14 +205,15 @@ export function ChatLink({ context = EXTERNAL_CONTEXT, href = "", children, clas
 
   return (
     <span className="contents">
-      <Popover.Root open={chooserOpen} onOpenChange={(open) => { if (!open) setChooserIdentity(null); }}>
+      <Popover.Root open={popoverOpen} onOpenChange={(open) => { if (!open) { setChooserIdentity(null); setConfirmExternal(null); } }}>
         <ContextMenu onOpenChange={(open) => {
           if (open) {
             setChooserIdentity(null);
+            setConfirmExternal(null);
             inspect();
           }
         }}>
-          {destination.kind === "web" ? (
+          {destination.kind === "web" || destination.kind === "local" ? (
             <Popover.Trigger asChild>
               <ContextMenuTrigger asChild>{anchor}</ContextMenuTrigger>
             </Popover.Trigger>
@@ -184,12 +228,14 @@ export function ChatLink({ context = EXTERNAL_CONTEXT, href = "", children, clas
               <ContextMenuItem disabled>Checking destination…</ContextMenuItem>
             ) : info ? <>
               {info.kind === "directory" ? (
-                <ContextMenuItem onSelect={() => run(() => openChatLink(destination, context))}>Open in {fileManager}</ContextMenuItem>
+                <ContextMenuItem onSelect={() => requestExternalOpen(info)}>Open in {fileManager}</ContextMenuItem>
               ) : <>
                 {chatLinkCanOpenInternally(info) && (
-                  <ContextMenuItem onSelect={() => run(() => openChatLink(destination, context))}>Open internally</ContextMenuItem>
+                  <ContextMenuItem onSelect={() => openFile(context.sessionId, info.root, info.rel, destination.line ? { line: destination.line, col: destination.col } : undefined, context.cwd)}>Open internally</ContextMenuItem>
                 )}
-                <ContextMenuItem onSelect={() => run(() => openChatLinkExternally(destination, context, info))}>Open with default application</ContextMenuItem>
+                {!isBlockedExternalPath(info.path) && (
+                  <ContextMenuItem onSelect={() => requestExternalOpen(info)}>Open with default application</ContextMenuItem>
+                )}
                 <ContextMenuItem onSelect={() => run(() => revealChatLink(destination, context, info))}>{revealInFileManager}</ContextMenuItem>
               </>}
             </> : (
@@ -202,22 +248,49 @@ export function ChatLink({ context = EXTERNAL_CONTEXT, href = "", children, clas
           </ContextMenuContent>
         </ContextMenu>
         <Popover.Portal>
-          <Popover.Content
-            aria-label="Open website link"
-            sideOffset={4}
-            align="start"
-            collisionPadding={8}
-            className="z-(--z-menu) flex flex-col rounded-lg bg-popover p-1 text-popover-foreground shadow-surface hairline animate-fade-in"
-            onClick={(event) => event.stopPropagation()}
-          >
-            {/* Explicit tab stops also work with macOS WebKit's default keyboard navigation. */}
-            <Button tabIndex={0} variant="ghost" className="justify-start text-popover-foreground" onClick={() => chooseBrowser("system")}>Open in system browser</Button>
-            <Button tabIndex={0} variant="ghost" className="justify-start text-popover-foreground" onClick={() => chooseBrowser("terminalx")}>Open in TerminalX browser</Button>
-            <label className="mt-1 flex cursor-pointer items-center gap-2 border-t border-hairline px-3 py-2 text-xs">
-              <input type="checkbox" tabIndex={0} checked={rememberChoice} onChange={(event) => setRememberChoice(event.target.checked)} className="accent-primary" />
-              Remember my choice
-            </label>
-          </Popover.Content>
+          {confirmOpen ? (
+            <Popover.Content
+              aria-label="Confirm external open"
+              sideOffset={4}
+              align="start"
+              collisionPadding={8}
+              className="z-(--z-menu) flex max-w-md flex-col gap-2 rounded-lg bg-popover p-3 text-popover-foreground shadow-surface hairline animate-fade-in"
+              onClick={(event) => event.stopPropagation()}
+            >
+              <p className="text-xs font-medium text-foreground">
+                {confirmOpen.kind === "directory" ? `Open this folder in ${fileManager}?` : "Open this file with its default application?"}
+              </p>
+              <code className="break-all rounded bg-well px-2 py-1 font-mono text-[11px] text-muted-foreground" data-testid="confirm-external-path">
+                {confirmOpen.path}
+              </code>
+              <div className="flex flex-wrap items-center justify-end gap-1.5 pt-1">
+                <Button tabIndex={0} size="xs" variant="ghost" onClick={() => setConfirmExternal(null)}>Cancel</Button>
+                {confirmOpen.kind === "file" && (
+                  <Button tabIndex={0} size="xs" variant="outline" onClick={revealConfirmed}>{revealInFileManager}</Button>
+                )}
+                <Button tabIndex={0} size="xs" variant="secondary" onClick={confirmAndOpenExternal}>
+                  {confirmOpen.kind === "directory" ? `Open in ${fileManager}` : "Open"}
+                </Button>
+              </div>
+            </Popover.Content>
+          ) : (
+            <Popover.Content
+              aria-label="Open website link"
+              sideOffset={4}
+              align="start"
+              collisionPadding={8}
+              className="z-(--z-menu) flex flex-col rounded-lg bg-popover p-1 text-popover-foreground shadow-surface hairline animate-fade-in"
+              onClick={(event) => event.stopPropagation()}
+            >
+              {/* Explicit tab stops also work with macOS WebKit's default keyboard navigation. */}
+              <Button tabIndex={0} variant="ghost" className="justify-start text-popover-foreground" onClick={() => chooseBrowser("system")}>Open in system browser</Button>
+              <Button tabIndex={0} variant="ghost" className="justify-start text-popover-foreground" onClick={() => chooseBrowser("terminalx")}>Open in TerminalX browser</Button>
+              <label className="mt-1 flex cursor-pointer items-center gap-2 border-t border-hairline px-3 py-2 text-xs">
+                <input type="checkbox" tabIndex={0} checked={rememberChoice} onChange={(event) => setRememberChoice(event.target.checked)} className="accent-primary" />
+                Remember my choice
+              </label>
+            </Popover.Content>
+          )}
         </Popover.Portal>
       </Popover.Root>
       {error && <span role="alert" className="ml-1 text-xs text-destructive">Could not open link: {error}</span>}

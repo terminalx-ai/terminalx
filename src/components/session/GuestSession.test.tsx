@@ -13,12 +13,28 @@ const mocks = vi.hoisted(() => ({
   role: "driver",
   events: [] as unknown[],
   listeners: new Set<(method: string, params: unknown) => void>(),
+  chatProps: null as Record<string, unknown> | null,
+  xtermOptions: null as Record<string, unknown> | null,
 }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn(async (command: string) => (command === "session_join_pending" ? "terminalx://join/abc" : undefined)) }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) }));
-vi.mock("@xterm/xterm", () => ({ Terminal: class {} }));
+vi.mock("@xterm/xterm", () => ({
+  Terminal: class {
+    constructor(options?: Record<string, unknown>) { mocks.xtermOptions = options ?? null; }
+    open() {}
+    resize() {}
+    write() {}
+    reset() {}
+    dispose() {}
+  },
+}));
 vi.mock("@/lib/account", () => ({ useAccount: () => ({ status: { state: "signed-in" } }), signIn: vi.fn() }));
-vi.mock("@/components/chat/Chat", () => ({ Chat: () => <div>Chat</div> }));
+vi.mock("@/components/chat/Chat", () => ({
+  Chat: (props: Record<string, unknown>) => {
+    mocks.chatProps = props;
+    return <div>Chat</div>;
+  },
+}));
 vi.mock("@/lib/sessionGuest", () => ({
   SessionGuestClient: {
     join: async () => ({
@@ -67,6 +83,8 @@ beforeEach(() => {
   mocks.tabStatus = "in_progress";
   mocks.role = "driver";
   mocks.events = [event({ type: "user_message", text: "start", images: [], queued: false } as Payload)];
+  mocks.chatProps = null;
+  mocks.xtermOptions = null;
 });
 afterEach(cleanup);
 
@@ -113,5 +131,13 @@ describe("a guest's Stop in a shared session", () => {
     await open();
     expect((screen.getByRole("button", { name: "Stop" }) as HTMLButtonElement).disabled).toBe(true);
     expect(stops()).toEqual([]);
+  });
+
+  it("S-05 & S-23: restricts guest Chat to webLinksOnly and passes explicit linkHandler to GuestTerminal", async () => {
+    await open();
+    expect(mocks.chatProps?.webLinksOnly).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "Terminal" }));
+    await waitFor(() => expect(mocks.xtermOptions).not.toBeNull());
+    expect(typeof (mocks.xtermOptions?.linkHandler as { activate?: unknown } | undefined)?.activate).toBe("function");
   });
 });

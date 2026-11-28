@@ -124,6 +124,7 @@ export const Chat = memo(function Chat({
   agent,
   onGoalCommand,
   onEditGoal,
+  webLinksOnly = false,
 }: {
   sessionId: string;
   tabId?: string;
@@ -195,6 +196,8 @@ export const Chat = memo(function Chat({
   onGoalCommand?: (command: string) => void;
   /** Puts the goal in the composer to change. */
   onEditGoal?: (objective: string) => void;
+  /** Restrict transcript Markdown to web links only (e.g. untrusted guest sessions). */
+  webLinksOnly?: boolean;
 }) {
   // Rebuilt only when a value changes: every turn is memoised on it.
   const [effort, permissionMode] = [turnSettings?.effort, turnSettings?.permissionMode];
@@ -546,6 +549,7 @@ export const Chat = memo(function Chat({
                 secondOpinionUnavailable={unavailable?.secondOpinion}
                 retryInNewChatUnavailable={isLast && !sending ? unavailable?.retryInNewChat : undefined}
                 agent={agent}
+                webLinksOnly={webLinksOnly}
               />
             );
           })}

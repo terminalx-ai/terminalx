@@ -299,6 +299,87 @@ try {
         $MaxDepth = $originalMaxDepth
     }
 
+    # S-18: own_app_protected guard rejects TerminalX/Raccoon/owner PID/release bundle id
+    $ownApp = [pscustomobject]@{
+        pid = 9999
+        executablePath = "C:\Program Files\TerminalX\terminalx.exe"
+        executableName = "terminalx"
+        appIdentifier = "com.terminalx.dev"
+        releaseBundleId = "com.terminalx.next"
+        appNames = @("TerminalX", "Raccoon")
+        windowClasses = @("terminalx", "raccoon")
+        allowOwnWindowsForTests = $false
+    }
+    Assert-TestEqual (Test-TerminalXOwnAppIdentity -TargetPid 9999 -Names @("CustomHost") -OwnApp $ownApp) $true "own app owner pid blocked"
+    Assert-TestEqual (Test-TerminalXOwnAppIdentity -TargetPid 42 -Names @("TerminalX") -OwnApp $ownApp) $true "own app name blocked"
+    Assert-TestEqual (Test-TerminalXOwnAppIdentity -TargetPid 42 -Names @("Raccoon") -OwnApp $ownApp) $true "own app raccoon blocked"
+    Assert-TestEqual (Test-TerminalXOwnAppIdentity -TargetPid 42 -Names @("com.terminalx.next") -OwnApp $ownApp) $true "own app release bundle blocked"
+    Assert-TestEqual (Test-TerminalXOwnAppIdentity -TargetPid 42 -Names @("Notepad") -OwnApp $ownApp) $false "benign app allowed"
+
+    foreach ($selector in @("TerminalX", "Raccoon", "com.terminalx.next", "pid:9999", "9999")) {
+        $threwOwn = $false
+        try {
+            Assert-TerminalXQueryAllowed $selector $ownApp
+        } catch {
+            if ($_.Exception.Message -like "own_app_protected:*") { $threwOwn = $true }
+        }
+        Assert-TestEqual $threwOwn $true "query '$selector' rejected with own_app_protected"
+    }
+
+    # S-26: coordinate bounds enforcement
+    $frame = New-TerminalXFrame 100 200 300 200
+    $validPt = Get-TerminalXScreenPoint ([pscustomobject]@{ x = 50; y = 75; element = $null }) $frame
+    Assert-TestEqual $validPt.x 150 "in-bounds screen x"
+    Assert-TestEqual $validPt.y 275 "in-bounds screen y"
+    foreach ($bad in @(@(-1, 10), @(10, -1), @(301, 10), @(10, 201))) {
+        $threwBounds = $false
+        try {
+            [void](Get-TerminalXScreenPoint ([pscustomobject]@{ x = $bad[0]; y = $bad[1]; element = $null }) $frame)
+        } catch {
+            if ($_.Exception.Message -like "*out of window bounds*") { $threwBounds = $true }
+        }
+        Assert-TestEqual $threwBounds $true "out-of-bounds ($($bad[0]), $($bad[1])) rejected"
+    }
+
+    # S-26: topmost-window hit-test verification
+    $fakeTarget = [pscustomobject]@{ Id = 5555; ProcessName = "notepad"; MainWindowTitle = "Notes"; MainWindowHandle = 12345 }
+    $origHitTest = Get-Item Function:\Get-TerminalXTopLevelWindowAtPoint
+    try {
+        function Get-TerminalXTopLevelWindowAtPoint([int]$ScreenX, [int]$ScreenY) {
+            [pscustomobject]@{ hwnd = [IntPtr]12345; pid = 5555; processName = "notepad"; executablePath = ""; className = "Notepad"; title = "Notes" }
+        }
+        Assert-TerminalXScreenPointOwnedByTarget $fakeTarget ([IntPtr]12345) $frame 150 250 $ownApp
+
+        function Get-TerminalXTopLevelWindowAtPoint([int]$ScreenX, [int]$ScreenY) {
+            [pscustomobject]@{ hwnd = [IntPtr]99999; pid = 9999; processName = "terminalx"; executablePath = ""; className = "TerminalX"; title = "Confirm" }
+        }
+        $threwOccludedTx = $false
+        try { Assert-TerminalXScreenPointOwnedByTarget $fakeTarget ([IntPtr]12345) $frame 150 250 $ownApp } catch {
+            if ($_.Exception.Message -like "own_app_protected:*") { $threwOccludedTx = $true }
+        }
+        Assert-TestEqual $threwOccludedTx $true "hit-test rejects TerminalX occlusion"
+
+        function Get-TerminalXTopLevelWindowAtPoint([int]$ScreenX, [int]$ScreenY) {
+            [pscustomobject]@{ hwnd = [IntPtr]88888; pid = 7777; processName = "1Password"; executablePath = ""; className = "1Password"; title = "Vault" }
+        }
+        $threwOccludedPw = $false
+        try { Assert-TerminalXScreenPointOwnedByTarget $fakeTarget ([IntPtr]12345) $frame 150 250 $ownApp } catch {
+            if ($_.Exception.Message -like "appBlocked*") { $threwOccludedPw = $true }
+        }
+        Assert-TestEqual $threwOccludedPw $true "hit-test rejects password manager occlusion"
+
+        function Get-TerminalXTopLevelWindowAtPoint([int]$ScreenX, [int]$ScreenY) {
+            [pscustomobject]@{ hwnd = [IntPtr]77777; pid = 8888; processName = "otherapp"; executablePath = ""; className = "Other"; title = "Other" }
+        }
+        $threwOccludedOther = $false
+        try { Assert-TerminalXScreenPointOwnedByTarget $fakeTarget ([IntPtr]12345) $frame 150 250 $ownApp } catch {
+            if ($_.Exception.Message -like "*occluded by another window*") { $threwOccludedOther = $true }
+        }
+        Assert-TestEqual $threwOccludedOther $true "hit-test rejects unrelated occluding window"
+    } finally {
+        Set-Item Function:\Get-TerminalXTopLevelWindowAtPoint $origHitTest.ScriptBlock
+    }
+
     Write-Output "windows-snapshot-render-tests-ok"
 } finally {
     Remove-Item -LiteralPath $operationPath -Force -ErrorAction SilentlyContinue

@@ -25,6 +25,7 @@ use tokio_util::{io::ReaderStream, sync::CancellationToken};
 pub use crate::media_types::media_type;
 
 struct Grant {
+    root: PathBuf,
     path: PathBuf,
     mime: String,
     cancelled: CancellationToken,
@@ -52,20 +53,28 @@ pub struct MediaFile {
 
 impl MediaServer {
     async fn open(&self, root: &Path, rel: &str) -> anyhow::Result<MediaFile> {
-        let mime = &media_type(Path::new(rel))
+        let rel_path = Path::new(rel);
+        anyhow::ensure!(
+            !rel.is_empty()
+                && rel_path
+                    .components()
+                    .all(|component| matches!(component, std::path::Component::Normal(_))),
+            "Media path must be relative to the selected workspace"
+        );
+        let mime = &media_type(rel_path)
             .ok_or_else(|| anyhow::anyhow!("Unsupported media format"))?
             .mime;
         let root = crate::paths::simplified(&tokio::fs::canonicalize(root).await?).to_path_buf();
-        let path = crate::paths::simplified(&tokio::fs::canonicalize(root.join(rel)).await?).to_path_buf();
+        let path = crate::paths::simplified(&tokio::fs::canonicalize(root.join(rel_path)).await?).to_path_buf();
         anyhow::ensure!(
             path.starts_with(&root),
             "Media path is outside the selected workspace"
         );
-        anyhow::ensure!(
-            tokio::fs::metadata(&path).await?.is_file(),
-            "Not a regular media file"
-        );
-        let file = tokio::fs::File::open(&path).await?;
+        let (root_for_open, path_for_open) = (root.clone(), path.clone());
+        let file = tokio::task::spawn_blocking(move || crate::workspace_file::open(&root_for_open, &path_for_open))
+            .await
+            .map_err(|e| anyhow::anyhow!("Media open failed: {e}"))??;
+        let file = tokio::fs::File::from_std(file);
         let metadata = file.metadata().await?;
         anyhow::ensure!(metadata.is_file(), "Not a regular media file");
         let mtime_ms = metadata
@@ -94,6 +103,7 @@ impl MediaServer {
         self.grants.lock().insert(
             token.clone(),
             Grant {
+                root,
                 path,
                 mime: mime.clone(),
                 cancelled: CancellationToken::new(),
@@ -117,8 +127,14 @@ pub async fn open_media_file(
     root: String,
     rel: String,
 ) -> Result<MediaFile, String> {
+    let (confined_root, confined_rel) = tokio::task::spawn_blocking(move || {
+        crate::files::resolve_confined_media_root(Path::new(&root), &rel)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
     server
-        .open(Path::new(&root), &rel)
+        .open(&confined_root, &confined_rel)
         .await
         .map_err(|e| e.to_string())
 }
@@ -134,10 +150,11 @@ async fn serve(
     method: Method,
     headers: HeaderMap,
 ) -> Result<Response<Body>, StatusCode> {
-    let (path, mime, cancelled) = {
+    let (root, path, mime, cancelled) = {
         let grants = grants.lock();
         let grant = grants.get(&token).ok_or(StatusCode::NOT_FOUND)?;
         (
+            grant.root.clone(),
             grant.path.clone(),
             grant.mime.clone(),
             grant.cancelled.clone(),
@@ -149,9 +166,15 @@ async fn serve(
     {
         return Err(StatusCode::FORBIDDEN);
     }
-    let mut file = tokio::fs::File::open(&path)
+    let (root_for_open, path_for_open) = (root.clone(), path.clone());
+    let opened = tokio::task::spawn_blocking(move || crate::workspace_file::open(&root_for_open, &path_for_open))
         .await
-        .map_err(|_| StatusCode::NOT_FOUND)?;
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let mut file = match opened {
+        Ok(std_file) => tokio::fs::File::from_std(std_file),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Err(StatusCode::NOT_FOUND),
+        Err(_) => return Err(StatusCode::FORBIDDEN),
+    };
     let metadata = file.metadata().await.map_err(|_| StatusCode::NOT_FOUND)?;
     if !metadata.is_file() || cancelled.is_cancelled() {
         return Err(StatusCode::NOT_FOUND);
@@ -374,5 +397,17 @@ mod tests {
             )
             .is_ok());
         }
+    }
+
+    #[tokio::test]
+    async fn media_server_rejects_absolute_and_parent_traversal_rel_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let outside_img = outside.path().join("secret.png");
+        std::fs::write(&outside_img, b"png").unwrap();
+        let server = MediaServer::default();
+        assert!(server.open(dir.path(), &outside_img.to_string_lossy()).await.is_err());
+        assert!(server.open(dir.path(), "../secret.png").await.is_err());
+        assert!(server.open(dir.path(), "").await.is_err());
     }
 }

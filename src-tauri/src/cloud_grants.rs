@@ -1926,7 +1926,7 @@ pub(crate) fn claude_endpoint_pin(base: &str) -> Vec<(String, String)> {
 }
 
 fn shell_quote(text: &str) -> String {
-    format!("'{}'", text.replace('\'', "'\\''"))
+    crate::pty::posix_quote(text)
 }
 
 /// Codex's `-c` overrides for a route: a `model_providers` entry of its own

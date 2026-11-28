@@ -282,8 +282,44 @@ describe("chat link actions", () => {
     fireEvent.contextMenu(screen.getByRole("link", { name: "file" }));
     const external = await screen.findByRole("menuitem", { name: "Open with default application" });
     fireEvent.click(external);
+    const confirmDialog = await screen.findByRole("dialog", { name: "Confirm external open" });
+    expect(confirmDialog.textContent).toContain("/tmp/new.txt");
+    expect(fs.openPath).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Open" }));
     await waitFor(() => expect(fs.openPath).toHaveBeenCalledWith("/tmp/new.txt"));
     expect(fs.openPath).not.toHaveBeenCalledWith("/tmp/old.txt");
+  });
+
+  it("S-05: shows exact resolved path confirmation before launching OS handler and blocks executables/bundles/SVG/HTML", async () => {
+    vi.mocked(fs.inspectPath).mockResolvedValueOnce({
+      path: "/workspace/docs/report.pdf",
+      root: "/workspace",
+      rel: "docs/report.pdf",
+      kind: "file",
+      text: false,
+    });
+    render(<ChatLink href="docs/report.pdf" context={context}>View docs</ChatLink>);
+    fireEvent.click(screen.getByRole("link", { name: "View docs" }));
+    const dialog = await screen.findByRole("dialog", { name: "Confirm external open" });
+    expect(dialog.textContent).toContain("/workspace/docs/report.pdf");
+    expect(fs.openPath).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(fs.openPath).not.toHaveBeenCalled();
+
+    // Clicking a disguised executable refuses direct OS execution.
+    cleanup();
+    vi.mocked(fs.inspectPath).mockResolvedValueOnce({
+      path: "/workspace/payload.command",
+      root: "/workspace",
+      rel: "payload.command",
+      kind: "file",
+      text: false,
+    });
+    render(<ChatLink href="payload.command" context={context}>Innocent label</ChatLink>);
+    fireEvent.click(screen.getByRole("link", { name: "Innocent label" }));
+    expect((await screen.findByRole("alert")).textContent).toContain("cannot be opened directly");
+    expect(fs.openPath).not.toHaveBeenCalled();
   });
 
   it("offers internal/default/copy actions for web destinations and reports handler failures", async () => {

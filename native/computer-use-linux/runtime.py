@@ -7,6 +7,7 @@ session, and print one JSON response.
 """
 
 import base64
+import ctypes
 import json
 import math
 import os
@@ -45,6 +46,32 @@ BLOCKED_APP_FRAGMENTS = (
     "nordpass",
     "proton pass",
 )
+OWN_APP_RELEASE_BUNDLE_ID = "com.terminalx.next"
+OWN_APP_FRAGMENTS = (
+    "terminalx",
+    "terminal-x",
+    "terminal x",
+    "com.terminalx",
+    "raccoon",
+)
+GENERIC_INTERPRETER_NAMES = frozenset({
+    "python",
+    "python3",
+    "sh",
+    "bash",
+    "zsh",
+    "dash",
+    "node",
+    "env",
+})
+TOP_LEVEL_ANCESTOR_ROLES = frozenset({
+    "application",
+    "desktop frame",
+    "frame",
+    "window",
+    "dialog",
+    "alert",
+})
 CLIPBOARD_COMMAND_TIMEOUT_SECONDS = 2
 CLIPBOARD_OWNER_SETTLE_SECONDS = 0.05
 CLIPBOARD_PASTE_SETTLE_SECONDS = 0.15
@@ -180,19 +207,178 @@ def restore_window(app, window=None):
     )
 
 
-def require_keyboard_focus(window, operation):
+def require_keyboard_focus(window, operation, own_app=None):
+    assert_no_protected_active_window(own_app)
     if has_state(window, Atspi.StateType.ACTIVE):
         return
     if operation.get("restoreWindow"):
         deadline = time.monotonic() + 0.5
         while time.monotonic() < deadline:
+            assert_no_protected_active_window(own_app)
             if has_state(window, Atspi.StateType.ACTIVE):
                 return
             time.sleep(0.05)
+        assert_no_protected_active_window(own_app)
         if has_state(window, Atspi.StateType.ACTIVE):
             return
         raise RuntimeError("window_not_focused: keyboard input requires the target window to be focused; restoreWindow was requested but the target window is still not focused; bring it forward manually or check desktop permissions")
     raise RuntimeError("window_not_focused: keyboard input requires the target window to be focused; retry with --restore-window")
+
+
+def process_executable_path(pid):
+    if not pid or int(pid) <= 0:
+        return ""
+    try:
+        return os.path.realpath(f"/proc/{int(pid)}/exe")
+    except OSError:
+        return ""
+
+
+def process_comm(pid):
+    if not pid or int(pid) <= 0:
+        return ""
+    try:
+        with open(f"/proc/{int(pid)}/comm", "r", encoding="utf-8", errors="replace") as handle:
+            return handle.read().strip()
+    except OSError:
+        return ""
+
+
+def _parse_proc_stat_fields(pid):
+    if not pid or int(pid) <= 0:
+        return None
+    try:
+        with open(f"/proc/{int(pid)}/stat", "r", encoding="utf-8", errors="replace") as handle:
+            raw = handle.read()
+    except OSError:
+        return None
+    close_paren = raw.rfind(")")
+    if close_paren < 0:
+        return None
+    fields = raw[close_paren + 2:].split()
+    if len(fields) < 3:
+        return None
+    try:
+        ppid = int(fields[1])
+        pgrp = int(fields[2])
+        return ppid, pgrp
+    except ValueError:
+        return None
+
+
+def process_parent_pid(pid):
+    parsed = _parse_proc_stat_fields(pid)
+    return parsed[0] if parsed else 0
+
+
+def process_group_id(pid):
+    parsed = _parse_proc_stat_fields(pid)
+    return parsed[1] if parsed else 0
+
+
+def is_descendant_pid(target_pid, ancestor_pid, max_depth=32):
+    target = int(target_pid or 0)
+    ancestor = int(ancestor_pid or 0)
+    if target <= 0 or ancestor <= 0:
+        return False
+    if target == ancestor:
+        return True
+    seen = {target}
+    current = target
+    for _ in range(max_depth):
+        parent = process_parent_pid(current)
+        if parent <= 1 or parent in seen:
+            return False
+        if parent == ancestor:
+            return True
+        seen.add(parent)
+        current = parent
+    return False
+
+
+def is_own_app_identity(*, pid=0, names=(), own_app=None):
+    normalized_names = [str(value or "").strip().lower() for value in names if str(value or "").strip()]
+    target_pid = int(pid or 0)
+    target_exe = ""
+    if target_pid > 0:
+        comm = process_comm(target_pid).lower()
+        if comm:
+            normalized_names.append(comm)
+        target_exe = process_executable_path(target_pid)
+        if target_exe:
+            normalized_names.append(os.path.basename(target_exe).lower())
+
+    release_id = str((own_app or {}).get("releaseBundleId") or OWN_APP_RELEASE_BUNDLE_ID).strip().lower()
+    if release_id and any(release_id in value for value in normalized_names):
+        return True
+
+    if own_app and bool(own_app.get("allowOwnWindowsForTests")):
+        return False
+
+    if any(fragment in value for fragment in OWN_APP_FRAGMENTS for value in normalized_names):
+        return True
+
+    if isinstance(own_app, dict):
+        owner_pid = int(own_app.get("pid") or 0)
+        if owner_pid > 0 and target_pid > 0:
+            if target_pid == owner_pid or is_descendant_pid(target_pid, owner_pid):
+                return True
+        owner_pgid = int(own_app.get("processGroupId") or 0)
+        if owner_pid > 0 and owner_pgid == owner_pid and target_pid > 0:
+            if process_group_id(target_pid) == owner_pgid:
+                return True
+        owner_exe = str(own_app.get("executablePath") or "").strip()
+        if owner_exe and target_exe:
+            try:
+                if os.path.realpath(target_exe) == os.path.realpath(owner_exe):
+                    return True
+            except OSError:
+                pass
+        owner_exe_name = str(own_app.get("executableName") or "").strip().lower()
+        if owner_exe_name and owner_exe_name not in GENERIC_INTERPRETER_NAMES:
+            if any(value == owner_exe_name for value in normalized_names):
+                return True
+        app_id = str(own_app.get("appIdentifier") or "").strip().lower()
+        if app_id and any(app_id in value for value in normalized_names):
+            return True
+        for extra_key in ("appNames", "windowClasses"):
+            for token in own_app.get(extra_key) or ():
+                needle = str(token or "").strip().lower()
+                if needle and any(needle in value for value in normalized_names):
+                    return True
+    return False
+
+
+def is_blocked_app_identity(names):
+    normalized_names = [str(value or "").strip().lower() for value in names if str(value or "").strip()]
+    return any(fragment in value for fragment in BLOCKED_APP_FRAGMENTS for value in normalized_names)
+
+
+def assert_query_allowed(query, own_app=None):
+    needle = str(query or "").strip()
+    if not needle:
+        return
+    lower = needle.lower()
+    query_pid = 0
+    if lower.startswith("pid:"):
+        query_pid = parse_positive_pid(lower[4:].strip()) or 0
+    elif lower.isdigit():
+        query_pid = parse_positive_pid(lower) or 0
+    if is_own_app_identity(pid=query_pid, names=[needle], own_app=own_app):
+        raise RuntimeError(f"own_app_protected: computer use cannot observe or operate TerminalX ({needle})")
+    if is_blocked_app_identity([needle]):
+        raise RuntimeError(f'appBlocked("{needle}")')
+
+
+def assert_no_protected_active_window(own_app=None):
+    for app in attempt(lambda: list(desktop_apps()), []) or []:
+        for _, win in windows_for(app):
+            if has_state(win, Atspi.StateType.ACTIVE):
+                names = [name_of(app), name_of(win)]
+                if is_own_app_identity(pid=pid_of(app), names=names, own_app=own_app):
+                    raise RuntimeError("own_app_protected: keyboard input was stopped because a TerminalX window has the keyboard focus")
+                if is_blocked_app_identity(names):
+                    raise RuntimeError(f'appBlocked("{name_of(app)}")')
 
 
 def app_matches(app, query):
@@ -200,7 +386,7 @@ def app_matches(app, query):
     if not needle:
         return False
     if needle.startswith("pid:"):
-        requested_pid = parse_positive_pid(needle[4:])
+        requested_pid = parse_positive_pid(needle[4:].strip())
         return requested_pid is not None and pid_of(app) == requested_pid
     if needle.isdigit() and int(needle) > 0 and pid_of(app) == int(needle):
         return True
@@ -212,17 +398,20 @@ def parse_positive_pid(value):
     return int(value) if value.isdigit() and int(value) > 0 else None
 
 
-def find_app(query):
+def find_app(query, own_app=None):
+    assert_query_allowed(query, own_app=own_app)
     for app in desktop_apps():
         if app_matches(app, query):
-            reject_blocked_app(app)
+            reject_blocked_app(app, own_app=own_app)
             return app
     raise RuntimeError(f'appNotFound("{query}")')
 
 
-def reject_blocked_app(app):
-    haystacks = [name_of(app).lower()] + [name_of(window).lower() for _, window in windows_for(app)]
-    if any(fragment in value for fragment in BLOCKED_APP_FRAGMENTS for value in haystacks):
+def reject_blocked_app(app, own_app=None):
+    haystacks = [name_of(app)] + [name_of(window) for _, window in windows_for(app)]
+    if is_own_app_identity(pid=pid_of(app), names=haystacks, own_app=own_app):
+        raise RuntimeError(f"own_app_protected: computer use cannot observe or operate {name_of(app)}")
+    if is_blocked_app_identity(haystacks):
         raise RuntimeError(f'appBlocked("{name_of(app)}")')
 
 
@@ -328,8 +517,31 @@ def is_secure_metadata(role, name, acc_id, state_set):
     return False
 
 
-def is_secure_node(node):
-    return is_secure_metadata(role_of(node), name_of(node), accessible_id(node), attempt(node.get_state_set))
+def is_secure_node(node, *, check_ancestors=True):
+    if node is None:
+        return False
+    if is_secure_metadata(role_of(node), name_of(node), accessible_id(node), attempt(node.get_state_set)):
+        return True
+    if not check_ancestors:
+        return False
+    protected_state = getattr(Atspi.StateType, "PROTECTED", None)
+    seen = {id(node)}
+    current = node
+    for _ in range(MAX_DEPTH):
+        parent = attempt(current.get_parent)
+        if parent is None or id(parent) in seen:
+            break
+        seen.add(id(parent))
+        parent_state = attempt(parent.get_state_set)
+        if state_set_contains(parent_state, protected_state):
+            return True
+        parent_role = role_of(parent)
+        if parent_role.lower() in TOP_LEVEL_ANCESTOR_ROLES:
+            break
+        if is_secure_metadata(parent_role, name_of(parent), accessible_id(parent), parent_state):
+            return True
+        current = parent
+    return False
 
 
 def accessible_id(node):
@@ -350,7 +562,7 @@ def record(node, index, path, window_rect):
         "controlType": role,
         "localizedControlType": role,
         "className": str(attempt(node.get_toolkit_name, "") or ""),
-        "value": string_value(node, is_secure=is_secure_metadata(role, name, acc_id, state_set)),
+        "value": string_value(node, is_secure=is_secure_node(node)),
         "isSelected": state_set_contains(state_set, getattr(Atspi.StateType, "SELECTED", None)),
         "nativeWindowHandle": 0,
         "frame": rect.to_json() if rect else None,
@@ -358,15 +570,34 @@ def record(node, index, path, window_rect):
     }
 
 
-def selected_text_from_node(node):
-    iface = text_iface(node) if node is not None else None
+def selected_text_from_node(node, *, is_secure=None):
+    if node is None:
+        return None
+    if is_secure is None:
+        is_secure = is_secure_node(node)
+    iface = text_iface(node)
     if iface is None:
         return None
     selections = attempt(lambda: Atspi.Text.get_text_selections(iface), [])
     if not selections:
         return None
     selection = selections[0]
-    return attempt(lambda: Atspi.Text.get_text(iface, selection.start_offset, selection.end_offset))
+    start = max(0, int(attempt(lambda: selection.start_offset, 0) or 0))
+    end = max(start, int(attempt(lambda: selection.end_offset, start) or start))
+    if is_secure:
+        return "[redacted]" if end > start else None
+    if end == start:
+        return ""
+    capped_end = min(end, start + TEXT_LIMIT)
+    text = attempt(lambda: Atspi.Text.get_text(iface, start, capped_end))
+    if text is None:
+        return None
+    text = str(text)
+    if len(text) > TEXT_LIMIT:
+        return text[:TEXT_LIMIT] + "..."
+    if end > capped_end:
+        return text + "..."
+    return text
 
 
 def render_accessibility_tree_with_focus(root, window_rect, root_path, compact_browser_tabs=False):
@@ -382,6 +613,7 @@ def render_accessibility_tree_with_focus(root, window_rect, root_path, compact_b
     selected_state = getattr(Atspi.StateType, "SELECTED", None)
     focused_entry = None
     focused_text_node = None
+    focused_text_secure = False
 
     def get_entry(node):
         key = id(node)
@@ -421,15 +653,23 @@ def render_accessibility_tree_with_focus(root, window_rect, root_path, compact_b
             entry["is_text"] = is_text_node(node)
         return entry["is_text"]
 
-    def cached_value(node):
+    def cached_is_secure(node, ancestor_secure=False):
         entry = get_entry(node)
-        if "value" not in entry:
-            secure = is_secure_metadata(
+        if "own_secure" not in entry:
+            entry["own_secure"] = is_secure_metadata(
                 cached_role(node),
                 cached_name(node),
                 cached_accessible_id(node),
                 cached_state_set(node),
             )
+        return ancestor_secure or entry["own_secure"]
+
+    def cached_value(node, ancestor_secure=False):
+        if ancestor_secure:
+            return "[redacted]"
+        entry = get_entry(node)
+        if "value" not in entry:
+            secure = cached_is_secure(node, ancestor_secure=False)
             entry["value"] = string_value(node, is_secure=secure, is_text=cached_is_text(node))
         return entry["value"]
 
@@ -445,8 +685,8 @@ def render_accessibility_tree_with_focus(root, window_rect, root_path, compact_b
             entry["children"] = list(children(node))
         return entry["children"]
 
-    def observe_focus(node):
-        nonlocal focused_entry, focused_text_node
+    def observe_focus(node, ancestor_secure=False):
+        nonlocal focused_entry, focused_text_node, focused_text_secure
         if focused_state is None or (focused_entry is not None and focused_text_node is not None):
             return
         if state_set_contains(cached_state_set(node), focused_state):
@@ -454,8 +694,9 @@ def render_accessibility_tree_with_focus(root, window_rect, root_path, compact_b
                 focused_entry = get_entry(node)
             if focused_text_node is None and cached_is_text(node):
                 focused_text_node = node
+                focused_text_secure = cached_is_secure(node, ancestor_secure=ancestor_secure)
 
-    def cached_record(node, index, path):
+    def cached_record(node, index, path, ancestor_secure=False):
         role = cached_role(node)
         name = cached_name(node)
         acc_id = cached_accessible_id(node)
@@ -469,39 +710,41 @@ def render_accessibility_tree_with_focus(root, window_rect, root_path, compact_b
             "controlType": role,
             "localizedControlType": role,
             "className": str(attempt(node.get_toolkit_name, "") or ""),
-            "value": cached_value(node),
+            "value": cached_value(node, ancestor_secure=ancestor_secure),
             "isSelected": state_set_contains(state_set, selected_state),
             "nativeWindowHandle": 0,
             "frame": rect.to_json() if rect else None,
             "actions": cached_actions(node),
         }
 
-    def collect_text_snippets(node, limit=6, max_depth=3):
+    def collect_text_snippets(node, limit=6, max_depth=3, ancestor_secure=False):
         values = []
         seen = set()
 
-        def collect(candidate, depth):
+        def collect(candidate, depth, inherited_secure):
             if len(values) >= limit or depth > max_depth:
                 return
-            observe_focus(candidate)
+            node_secure = cached_is_secure(candidate, ancestor_secure=inherited_secure)
+            observe_focus(candidate, ancestor_secure=inherited_secure)
             role = cached_role(candidate).lower()
             if role in {"label", "static", "static text", "text", "link"}:
-                for raw in (cached_name(candidate), cached_value(candidate)):
+                for raw in (cached_name(candidate), cached_value(candidate, ancestor_secure=node_secure)):
                     value = " ".join(str(raw or "").split())
                     if value and value not in seen:
                         seen.add(value)
                         values.append(value[:80])
                         if len(values) >= limit:
                             return
+            next_secure = node_secure if role not in TOP_LEVEL_ANCESTOR_ROLES else inherited_secure
             for _, child in cached_children(candidate):
-                collect(child, depth + 1)
+                collect(child, depth + 1, next_secure)
                 if len(values) >= limit:
                     return
 
-        collect(node, 0)
+        collect(node, 0, ancestor_secure)
         return values
 
-    def collect_plain_text_summary(node, limit=8, max_depth=4):
+    def collect_plain_text_summary(node, limit=8, max_depth=4, ancestor_secure=False):
         if id(node) in plain_text_rejected:
             return None
         allowed = {"panel", "filler", "unknown", "section", "label", "static", "static text", "text", "link", "image"}
@@ -509,11 +752,12 @@ def render_accessibility_tree_with_focus(root, window_rect, root_path, compact_b
         seen = set()
         saw_text = False
 
-        def visit(candidate, depth):
+        def visit(candidate, depth, inherited_secure):
             nonlocal saw_text
             if depth > max_depth or id(candidate) in plain_text_rejected:
                 return False
-            observe_focus(candidate)
+            node_secure = cached_is_secure(candidate, ancestor_secure=inherited_secure)
+            observe_focus(candidate, ancestor_secure=inherited_secure)
             role = cached_role(candidate).lower()
             if role not in allowed:
                 plain_text_rejected.add(id(candidate))
@@ -524,19 +768,20 @@ def render_accessibility_tree_with_focus(root, window_rect, root_path, compact_b
             if role in {"label", "static", "static text", "text", "link"}:
                 saw_text = True
                 if len(values) < limit:
-                    for raw in (cached_name(candidate), cached_value(candidate)):
+                    for raw in (cached_name(candidate), cached_value(candidate, ancestor_secure=node_secure)):
                         value = " ".join(str(raw or "").split())
                         if value and value not in seen:
                             seen.add(value)
                             values.append(value[:80])
                             if len(values) >= limit:
                                 break
+            next_secure = node_secure if role not in TOP_LEVEL_ANCESTOR_ROLES else inherited_secure
             for _, child in cached_children(candidate):
-                if not visit(child, depth + 1):
+                if not visit(child, depth + 1, next_secure):
                     return False
             return True
 
-        if not visit(node, 0) or not saw_text or len(values) < 2:
+        if not visit(node, 0, ancestor_secure) or not saw_text or len(values) < 2:
             return None
         return " ".join(values)
 
@@ -545,26 +790,30 @@ def render_accessibility_tree_with_focus(root, window_rect, root_path, compact_b
         has_text = bool(item["name"] or item["automationId"] or item["value"])
         return role in {"panel", "filler", "unknown", "section"} and not has_text and not meaningful_actions(item["actions"]) and summary is None and child_count <= 1
 
-    def walk(node, depth, path):
+    def walk(node, depth, path, ancestor_secure=False):
         if len(records) >= MAX_NODES or depth > MAX_DEPTH:
             truncation["truncated"] = True
             if depth > MAX_DEPTH:
                 truncation["maxDepthReached"] = True
             return
-        observe_focus(node)
-        item = cached_record(node, len(records), path)
+        node_secure = cached_is_secure(node, ancestor_secure=ancestor_secure)
+        observe_focus(node, ancestor_secure=ancestor_secure)
+        item = cached_record(node, len(records), path, ancestor_secure=ancestor_secure)
         role_key = (item["controlType"] or "").lower()
+        child_ancestor_secure = node_secure if role_key not in TOP_LEVEL_ANCESTOR_ROLES else (
+            ancestor_secure or state_set_contains(cached_state_set(node), getattr(Atspi.StateType, "PROTECTED", None))
+        )
         filtered_actions = meaningful_actions(item["actions"])
         generic_summary = None
         child_items = None
         if role_key in {"panel", "filler", "unknown", "section"} and not item["name"] and not item["value"]:
             if not filtered_actions:
-                generic_summary = collect_plain_text_summary(node, limit=8, max_depth=4)
+                generic_summary = collect_plain_text_summary(node, limit=8, max_depth=4, ancestor_secure=child_ancestor_secure)
             if generic_summary is None and not item["automationId"] and not filtered_actions:
                 child_items = cached_children(node)
                 if should_elide(item, len(child_items), generic_summary):
                     for child_index, child in child_items:
-                        walk(child, depth, path + [child_index])
+                        walk(child, depth, path + [child_index], child_ancestor_secure)
                     return
         records.append(item)
         title = item["name"] or item["automationId"] or ""
@@ -574,7 +823,7 @@ def render_accessibility_tree_with_focus(root, window_rect, root_path, compact_b
         if generic_summary and generic_summary != title:
             line += ", Text: " + sanitize_text(generic_summary)
         elif role_key in {"row", "table row", "list item"}:
-            row_summary = " ".join(collect_text_snippets(node))
+            row_summary = " ".join(collect_text_snippets(node, ancestor_secure=child_ancestor_secure))
             if row_summary and row_summary != title:
                 line += ", Text: " + sanitize_text(row_summary)
         if filtered_actions:
@@ -586,18 +835,25 @@ def render_accessibility_tree_with_focus(root, window_rect, root_path, compact_b
             child_items = cached_children(node)
         child_line_start = len(lines)
         for child_index, child in child_items:
-            walk(child, depth + 1, path + [child_index])
+            walk(child, depth + 1, path + [child_index], child_ancestor_secure)
         if compact_browser_tabs:
             compact_rendered_browser_tabs(records, lines, child_line_start, depth + 1)
 
-    walk(root, 0, root_path)
+    walk(root, 0, root_path, False)
     focused_summary_text = None
     if focused_entry is not None:
         focused_node = focused_entry["node"]
         focused_summary_text = (cached_role(focused_node) + " " + cached_name(focused_node)).strip()
     focus_info = {
         "focusedSummary": focused_summary_text,
-        "selectedText": selected_text_from_node(focused_text_node) if focused_text_node is not None else None,
+        "selectedText": (
+            selected_text_from_node(
+                focused_text_node,
+                is_secure=focused_text_secure or is_secure_node(focused_text_node),
+            )
+            if focused_text_node is not None
+            else None
+        ),
     }
     return records, lines, truncation, focus_info
 
@@ -812,8 +1068,8 @@ def window_json(app, index, window):
     }
 
 
-def make_snapshot(query, include_screenshot, window_id=None, window_index=None, restore=False):
-    app = find_app(query)
+def make_snapshot(query, include_screenshot, window_id=None, window_index=None, restore=False, own_app=None):
+    app = find_app(query, own_app=own_app)
     window_index, window = choose_window(app, window_id, window_index)
     if restore:
         restore_window(app, window)
@@ -855,8 +1111,8 @@ def list_apps_response():
     return apps
 
 
-def list_windows_response(query):
-    app = find_app(query)
+def list_windows_response(query, own_app=None):
+    app = find_app(query, own_app=own_app)
     return {"app": app_json(app), "windows": [window_json(app, index, window) for index, window in windows_for(app)]}
 
 
@@ -960,15 +1216,235 @@ def perform_action(node, index):
     return bool(index is not None and attempt(lambda: node.do_action(int(index)), False))
 
 
-def screen_point(window_rect, saved_element=None, x=None, y=None, node=None):
+def validate_window_local_point(window_rect, x, y, x_name="x", y_name="y"):
+    if window_rect is None or window_rect.width <= 0 or window_rect.height <= 0:
+        raise RuntimeError("coordinate action requires a visible window and coordinates")
+    try:
+        fx = float(x)
+        fy = float(y)
+    except (TypeError, ValueError):
+        raise RuntimeError(f"{x_name} and {y_name} must be finite numbers")
+    if not (math.isfinite(fx) and math.isfinite(fy)):
+        raise RuntimeError(f"{x_name} and {y_name} must be finite numbers")
+    if fx < 0.0 or fy < 0.0 or fx > window_rect.width or fy > window_rect.height:
+        raise RuntimeError(
+            f"invalid_argument: {x_name} and {y_name} ({fx}, {fy}) are out of window bounds [0, {window_rect.width}] x [0, {window_rect.height}]"
+        )
+    return fx, fy
+
+
+def validate_screen_point_in_window(window_rect, screen_x, screen_y):
+    if window_rect is None or window_rect.width <= 0 or window_rect.height <= 0:
+        raise RuntimeError("coordinate action requires a visible window and coordinates")
+    if (
+        screen_x < window_rect.x
+        or screen_y < window_rect.y
+        or screen_x > window_rect.x + window_rect.width
+        or screen_y > window_rect.y + window_rect.height
+    ):
+        raise RuntimeError(
+            f"invalid_argument: target point ({screen_x}, {screen_y}) is out of window bounds"
+        )
+
+
+def screen_point(window_rect, saved_element=None, x=None, y=None, node=None, x_name="x", y_name="y"):
     rect = screen_rect(node) if node is not None else None
     if rect is not None:
-        return rect.x + rect.width / 2, rect.y + rect.height / 2
+        px = rect.x + rect.width / 2
+        py = rect.y + rect.height / 2
+        validate_screen_point_in_window(window_rect, px, py)
+        return px, py
     if saved_element is not None:
         raise RuntimeError("stale element frame; run get-app-state again and use a fresh element index")
     if window_rect is None or x is None or y is None:
         raise RuntimeError("coordinate action requires a visible window and coordinates")
-    return window_rect.x + float(x), window_rect.y + float(y)
+    fx, fy = validate_window_local_point(window_rect, x, y, x_name=x_name, y_name=y_name)
+    return window_rect.x + fx, window_rect.y + fy
+
+
+def _x11_window_property_bytes(x11, display, window_id, atom):
+    actual_type = ctypes.c_ulong(0)
+    actual_format = ctypes.c_int(0)
+    nitems = ctypes.c_ulong(0)
+    bytes_after = ctypes.c_ulong(0)
+    prop = ctypes.c_void_p(0)
+    status = x11.XGetWindowProperty(
+        display,
+        ctypes.c_ulong(window_id),
+        ctypes.c_ulong(atom),
+        ctypes.c_long(0),
+        ctypes.c_long(1024),
+        ctypes.c_int(0),
+        ctypes.c_ulong(0),  # AnyPropertyType
+        ctypes.byref(actual_type),
+        ctypes.byref(actual_format),
+        ctypes.byref(nitems),
+        ctypes.byref(bytes_after),
+        ctypes.byref(prop),
+    )
+    if status != 0 or not prop.value:
+        return 0, 0, b""
+    try:
+        fmt = actual_format.value
+        count = nitems.value
+        if fmt == 32:
+            byte_len = count * ctypes.sizeof(ctypes.c_ulong)
+        elif fmt == 16:
+            byte_len = count * 2
+        else:
+            byte_len = count
+        raw = ctypes.string_at(prop.value, byte_len) if byte_len > 0 else b""
+        return fmt, count, raw
+    finally:
+        x11.XFree(prop)
+
+
+def _x11_window_pid_and_names(x11, display, window_id, pid_atom, wm_class_atom, net_wm_name_atom, wm_name_atom):
+    pid = 0
+    fmt, count, raw = _x11_window_property_bytes(x11, display, window_id, pid_atom)
+    if fmt == 32 and count >= 1 and len(raw) >= ctypes.sizeof(ctypes.c_ulong):
+        pid = int(ctypes.c_ulong.from_buffer_copy(raw[: ctypes.sizeof(ctypes.c_ulong)]).value)
+    names = []
+    for atom in (wm_class_atom, net_wm_name_atom, wm_name_atom):
+        p_fmt, _, p_raw = _x11_window_property_bytes(x11, display, window_id, atom)
+        if p_fmt == 8 and p_raw:
+            for part in p_raw.split(b"\x00"):
+                text = part.decode("utf-8", errors="replace").strip()
+                if text:
+                    names.append(text)
+    return pid, names
+
+
+def x11_topmost_window_at_point(screen_x, screen_y):
+    """Return topmost X11 window metadata at `(screen_x, screen_y)` or None."""
+    px = int(round(screen_x))
+    py = int(round(screen_y))
+    try:
+        x11 = ctypes.CDLL("libX11.so.6")
+        x11.XOpenDisplay.argtypes = [ctypes.c_char_p]
+        x11.XOpenDisplay.restype = ctypes.c_void_p
+        x11.XCloseDisplay.argtypes = [ctypes.c_void_p]
+        x11.XDefaultRootWindow.argtypes = [ctypes.c_void_p]
+        x11.XDefaultRootWindow.restype = ctypes.c_ulong
+        x11.XInternAtom.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int]
+        x11.XInternAtom.restype = ctypes.c_ulong
+        x11.XTranslateCoordinates.argtypes = [
+            ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong,
+            ctypes.c_int, ctypes.c_int,
+            ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int),
+            ctypes.POINTER(ctypes.c_ulong),
+        ]
+        x11.XTranslateCoordinates.restype = ctypes.c_int
+        x11.XGetWindowProperty.argtypes = [
+            ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong,
+            ctypes.c_long, ctypes.c_long, ctypes.c_int, ctypes.c_ulong,
+            ctypes.POINTER(ctypes.c_ulong), ctypes.POINTER(ctypes.c_int),
+            ctypes.POINTER(ctypes.c_ulong), ctypes.POINTER(ctypes.c_ulong),
+            ctypes.POINTER(ctypes.c_void_p),
+        ]
+        x11.XGetWindowProperty.restype = ctypes.c_int
+        x11.XFree.argtypes = [ctypes.c_void_p]
+
+        display = x11.XOpenDisplay(None)
+        if not display:
+            return None
+        try:
+            root = x11.XDefaultRootWindow(display)
+            pid_atom = x11.XInternAtom(display, b"_NET_WM_PID", 1)
+            wm_class_atom = x11.XInternAtom(display, b"WM_CLASS", 1)
+            net_wm_name_atom = x11.XInternAtom(display, b"_NET_WM_NAME", 1)
+            wm_name_atom = x11.XInternAtom(display, b"WM_NAME", 1)
+
+            chain = []
+            cur_win = root
+            cur_x, cur_y = px, py
+            for _ in range(32):
+                dest_x = ctypes.c_int(0)
+                dest_y = ctypes.c_int(0)
+                child = ctypes.c_ulong(0)
+                ok = x11.XTranslateCoordinates(
+                    display, cur_win, cur_win, cur_x, cur_y,
+                    ctypes.byref(dest_x), ctypes.byref(dest_y), ctypes.byref(child),
+                )
+                if not ok or child.value == 0:
+                    break
+                chain.append(int(child.value))
+                # Translate root (px, py) into child coordinates for next descent step
+                ok_child = x11.XTranslateCoordinates(
+                    display, root, child.value, px, py,
+                    ctypes.byref(dest_x), ctypes.byref(dest_y), ctypes.byref(ctypes.c_ulong(0)),
+                )
+                if not ok_child:
+                    break
+                cur_win = child.value
+                cur_x, cur_y = dest_x.value, dest_y.value
+
+            if not chain:
+                return None
+
+            collected_names = []
+            resolved_pid = 0
+            resolved_wid = chain[-1]
+            for wid in reversed(chain):
+                w_pid, w_names = _x11_window_pid_and_names(
+                    x11, display, wid, pid_atom, wm_class_atom, net_wm_name_atom, wm_name_atom
+                )
+                collected_names.extend(w_names)
+                if w_pid > 0 and resolved_pid == 0:
+                    resolved_pid = w_pid
+                    resolved_wid = wid
+            return {"window_id": resolved_wid, "pid": resolved_pid, "names": collected_names}
+        finally:
+            x11.XCloseDisplay(display)
+    except Exception:
+        return None
+
+
+def verify_pointer_target(app, window, window_rect, screen_x, screen_y, own_app=None):
+    """Ensure `(screen_x, screen_y)` lies inside the target window and is owned
+    by the target PID (not occluded by another app, password manager, or TerminalX)."""
+    validate_screen_point_in_window(window_rect, screen_x, screen_y)
+    reject_blocked_app(app, own_app=own_app)
+    target_pid = pid_of(app)
+
+    # Secondary AT-SPI check: reject if an active protected/blocked window covers this point.
+    for candidate_app in attempt(lambda: list(desktop_apps()), []) or []:
+        for _, candidate_win in windows_for(candidate_app):
+            if not has_state(candidate_win, Atspi.StateType.ACTIVE):
+                continue
+            c_rect = screen_rect(candidate_win)
+            if c_rect is None:
+                continue
+            if c_rect.x <= screen_x <= c_rect.x + c_rect.width and c_rect.y <= screen_y <= c_rect.y + c_rect.height:
+                c_names = [name_of(candidate_app), name_of(candidate_win)]
+                if is_own_app_identity(pid=pid_of(candidate_app), names=c_names, own_app=own_app):
+                    raise RuntimeError("own_app_protected: pointer input stopped because a TerminalX window owns this screen coordinate")
+                if is_blocked_app_identity(c_names):
+                    raise RuntimeError(f'appBlocked("{name_of(candidate_app)}")')
+
+    is_wayland = os.environ.get("XDG_SESSION_TYPE", "").lower() == "wayland"
+    if is_wayland:
+        if not has_state(window, Atspi.StateType.ACTIVE):
+            raise RuntimeError("window_not_focused: pointer input on Wayland requires the target window to be active; bring it forward and retry")
+        return
+
+    if os.environ.get("DISPLAY"):
+        hit = x11_topmost_window_at_point(screen_x, screen_y)
+        if hit is None:
+            raise RuntimeError(
+                f"window_not_focused: no visible window owns screen coordinate ({round(screen_x)}, {round(screen_y)}); bring the target window forward and retry"
+            )
+        hit_pid = int(hit.get("pid") or 0)
+        hit_names = list(hit.get("names") or [])
+        if is_own_app_identity(pid=hit_pid, names=hit_names, own_app=own_app):
+            raise RuntimeError("own_app_protected: pointer input stopped because a TerminalX window owns this screen coordinate")
+        if is_blocked_app_identity(hit_names):
+            raise RuntimeError(f'appBlocked("{hit_names[0] if hit_names else hit_pid}")')
+        if target_pid > 0 and hit_pid != target_pid:
+            if not (is_descendant_pid(hit_pid, target_pid) or is_descendant_pid(target_pid, hit_pid)):
+                raise RuntimeError(
+                    f"window_not_focused: screen coordinate ({round(screen_x)}, {round(screen_y)}) is occluded by another window (pid {hit_pid}, expected pid {target_pid}); bring the target window forward and retry"
+                )
 
 
 def require_positive_integer(value, name):
@@ -1197,13 +1673,14 @@ def set_value(node, value):
 
 def run_operation(operation):
     tool = operation.get("tool")
+    own_app = operation.get("ownApp")
     include_screenshot = not bool(operation.get("noScreenshot"))
     if tool == "handshake":
         return {"ok": True, "capabilities": handshake_response()}
     if tool == "list_apps":
         return {"ok": True, "apps": list_apps_response()}
     if tool == "list_windows":
-        return {"ok": True, **list_windows_response(operation.get("app", ""))}
+        return {"ok": True, **list_windows_response(operation.get("app", ""), own_app=own_app)}
     if tool == "get_app_state":
         return {
             "ok": True,
@@ -1213,16 +1690,17 @@ def run_operation(operation):
                 operation.get("windowId"),
                 operation.get("windowIndex"),
                 bool(operation.get("restoreWindow")),
+                own_app=own_app,
             ),
         }
 
-    app = find_app(operation.get("app", ""))
+    app = find_app(operation.get("app", ""), own_app=own_app)
     _, window = choose_window(app, operation.get("windowId"), operation.get("windowIndex"))
     if operation.get("restoreWindow"):
         restore_window(app, window)
         _, window = choose_window(app, operation.get("windowId"), operation.get("windowIndex"))
     if tool in {"type_text", "press_key", "hotkey", "paste_text"}:
-        require_keyboard_focus(window, operation)
+        require_keyboard_focus(window, operation, own_app=own_app)
     bounds = screen_rect(window)
     saved = operation.get("element")
     node = find_element(app, saved)
@@ -1243,8 +1721,11 @@ def run_operation(operation):
         has_modifiers = bool(str(operation.get("modifiers") or "").strip())
         handled = not has_modifiers and operation.get("mouse_button", "left") == "left" and click_count <= 1 and perform_action(node, preferred)
         if not handled:
+            px, py = screen_point(bounds, saved, operation.get("x"), operation.get("y"), node)
+            verify_pointer_target(app, window, bounds, px, py, own_app=own_app)
             click_at(
-                *screen_point(bounds, saved, operation.get("x"), operation.get("y"), node),
+                px,
+                py,
                 operation.get("mouse_button", "left"),
                 click_count,
                 operation.get("modifiers"),
@@ -1265,16 +1746,19 @@ def run_operation(operation):
         # Why: pointer wheel events should land in the requested app window even
         # when another desktop window is currently foregrounded.
         restore_window(app, window)
-        scroll_at(*screen_point(bounds, saved, operation.get("x"), operation.get("y"), node), operation.get("direction"), operation.get("pages"))
+        px, py = screen_point(bounds, saved, operation.get("x"), operation.get("y"), node)
+        verify_pointer_target(app, window, bounds, px, py, own_app=own_app)
+        scroll_at(px, py, operation.get("direction"), operation.get("pages"))
         action = {"path": "synthetic", "actionName": "scroll", "fallbackReason": None}
     elif tool == "drag":
         # Why: pointer drags are synthetic global input, so activate the target
         # window before using cached coordinates from its accessibility tree.
         restore_window(app, window)
-        drag_between(
-            screen_point(bounds, operation.get("fromElement"), operation.get("from_x"), operation.get("from_y"), from_node),
-            screen_point(bounds, operation.get("toElement"), operation.get("to_x"), operation.get("to_y"), to_node),
-        )
+        start = screen_point(bounds, operation.get("fromElement"), operation.get("from_x"), operation.get("from_y"), from_node, x_name="from_x", y_name="from_y")
+        end = screen_point(bounds, operation.get("toElement"), operation.get("to_x"), operation.get("to_y"), to_node, x_name="to_x", y_name="to_y")
+        verify_pointer_target(app, window, bounds, start[0], start[1], own_app=own_app)
+        verify_pointer_target(app, window, bounds, end[0], end[1], own_app=own_app)
+        drag_between(start, end)
         action = {"path": "synthetic", "actionName": "drag", "fallbackReason": None}
     elif tool == "type_text":
         type_text(require_non_empty_string(operation.get("text"), "text"))
@@ -1301,12 +1785,13 @@ def run_operation(operation):
             include_screenshot,
             operation.get("windowId"),
             operation.get("windowIndex"),
+            own_app=own_app,
         )
     except Exception:
         if operation.get("windowId") is None and operation.get("windowIndex") is None:
             raise
         action.setdefault("verification", {"state": "unverified", "reason": "window_changed"})
-        snapshot = make_snapshot(operation.get("app", ""), include_screenshot, None, None)
+        snapshot = make_snapshot(operation.get("app", ""), include_screenshot, None, None, own_app=own_app)
 
     return {"ok": True, "action": action, "snapshot": snapshot}
 
