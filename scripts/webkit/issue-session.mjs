@@ -14,9 +14,14 @@ const shots = process.env.ISSUE_SESSION_SHOTS;
 const server = await serve();
 const browser = await launch();
 let failed = 0;
+const localCases = shots
+  ? ["light", "dark"].flatMap((mode) => ["github", "linear"].flatMap((provider) => [1100, 800].map((width) => [mode, provider, width])))
+  : [["dark", "github", 1100], ["light", "linear", 800]];
+const cloudCases = shots
+  ? ["light", "dark"].flatMap((mode) => [1100, 800].map((width) => [mode, width]))
+  : [["dark", 1100], ["light", 800]];
 try {
-  for (const [mode, provider] of ["light", "dark"].flatMap((mode) => ["github", "linear"].map((provider) => [mode, provider]))) {
-    for (const width of [1100, 800]) {
+  for (const [mode, provider, width] of localCases) {
       const page = await browser.newPage({ viewport: { width, height: 700 } });
       const setup = ({ mode, provider }) => {
         localStorage.setItem("raccoon.mode", mode);
@@ -400,14 +405,12 @@ try {
         "its page stays open on the record of the merge": unlistedLayout.page === "Merged",
       }, unlistedLayout);
       await page.close();
-    }
   }
 
   // A cloud project (#433): its issues in the same view, a start row that says
   // where the session goes, and its pipeline as the workspace last reported it,
   // asleep and at Ready to merge, with no switch and a Merge that is the reader's.
-  for (const mode of ["light", "dark"]) {
-    for (const width of [1100, 800]) {
+  for (const [mode, width] of cloudCases) {
       const page = await browser.newPage({ viewport: { width, height: 700 } });
       const setup = ({ mode }) => {
         const PROJECT = "cloud:org-a:github.com/demo/api";
@@ -491,7 +494,6 @@ try {
         "there is no switch to merge by itself, and Merge is offered": cloudLayout.switches === 0 && (await panel.getByRole("button", { name: "Merge", exact: true }).count()) === 1,
       }, { startRow, cloudLayout });
       await page.close();
-    }
   }
   // Work through a scrolled Linear list in one visit, with three independent notices.
   const batch = await browser.newPage({ viewport: { width: 1100, height: 700 } });

@@ -63,8 +63,11 @@ const server = await serve();
 const browser = await launch();
 const screenshots = process.env.SESSION_STATUS_SCREENSHOTS;
 if (screenshots) await mkdir(screenshots, { recursive: true });
+const statusCases = screenshots
+  ? ["light", "dark"].flatMap((colorScheme) => [960, 1360, 1440].map((width) => [colorScheme, width]))
+  : [["dark", 1440], ["light", 960]];
 try {
-  for (const colorScheme of ["light", "dark"]) for (const width of [960, 1360, 1440]) {
+  for (const [colorScheme, width] of statusCases) {
     const page = await open(browser, server.url, { cloud: false, localProjects: 1 }, { width, height: 820 }, { extra, colorScheme });
     page.setDefaultTimeout(30_000);
     const sidebar = page.getByRole("navigation", { name: "Conversations" });

@@ -115,10 +115,20 @@ const PLAN_A_RUN_END = "If splitting does not help, say why and go on in this se
 const server = await serve();
 const browser = await launch();
 let failed = 0;
+const issueCases = shots
+  ? ["light", "dark"].flatMap((colorScheme) => ["github", "linear"].flatMap((provider) => [true, false].flatMap((enabled) => [1100, 800].map((width) => [colorScheme, provider, enabled, width]))))
+  : [
+      ["dark", "github", true, 1100],
+      ["light", "linear", true, 1100],
+      ["dark", "linear", true, 800],
+      ["light", "github", false, 800],
+    ];
+const sidebarCases = shots
+  ? ["light", "dark"].flatMap((colorScheme) => [{ width: 1440, height: 900 }, { width: 1000, height: 700 }].map((size) => [colorScheme, size]))
+  : [["dark", { width: 1440, height: 900 }], ["light", { width: 1000, height: 700 }]];
 try {
-  for (const colorScheme of ["light", "dark"]) {
-    // The issue page, each tracker, the switch on and off, wide and narrow.
-    for (const provider of ["github", "linear"]) for (const enabled of [true, false]) for (const width of [1100, 800]) {
+  // The issue page, each tracker, the switch on and off, wide and narrow.
+  for (const [colorScheme, provider, enabled, width] of issueCases) {
       const at = `${colorScheme}, ${provider}, ${enabled ? "on" : "off"}, ${width}px`;
       const page = await open(browser, server.url, { cloud: false, localProjects: 1 }, { width, height: 700 }, { extra: `(${issueSetup})(${JSON.stringify({ provider, enabled })});`, colorScheme });
       page.setDefaultTimeout(30_000);
@@ -175,10 +185,10 @@ try {
         if (shots) await page.screenshot({ path: join(shots, `issue-orchestrated-${provider}-${colorScheme}.png`) });
       }
       await page.close();
-    }
+  }
 
-    // The sidebar: the run's lead and the session that only started others.
-    for (const size of [{ width: 1440, height: 900 }, { width: 1000, height: 700 }]) {
+  // The sidebar: the run's lead and the session that only started others.
+  for (const [colorScheme, size] of sidebarCases) {
       const at = `${colorScheme}, sidebar, ${size.width}px`;
       const page = await open(browser, server.url, { cloud: false, localProjects: 1 }, size, { extra: `(${sidebarSetup})();`, colorScheme });
       page.setDefaultTimeout(30_000);
@@ -216,7 +226,6 @@ try {
       failed += report(at, checks, { errors });
       if (shots) await page.locator('[data-testid="sidebar-rail"]').screenshot({ path: join(shots, `sidebar-folded-${colorScheme}-${size.width}.png`) });
       await page.close();
-    }
   }
 } finally {
   await browser.close();

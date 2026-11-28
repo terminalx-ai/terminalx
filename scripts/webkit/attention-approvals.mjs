@@ -49,8 +49,10 @@ if (screenshots) await mkdir(screenshots, { recursive: true });
 let browser;
 try {
   browser = await launch();
-  for (const [width, height, zoom] of [[1100, 800, 1], [760, 600, 1], [640, 480, 1], [760, 600, 1.5]]) {
-    for (const order of ["approval-first", "notification-first"]) {
+  const localCases = screenshots
+    ? [[1100, 800, 1], [760, 600, 1], [640, 480, 1], [760, 600, 1.5]].flatMap(([w, h, z]) => ["approval-first", "notification-first"].map((order) => [w, h, z, order]))
+    : [[1100, 800, 1, "approval-first"], [640, 480, 1, "notification-first"], [760, 600, 1.5, "approval-first"]];
+  for (const [width, height, zoom, order] of localCases) {
       const page = await open(browser, server.url, { cloud: false, localProjects: 1, localSession: true, localSessions: 4 }, { width, height }, { extra });
       page.setDefaultTimeout(10_000);
       await sidebar(page);
@@ -98,7 +100,6 @@ try {
       await tab(page, "Chat 0").waitFor();
       console.log(`ok ${label}: command and actions clear, focus and pointer/keyboard answers work, notices retained`);
       await page.close();
-    }
   }
 
   // Shared guests render approvals through Chat, outside TabView and modal dialogs.
@@ -131,8 +132,10 @@ try {
       return originalGuestSend(args);
     };
   `;
-  for (const [width, height, zoom] of [[760, 600, 1], [640, 480, 1], [760, 600, 1.5]]) {
-    for (const order of ["approval-first", "notification-first"]) {
+  const guestCases = screenshots
+    ? [[760, 600, 1], [640, 480, 1], [760, 600, 1.5]].flatMap(([w, h, z]) => ["approval-first", "notification-first"].map((order) => [w, h, z, order]))
+    : [[640, 480, 1, "approval-first"], [760, 600, 1.5, "notification-first"]];
+  for (const [width, height, zoom, order] of guestCases) {
       const page = await open(browser, server.url, { cloud: false, localProjects: 1, localSession: true, localSessions: 4, localSharing: "guest" }, { width, height }, { extra: guestExtra });
       page.setDefaultTimeout(10_000);
       await page.getByText("Check the guest approval", { exact: true }).waitFor();
@@ -163,7 +166,6 @@ try {
       assert.equal(await page.evaluate(() => window.__PW_SHARE_CALLS__.filter(call => call.method === "permission.respond").length), 1);
       console.log(`ok guest ${width}x${height}-${zoom}-${order}: controls clear, focus and answering work, notices resume`);
       await page.close();
-    }
   }
 
   // Joining a guest session covers, but does not unmount, the selected local tab.

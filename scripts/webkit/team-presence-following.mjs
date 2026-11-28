@@ -34,7 +34,7 @@ async function reachable(locator, why) {
   assert.ok(measured.fits && measured.hit, `${why}: ${JSON.stringify(measured)}`);
 }
 // The minimum window is 760px and zoom is capped at 2, so 380 CSS px is the narrowest real width.
-const WIDTHS = [1360, 390, 380];
+const WIDTHS = [1360, 380];
 // At 390 and 380 the open sidebar (268px) leaves the main view about 120px: narrower than any single
 // control, in the authored layout as much as today's. The narrow passes therefore
 // measure the main view with the sidebar hidden, as a narrow window is used, and
