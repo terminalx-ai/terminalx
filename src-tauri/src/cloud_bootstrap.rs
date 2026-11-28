@@ -1138,7 +1138,6 @@ mod tests {
         (dir, config)
     }
 
-    #[test]
     fn redeems_once_then_refreshes_with_the_stored_credential() {
         let token = random_credential();
         let server = FakeServer::with_token(&token);
@@ -1154,7 +1153,6 @@ mod tests {
         assert_eq!(*server.refreshes.borrow(), 2);
     }
 
-    #[test]
     fn a_transient_failure_is_retried_until_it_clears() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         struct Flaky(FakeServer, AtomicUsize);
@@ -1177,7 +1175,6 @@ mod tests {
         assert_eq!(server.1.load(Ordering::SeqCst), 4);
     }
 
-    #[test]
     fn a_transient_failure_keeps_the_token() {
         let token = random_credential();
         let server = FakeServer::with_token(&token);
@@ -1190,7 +1187,6 @@ mod tests {
         assert!(!config.token_path.exists());
     }
 
-    #[test]
     fn a_rejected_token_is_kept_and_reported_as_permanent() {
         let (_dir, config) = setup(&random_credential());
         let error = establish(&config, &FakeServer::default(), &quick()).err().unwrap();
@@ -1198,7 +1194,6 @@ mod tests {
         assert!(config.token_path.exists());
     }
 
-    #[test]
     fn a_missing_token_without_identity_is_permanent() {
         let (_dir, config) = setup("x");
         fs::remove_file(&config.token_path).unwrap();
@@ -1206,7 +1201,6 @@ mod tests {
         assert_eq!(error.downcast_ref::<Rejected>().unwrap().0, "cloud_workspace_bootstrap_token_missing");
     }
 
-    #[test]
     fn a_revoked_credential_falls_back_to_a_newly_provisioned_token() {
         let token = random_credential();
         let server = FakeServer::with_token(&token);
@@ -1228,7 +1222,6 @@ mod tests {
         assert!(error.downcast_ref::<Rejected>().is_some());
     }
 
-    #[test]
     fn a_newly_provisioned_token_survives_a_successful_refresh() {
         let token = random_credential();
         let server = FakeServer::with_token(&token);
@@ -1241,7 +1234,6 @@ mod tests {
         assert_eq!(server.redeems.borrow().len(), 1);
     }
 
-    #[test]
     fn a_delivered_token_takes_precedence_over_a_live_credential() {
         let token = random_credential();
         let server = FakeServer::with_token(&token);
@@ -1267,7 +1259,6 @@ mod tests {
         assert_eq!(server.redeems.borrow().len(), 2);
     }
 
-    #[test]
     fn a_delivered_token_the_server_cannot_redeem_now_falls_back_to_the_stored_credential() {
         struct RedeemDown(FakeServer, RefCell<bool>);
         impl Api for RedeemDown {
@@ -1301,7 +1292,6 @@ mod tests {
         assert!(!config.token_path.exists());
     }
 
-    #[test]
     fn a_delivered_token_for_another_workspace_leaves_the_identity_alone() {
         struct Elsewhere(FakeServer, RefCell<bool>);
         impl Api for Elsewhere {
@@ -1335,13 +1325,11 @@ mod tests {
         assert!(config.token_path.exists());
     }
 
-    #[test]
     fn the_baseline_sits_next_to_the_token() {
         let (_dir, config) = setup("x");
         assert_eq!(config.baseline_path(), config.token_path.parent().unwrap().join("memory-baseline.json"));
     }
 
-    #[test]
     fn a_rejection_is_retried_within_the_window() {
         let token = random_credential();
         let server = FakeServer::default();
@@ -1372,7 +1360,6 @@ mod tests {
         establish(&config, &server, &quick()).unwrap();
     }
 
-    #[test]
     fn a_bare_token_file_name_syncs_the_working_directory() {
         let dir = tempfile::tempdir().unwrap();
         let token = random_credential();
@@ -1385,7 +1372,6 @@ mod tests {
         assert!(!path.exists());
     }
 
-    #[test]
     fn a_replayed_redeem_for_the_same_host_recovers_a_lost_response() {
         let token = random_credential();
         let server = FakeServer::with_token(&token);
@@ -1398,7 +1384,6 @@ mod tests {
         assert_eq!(*server.redeems.borrow(), vec![key.relay_host_id(); 2]);
     }
 
-    #[test]
     fn a_different_host_key_cannot_replay() {
         let token = random_credential();
         let server = FakeServer::with_token(&token);
@@ -1409,7 +1394,6 @@ mod tests {
         assert!(config.token_path.exists());
     }
 
-    #[test]
     fn the_host_key_is_stable_and_private() {
         let dir = tempfile::tempdir().unwrap();
         let first = load_or_create_host_key(dir.path()).unwrap();
@@ -1427,7 +1411,6 @@ mod tests {
         assert!(load_or_create_host_key(dir.path()).is_err(), "a damaged key is never silently replaced");
     }
 
-    #[test]
     fn relay_host_id_matches_the_server_derivation() {
         // deriveRelayHostId(publicKeyB64) = base64url(sha256(key))[0..16].
         let key = HostKey::from_secret([7u8; 32]);
@@ -1436,7 +1419,6 @@ mod tests {
         assert!(key.public_key_b64().ends_with('='));
     }
 
-    #[test]
     fn strict_decoding_matches_the_contract() {
         let redeem = r#"{"v":1,"workspaceId":"w","organizationId":"o","relayToken":"t","relayTokenExpiresAt":5,"directorUrl":"https://d.example","runtimeCredential":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#;
         validate_redeemed(&serde_json::from_str::<Redeemed>(redeem).unwrap()).unwrap();
@@ -1449,7 +1431,6 @@ mod tests {
         assert_eq!(session.quiesce, None);
     }
 
-    #[test]
     fn an_overlong_list_is_cut_instead_of_failing_the_refresh() {
         let list = |name: &str, count: usize| (0..count).map(|index| format!(r#"{{"id":"{name}-{index}"}}"#)).collect::<Vec<_>>().join(",");
         let refresh = |attachments: usize, revocations: usize| {
@@ -1470,7 +1451,6 @@ mod tests {
         assert_eq!((within.attachments.len(), within.revocations.len()), (MAX_LIST, 3));
     }
 
-    #[test]
     fn a_quiesce_request_rides_on_the_refresh() {
         let base = r#"{"v":1,"workspaceId":"w","organizationId":"o","relayToken":"t","relayTokenExpiresAt":5,"directorUrl":"http://127.0.0.1:9","attachments":[],"revocations":[]"#;
         let with = |quiesce: &str| session_from_refresh(serde_json::from_str(&format!("{base},\"quiesce\":{quiesce}}}")).unwrap(), "h").unwrap();
@@ -1485,12 +1465,44 @@ mod tests {
         assert!(CAPABILITIES.split(',').any(|capability| capability == "quiesce-v1"));
     }
 
-    #[test]
     fn origins_must_be_canonical() {
         assert!(canonical_origin("https://api.terminalx.dev"));
         assert!(canonical_origin("http://127.0.0.1:8787"));
         assert!(!canonical_origin("http://api.terminalx.dev"));
         assert!(!canonical_origin("https://api.terminalx.dev/"));
         assert!(!canonical_origin("https://api.terminalx.dev/v1"));
+    }
+
+    #[test]
+    fn cloud_bootstrap_batch_1() {
+        redeems_once_then_refreshes_with_the_stored_credential();
+        a_transient_failure_is_retried_until_it_clears();
+        a_transient_failure_keeps_the_token();
+        a_rejected_token_is_kept_and_reported_as_permanent();
+        a_missing_token_without_identity_is_permanent();
+        a_revoked_credential_falls_back_to_a_newly_provisioned_token();
+        a_newly_provisioned_token_survives_a_successful_refresh();
+    }
+
+    #[test]
+    fn cloud_bootstrap_batch_2() {
+        a_delivered_token_takes_precedence_over_a_live_credential();
+        a_delivered_token_the_server_cannot_redeem_now_falls_back_to_the_stored_credential();
+        a_delivered_token_for_another_workspace_leaves_the_identity_alone();
+        the_baseline_sits_next_to_the_token();
+        a_rejection_is_retried_within_the_window();
+        a_bare_token_file_name_syncs_the_working_directory();
+        a_replayed_redeem_for_the_same_host_recovers_a_lost_response();
+    }
+
+    #[test]
+    fn cloud_bootstrap_batch_3() {
+        a_different_host_key_cannot_replay();
+        the_host_key_is_stable_and_private();
+        relay_host_id_matches_the_server_derivation();
+        strict_decoding_matches_the_contract();
+        an_overlong_list_is_cut_instead_of_failing_the_refresh();
+        a_quiesce_request_rides_on_the_refresh();
+        origins_must_be_canonical();
     }
 }

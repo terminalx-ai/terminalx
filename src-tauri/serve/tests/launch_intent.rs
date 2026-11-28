@@ -123,7 +123,7 @@ fn the_first_prompt_reaches_the_agent_once_on_the_work_branch() {
     let claims = mailbox.launch().claims;
     let serve = start();
     wait_until("the restarted runtime to claim", || (mailbox.launch().claims > claims).then_some(()));
-    std::thread::sleep(Duration::from_secs(2));
+    std::thread::sleep(Duration::from_millis(400));
     let launch = mailbox.launch();
     assert_eq!(launch.state, "started");
     assert_eq!(launch.completions.len(), 1, "{:?}", launch.completions);

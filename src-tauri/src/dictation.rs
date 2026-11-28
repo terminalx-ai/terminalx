@@ -1292,62 +1292,46 @@ mod mac {
         }
 
         #[test]
-        fn creating_dictation_does_not_consult_the_permission_gateway() {
+        fn permission_gateway_flows_and_denied_messages() {
+            // Creating dictation does not consult the permission gateway.
             let gateway = Arc::new(PermissionGateway::asking());
-
             let _dictation = Dictation::with_permissions(gateway.clone());
-
             assert!(gateway.calls.lock().unwrap().is_empty());
-        }
 
-        #[test]
-        fn an_apple_dictation_start_requests_both_undecided_permissions() {
+            // Apple dictation requests both undecided permissions.
             let gateway = Arc::new(PermissionGateway::asking());
             let result = Arc::new(Mutex::new(None));
             let reported = result.clone();
-
             let start = permission::begin(gateway.clone(), true, move |outcome| {
                 *reported.lock().unwrap() = Some(outcome);
             });
-
             assert!(matches!(start, permission::Start::Pending));
             assert_eq!(
                 gateway.calls.lock().unwrap().as_slice(),
                 ["microphone_status", "speech_status", "request_microphone", "request_speech"]
             );
             assert_eq!(*result.lock().unwrap(), Some(Ok(())));
-        }
 
-        #[test]
-        fn a_local_dictation_start_never_consults_speech_permission() {
+            // Local dictation never consults speech permission.
             let gateway = Arc::new(PermissionGateway::asking());
-
             let start = permission::begin(gateway.clone(), false, |_| {});
-
             assert!(matches!(start, permission::Start::Pending));
             assert_eq!(gateway.calls.lock().unwrap().as_slice(), ["microphone_status", "request_microphone"]);
-        }
 
-        #[test]
-        fn denied_microphone_message_names_the_pane_and_leaves_the_key_to_the_frontend() {
             // The frontend titles the row and puts the reader's own shortcut in place of this phrase.
             assert_eq!(
                 MIC_DENIED,
                 "Dictation needs it. Turn TerminalX on in System Settings › Privacy & Security › Microphone, then press the dictation shortcut again."
             );
             assert!(MIC_DENIED.contains("the dictation shortcut"));
-        }
 
-        #[test]
-        fn either_denied_permission_stops_apple_dictation_before_a_request() {
+            // Either denied permission stops Apple dictation before a request.
             for (microphone, speech, expected) in [
                 (permission::Status::Denied, permission::Status::Ask, permission::Kind::Microphone),
                 (permission::Status::Granted, permission::Status::Denied, permission::Kind::SpeechRecognition),
             ] {
                 let gateway = Arc::new(PermissionGateway::with_statuses(microphone, speech));
-
                 let start = permission::begin(gateway.clone(), true, |_| panic!("a denied permission cannot complete successfully"));
-
                 match start {
                     permission::Start::Denied(kind) => assert_eq!(kind, expected),
                     _ => panic!("a denied permission must stop before prompting"),
@@ -1363,34 +1347,22 @@ mod mac {
         }
 
         #[test]
-        fn a_local_final_names_the_segment_its_partials_did_and_carries_the_raw_words() {
+        fn local_settlement_formats_output_noise_and_empty_speech() {
             assert_eq!(
                 settled("fix the build", NoiseStatus::Disabled, |raw| format!("{raw}.")),
                 serde_json::json!({ "kind": "final", "text": "fix the build.", "raw": "fix the build", "segment": 0 })
             );
-        }
-
-        #[test]
-        fn speech_the_noise_guard_rejects_settles_as_no_text_with_the_words_it_takes_back() {
             let noise = NoiseResult::new(NoiseStatus::NoSpeech);
             assert_eq!(
                 settled("Thank you.", NoiseStatus::NoSpeech, |raw| noise.apply(raw.to_string())),
                 serde_json::json!({ "kind": "final", "text": "", "raw": "Thank you.", "segment": 0 })
             );
-        }
-
-        #[test]
-        fn sound_with_no_words_in_it_says_nothing_was_recognised() {
             for noise in [NoiseStatus::Disabled, NoiseStatus::Speech, NoiseStatus::Unavailable] {
                 assert_eq!(
                     settled(" ", noise, |raw| raw.to_string()),
                     serde_json::json!({ "kind": "error", "message": NOT_RECOGNISED })
                 );
             }
-        }
-
-        #[test]
-        fn no_words_and_no_speech_settle_quietly() {
             assert_eq!(
                 settled("", NoiseStatus::NoSpeech, |_| String::new()),
                 serde_json::json!({ "kind": "final", "text": "", "raw": "", "segment": 0 })
@@ -1398,29 +1370,13 @@ mod mac {
         }
 
         #[test]
-        fn a_buffer_of_zeroes_is_silence() {
+        fn silence_detection_thresholds() {
             assert!(is_silent(&vec![0.0; SECOND]));
-        }
-
-        #[test]
-        fn nothing_at_all_is_silence() {
             assert!(is_silent(&[]));
-        }
-
-        #[test]
-        fn a_buffer_under_a_quarter_second_is_silence_however_loud() {
             assert!(is_silent(&vec![0.8; SECOND / 4 - 1]));
-        }
-
-        #[test]
-        fn one_faint_sample_in_a_long_buffer_is_not_silence() {
             let mut samples = vec![0.0f32; SECOND];
             samples[SECOND / 2] = -0.0001;
             assert!(!is_silent(&samples));
-        }
-
-        #[test]
-        fn a_quarter_second_of_speech_is_not_silence() {
             assert!(!is_silent(&vec![0.2; SECOND / 4]));
         }
 
@@ -1430,147 +1386,82 @@ mod mac {
         const PLACEHOLDER: Option<(f64, f64)> = Some((0.0, 0.0));
 
         #[test]
-        fn placeholder_partials_share_one_utterance() {
+        fn apple_segment_tracker_utterance_and_restart_boundaries() {
+            // Placeholder partials share one utterance; a settled result closes it.
             let mut segments = AppleSegmentTracker::default();
             assert_eq!(segments.observe(PLACEHOLDER, false), Some(0));
             assert_eq!(segments.observe(PLACEHOLDER, false), Some(0));
-            assert_eq!(segments.observe(PLACEHOLDER, false), Some(0));
-        }
-
-        #[test]
-        fn a_settled_result_closes_the_open_utterance_and_keeps_its_identity() {
-            let mut segments = AppleSegmentTracker::default();
             assert_eq!(segments.observe(PLACEHOLDER, false), Some(0));
             assert_eq!(segments.observe(Some((0.0, 1.26)), false), Some(0));
-        }
-
-        #[test]
-        fn speech_after_a_settled_utterance_starts_a_new_one() {
-            // one.aiff: "Fix the build, please" [1.5 s] "Then run the test for it".
-            let mut segments = AppleSegmentTracker::default();
-            assert_eq!(segments.observe(PLACEHOLDER, false), Some(0));
-            assert_eq!(segments.observe(Some((0.0, 1.26)), false), Some(0));
+            // Speech after a settled utterance starts a new one.
             assert_eq!(segments.observe(PLACEHOLDER, false), Some(1));
             assert_eq!(segments.observe(PLACEHOLDER, false), Some(1));
             assert_eq!(segments.observe(Some((3.12, 4.23)), false), Some(1));
-        }
 
-        #[test]
-        fn a_burst_of_utterances_is_told_apart_without_timing() {
-            // two.aiff: three results in one tick after a cold start.
+            // Burst of utterances told apart without timing.
             let mut segments = AppleSegmentTracker::default();
             assert_eq!(segments.observe(PLACEHOLDER, false), Some(0));
             assert_eq!(segments.observe(Some((0.0, 6.72)), false), Some(0));
             assert_eq!(segments.observe(PLACEHOLDER, false), Some(1));
             assert_eq!(segments.observe(Some((7.14, 8.25)), false), Some(1));
             assert_eq!(segments.observe(PLACEHOLDER, false), Some(2));
-        }
 
-        #[test]
-        fn a_settled_utterance_corrected_again_keeps_its_identity() {
+            // Settled utterance corrected again keeps its identity, even while the next is open.
             let mut segments = AppleSegmentTracker::default();
             assert_eq!(segments.observe(PLACEHOLDER, false), Some(0));
             assert_eq!(segments.observe(Some((0.20, 1.40)), false), Some(0));
             assert_eq!(segments.observe(Some((0.18, 1.45)), false), Some(0));
-        }
 
-        #[test]
-        fn a_settled_utterance_corrected_again_keeps_its_identity_while_the_next_is_open() {
             let mut segments = AppleSegmentTracker::default();
             assert_eq!(segments.observe(PLACEHOLDER, false), Some(0));
             assert_eq!(segments.observe(Some((0.0, 1.26)), false), Some(0));
             assert_eq!(segments.observe(PLACEHOLDER, false), Some(1));
             assert_eq!(segments.observe(Some((0.0, 1.30)), false), Some(0));
-            // The open utterance is still open, and still the same one.
             assert_eq!(segments.observe(PLACEHOLDER, false), Some(1));
             assert_eq!(segments.observe(Some((3.12, 4.23)), false), Some(1));
             assert_eq!(segments.observe(PLACEHOLDER, false), Some(2));
-        }
 
-        #[test]
-        fn a_settled_result_after_the_previous_range_is_a_new_utterance() {
+            // Settled result after the previous range is a new utterance.
             let mut segments = AppleSegmentTracker::default();
             assert_eq!(segments.observe(Some((0.20, 1.40)), false), Some(0));
             assert_eq!(segments.observe(Some((2.95, 3.60)), false), Some(1));
-        }
 
-        #[test]
-        fn a_final_result_closes_its_utterance() {
+            // Final and empty-final results close the open utterance.
             let mut segments = AppleSegmentTracker::default();
             assert_eq!(segments.observe(PLACEHOLDER, false), Some(0));
             assert_eq!(segments.observe(PLACEHOLDER, true), Some(0));
             assert_eq!(segments.observe(PLACEHOLDER, false), Some(1));
-        }
 
-        #[test]
-        fn an_empty_final_closes_the_open_utterance() {
             let mut segments = AppleSegmentTracker::default();
             assert_eq!(segments.observe(PLACEHOLDER, false), Some(0));
             assert_eq!(segments.observe(None, true), None);
             assert_eq!(segments.observe(PLACEHOLDER, false), Some(1));
-        }
 
-        #[test]
-        fn a_restarted_request_continues_segment_numbering() {
+            // Restarted request continues segment numbering across reset timestamps.
             let mut segments = AppleSegmentTracker::default();
             assert_eq!(segments.observe(PLACEHOLDER, false), Some(0));
             assert_eq!(segments.observe(Some((4.20, 5.10)), false), Some(0));
-
             segments.restart_request();
-
-            // Timestamps start over, so a range inside the old one is still new.
             assert_eq!(segments.observe(PLACEHOLDER, false), Some(1));
             assert_eq!(segments.observe(Some((0.10, 0.80)), false), Some(1));
         }
 
         #[test]
-        fn an_early_final_restarts_recognition() {
+        fn restart_decision_and_no_speech_rules() {
             assert_eq!(restart_decision(true, false, true, true, 0, RESTART_INTERVAL), RestartDecision::Restart);
-        }
-
-        #[test]
-        fn a_partial_result_does_not_restart() {
             assert_eq!(restart_decision(false, false, true, true, 0, RESTART_INTERVAL), RestartDecision::Ignore);
-        }
-
-        #[test]
-        fn a_final_requested_by_stop_finishes() {
             assert_eq!(restart_decision(true, true, true, true, 0, RESTART_INTERVAL), RestartDecision::Finish);
-        }
-
-        #[test]
-        fn an_old_generation_cannot_restart() {
             assert_eq!(restart_decision(true, false, false, true, 0, RESTART_INTERVAL), RestartDecision::Ignore);
-        }
-
-        #[test]
-        fn a_closed_capture_cannot_restart() {
             assert_eq!(restart_decision(true, false, true, false, 0, RESTART_INTERVAL), RestartDecision::Ignore);
-        }
-
-        #[test]
-        fn a_restart_inside_the_rate_limit_fails_visible() {
             assert_eq!(
                 restart_decision(true, false, true, true, 1, RESTART_INTERVAL - Duration::from_millis(1)),
                 RestartDecision::Fail
             );
-        }
-
-        #[test]
-        fn a_session_at_the_restart_limit_fails_visible() {
-            assert_eq!(restart_decision(true, false, true, true, MAX_RESTARTS, RESTART_INTERVAL), RestartDecision::Fail);
-        }
-
-        #[test]
-        fn thirty_spaced_restarts_are_bounded_by_the_session_cap() {
             for completed in 0..MAX_RESTARTS {
                 assert_eq!(restart_decision(true, false, true, true, completed, RESTART_INTERVAL), RestartDecision::Restart);
             }
             assert_eq!(restart_decision(true, false, true, true, MAX_RESTARTS, RESTART_INTERVAL), RestartDecision::Fail);
-        }
 
-        #[test]
-        fn the_no_speech_error_is_restartable() {
             assert!(is_no_speech_error(NO_SPEECH_DOMAIN, NO_SPEECH_CODE));
             assert!(!is_no_speech_error("NSURLErrorDomain", NO_SPEECH_CODE));
             assert!(!is_no_speech_error(NO_SPEECH_DOMAIN, 1));

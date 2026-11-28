@@ -547,7 +547,6 @@ pub fn sanitize(payload: &mut Payload) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
     fn diagnostics_rotate_and_failed_writes_do_not_block_work() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("tab.diagnostics.jsonl");
@@ -560,7 +559,6 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "{\"v\":1}\n");
     }
 
-    #[test]
     fn codex_sign_in_screen_is_a_signed_out_recovery_after_persistence_and_rereading() {
         let mut payload = Payload::Error { message: crate::harness::codex::pty::SIGN_IN_REQUIRED.into(), fatal: false, detail: None };
         // The live event and a subsequent transcript read both sanitize.
@@ -571,7 +569,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn classifications_do_not_echo_diagnostics() {
         for (raw, expected) in [
             ("at capacity token=secret /Users/private", RecoveryKind::Capacity),
@@ -586,7 +583,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn a_startup_failure_says_why_on_one_line_and_the_agents_words_on_the_next() {
         let exit = EarlyExit::read(b"Welcome\r\n\x1b[31mError: ~/.claude/settings.json line 14: Unexpected token }\x1b[0m\r\n");
         let text = startup_failure("Claude Code", &exit);
@@ -600,7 +596,6 @@ mod tests {
         assert!(!secret.contains("sk-abc123def"), "{secret}");
     }
 
-    #[test]
     fn a_close_that_timed_out_names_the_agent_and_the_wait() {
         assert_eq!(close_timed_out("Codex"), "Codex didn't stop within 10 seconds");
         for said in ["Local process exit could not be confirmed. Retry Stop before resuming.", "Agent exit could not be confirmed. Its conversation stayed in its original folder."] {
@@ -608,6 +603,15 @@ mod tests {
         }
         assert!(!exit_unconfirmed("Stop is already in progress."));
         assert!(!exit_unconfirmed("tab not found"));
+    }
+
+    #[test]
+    fn recovery_batch_1() {
+        diagnostics_rotate_and_failed_writes_do_not_block_work();
+        codex_sign_in_screen_is_a_signed_out_recovery_after_persistence_and_rereading();
+        classifications_do_not_echo_diagnostics();
+        a_startup_failure_says_why_on_one_line_and_the_agents_words_on_the_next();
+        a_close_that_timed_out_names_the_agent_and_the_wait();
     }
 }
 
@@ -618,14 +622,12 @@ mod lifecycle_tests {
     fn event(payload: Payload) -> AgentEvent {
         AgentEvent { id: "e".into(), session_id: "s".into(), tab_id: "t".into(), harness: "codex".into(), seq: 1, ts: String::new(), message_ts: None, prompt_request_id: None, subagent: None, payload }
     }
-    #[test]
     fn silence_only_pauses_work_and_never_expires_a_permission() {
         use std::time::Duration;
         assert!(!is_stale(true, Duration::from_secs(299), Patience::DEFAULT));
         assert!(is_stale(true, Duration::from_secs(300), Patience::DEFAULT));
         assert!(!is_stale(false, Duration::from_secs(3600), Patience::DEFAULT));
     }
-    #[test]
     fn unconfirmed_withdrawal_does_not_restore_a_legacy_unsent_claim() {
         let events = vec![
             event(Payload::UserMessage { author: None, bot: None, text: "possibly delivered".into(), images: vec![], files: Vec::new(), baseline: None, queued: true, cwd: None }),
@@ -635,7 +637,6 @@ mod lifecycle_tests {
         assert_eq!(from_history(&events), Some(RecoveryKind::DeliveryUnconfirmed));
     }
 
-    #[test]
     fn restore_failure_stop_and_unknown_delivery() {
         let mut events = vec![event(Payload::Recovery { kind: Some(RecoveryKind::Capacity) })];
         assert_eq!(from_history(&events), Some(RecoveryKind::Capacity));
@@ -650,7 +651,6 @@ mod lifecycle_tests {
     }
     /// A tab follows its terminal (#437): what was owed to the conversation
     /// it held before is not owed by the one that took its place.
-    #[test]
     fn another_conversation_in_the_tab_starts_with_nothing_to_recover() {
         let moved_on = Payload::Conversation { id: Some("c2".into()), harness: "codex".into(), resumed: false };
         let lapsed = event(Payload::PermissionDecided { request_id: "r".into(), tool_use_id: None, allowed: false, label: "Lapsed".into(), automatic: true });
@@ -662,17 +662,14 @@ mod lifecycle_tests {
         assert_eq!(from_history(&[event(moved_on), lapsed]), Some(RecoveryKind::PermissionExpired));
     }
 
-    #[test]
     fn a_tool_failure_an_older_log_recorded_is_not_restored() {
         let events = vec![event(Payload::Recovery { kind: Some(RecoveryKind::Tool) })];
         assert_eq!(from_history(&events), None);
     }
-    #[test]
     fn expired_permission_has_recovery_instead_of_working() {
         let events = vec![event(Payload::PermissionDecided { request_id: "r".into(), tool_use_id: None, allowed: false, label: "Lapsed".into(), automatic: true })];
         assert_eq!(from_history(&events), Some(RecoveryKind::PermissionExpired));
     }
-    #[test]
     fn a_tool_is_never_a_session_failure_and_failed_details_are_protected() {
         assert_eq!(failure(&Payload::ToolCallCompleted { call_id: "done".into(), result: ToolResult::default() }), None);
         let mut failed = Payload::ToolCallCompleted { call_id: "failed".into(), result: ToolResult { text: "TOKEN=secret /Users/private".into(), is_error: true, structured: Some(serde_json::json!({"request": "secret"})), ..Default::default() } };
@@ -690,7 +687,6 @@ mod lifecycle_tests {
         assert!(!public.contains("secret"));
         assert!(!public.contains("/Users"));
     }
-    #[test]
     fn a_turn_that_ends_in_an_error_is_a_failure_and_one_that_ends_well_is_not() {
         let end = |status, final_text: Option<&str>| Payload::TurnCompleted { status, final_text: final_text.map(Into::into), usage: None, duration_ms: None, head: None, auth_failed: false, detail: None };
         assert_eq!(failure(&end(TurnStatus::Ok, None)), None);
@@ -698,7 +694,6 @@ mod lifecycle_tests {
         assert_eq!(failure(&end(TurnStatus::Error, Some("exited"))), Some(RecoveryKind::Failed));
         assert_eq!(failure(&end(TurnStatus::Error, Some("connection closed"))), Some(RecoveryKind::Disconnected));
     }
-    #[test]
     fn a_retry_with_attempts_left_is_not_a_failure() {
         assert_eq!(failure(&Payload::ApiRetry { attempt: 2, max_retries: 10, reason: Some("overloaded".into()) }), None);
         let mut payloads = Vec::new();
@@ -714,13 +709,11 @@ mod lifecycle_tests {
         crate::harness::codex::rollout::decode_line(r#"{"type":"event_msg","payload":{"type":"error","message":"stream disconnected before completion"}}"#, &Default::default(), &mut payloads);
         assert_eq!(payloads.iter().map(failure).collect::<Vec<_>>(), vec![Some(RecoveryKind::Capacity), Some(RecoveryKind::Capacity), Some(RecoveryKind::Failed), Some(RecoveryKind::Disconnected)]);
     }
-    #[test]
     fn warning_limits_are_not_terminal_but_rejected_requests_are() {
         assert_eq!(failure(&Payload::RateLimited { status: Some("allowed_warning".into()), resets_at: None, window: None, message: None }), None);
         assert_eq!(failure(&Payload::RateLimited { status: Some("rejected".into()), resets_at: None, window: None, message: None }), Some(RecoveryKind::UsageLimit));
         assert_eq!(failure(&Payload::ApiRetry { attempt: 3, max_retries: 3, reason: Some("capacity".into()) }), Some(RecoveryKind::Capacity));
     }
-    #[test]
     fn a_spent_plan_keeps_its_reset_time_and_window_but_not_the_provider_text() {
         let line = r#"{"type":"assistant","isApiErrorMessage":true,"error":"rate_limit","apiError":"usage_limit_reached","apiErrorStatus":429,"quotaLimits":{"status":"rejected","resetsAt":1791745200,"rateLimitType":"seven_day"},"message":{"content":[{"type":"text","text":"You've hit your weekly limit · resets Oct 11 at 11pm (Asia/Dubai)"}]}}"#;
         let mut payloads = Vec::new();
@@ -734,7 +727,6 @@ mod lifecycle_tests {
         assert_eq!(RecoveryKind::classify("You've hit your weekly limit · resets Oct 11"), RecoveryKind::UsageLimit);
         assert_eq!(RecoveryKind::classify("rate limit exceeded, retry later"), RecoveryKind::Capacity);
     }
-    #[test]
     fn a_lapsed_sign_in_is_its_own_kind_and_keeps_no_provider_text() {
         let mut payloads = Vec::new();
         crate::harness::claude::transcript::decode_line(r#"{"type":"assistant","isApiErrorMessage":true,"error":"authentication_failed","message":{"content":[{"type":"text","text":"Login expired · Please run /login"}]}}"#, &Default::default(), &mut payloads);
@@ -756,7 +748,6 @@ mod lifecycle_tests {
     /// the TUI's bootstrap in about 2 s.
     const CODEX_REVOKED: &str = "account/read failed during TUI bootstrap: account/read failed: workspace routing discovery unauthorized (401) (code -32603)";
 
-    #[test]
     fn a_codex_that_exits_at_startup_refused_is_a_sign_in_and_says_why() {
         // As the pane has it: colours, an alternate screen left, CRLF.
         let output = format!("\x1b[?1049h\x1b[2J\x1b[H\x1b[1mCodex\x1b[0m\r\n\x1b[?1049l\x1b[31m{CODEX_REVOKED}\x1b[0m\r\n");
@@ -779,7 +770,6 @@ mod lifecycle_tests {
         }
     }
 
-    #[test]
     fn a_network_failure_or_a_crash_at_startup_is_not_a_sign_in() {
         for text in [
             "account/read failed during TUI bootstrap: account/read failed: workspace routing discovery failed: error sending request for url (https://chatgpt.com/backend-api/wham/accounts/check): connection refused (code -32603)",
@@ -798,7 +788,6 @@ mod lifecycle_tests {
         assert_eq!(EarlyExit::read(b"\x1b[2J\r\n  \r\n"), EarlyExit::default());
     }
 
-    #[test]
     fn a_detail_is_the_last_line_with_secrets_addresses_and_homes_cut_out() {
         assert_eq!(
             detail("error: unexpected argument '--no-daemon' found\n\nUsage: codex [OPTIONS] [PROMPT]\n").as_deref(),
@@ -912,7 +901,6 @@ mod lifecycle_tests {
         assert_eq!(detail(old).as_deref(), Some(old));
     }
 
-    #[test]
     fn a_refused_turn_keeps_its_kind_and_its_detail_through_sanitizing() {
         let refused = Payload::TurnCompleted { status: TurnStatus::Error, final_text: Some("exited".into()), usage: None, duration_ms: None, head: None, auth_failed: true, detail: Some(CODEX_REVOKED.into()) };
         assert_eq!(failure(&refused), Some(RecoveryKind::SignedOut));
@@ -933,12 +921,40 @@ mod lifecycle_tests {
         assert!(matches!(old, Payload::TurnCompleted { auth_failed: false, detail: None, .. }));
     }
 
-    #[test]
     fn provider_capacity_records_reach_recovery() {
         let mut payloads = Vec::new();
         crate::harness::claude::transcript::decode_line(r#"{"type":"assistant","isApiErrorMessage":true,"message":{"content":[{"type":"text","text":"The model is at capacity. TOKEN=secret"}]}}"#, &Default::default(), &mut payloads);
         assert_eq!(failure(&payloads[0]), Some(RecoveryKind::Capacity));
         sanitize(&mut payloads[0]);
         assert!(!serde_json::to_string(&payloads[0]).unwrap().contains("secret"));
+    }
+
+    #[test]
+    fn recovery_batch_lifecycle_tests_1() {
+        silence_only_pauses_work_and_never_expires_a_permission();
+        unconfirmed_withdrawal_does_not_restore_a_legacy_unsent_claim();
+        restore_failure_stop_and_unknown_delivery();
+        another_conversation_in_the_tab_starts_with_nothing_to_recover();
+        a_tool_failure_an_older_log_recorded_is_not_restored();
+        expired_permission_has_recovery_instead_of_working();
+    }
+
+    #[test]
+    fn recovery_batch_lifecycle_tests_2() {
+        a_tool_is_never_a_session_failure_and_failed_details_are_protected();
+        a_turn_that_ends_in_an_error_is_a_failure_and_one_that_ends_well_is_not();
+        a_retry_with_attempts_left_is_not_a_failure();
+        warning_limits_are_not_terminal_but_rejected_requests_are();
+        a_spent_plan_keeps_its_reset_time_and_window_but_not_the_provider_text();
+        a_lapsed_sign_in_is_its_own_kind_and_keeps_no_provider_text();
+    }
+
+    #[test]
+    fn recovery_batch_lifecycle_tests_3() {
+        a_codex_that_exits_at_startup_refused_is_a_sign_in_and_says_why();
+        a_network_failure_or_a_crash_at_startup_is_not_a_sign_in();
+        a_detail_is_the_last_line_with_secrets_addresses_and_homes_cut_out();
+        a_refused_turn_keeps_its_kind_and_its_detail_through_sanitizing();
+        provider_capacity_records_reach_recovery();
     }
 }

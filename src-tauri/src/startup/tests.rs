@@ -6,7 +6,6 @@ pub(super) fn launch(pane: &str, phase: Phase) -> Launch {
         exit_code: None, cpu_time: None, resident_bytes: None, pid_birth: None, recorder: None, pipeline_id: None, recorder_owner: None, recorder_exit: None }
 }
 
-#[test]
 fn never_ready_children_make_one_incident_and_escalate_without_metadata_changes() {
     let mut state = Snapshot { launches: vec![launch("tab:a", Phase::AwaitingReady)], ..Snapshot::default() };
     state.tick(119_999);
@@ -26,7 +25,6 @@ fn never_ready_children_make_one_incident_and_escalate_without_metadata_changes(
     assert_eq!(restored.active().unwrap().escalated_at, Some(420_000));
 }
 
-#[test]
 fn quiet_running_compiles_and_human_prompts_are_not_failed() {
     let mut state = Snapshot { launches: vec![launch("compile", Phase::Running), launch("human", Phase::PermissionPrompt)], ..Snapshot::default() };
     state.tick(86_400_000);
@@ -34,7 +32,6 @@ fn quiet_running_compiles_and_human_prompts_are_not_failed() {
     assert_eq!(state.launches[1].phase, Phase::PermissionPrompt);
 }
 
-#[test]
 fn history_retention_does_not_forget_live_roots_or_pending_validation() {
     let mut pending = launch("validation", Phase::Running);
     pending.recorder = Some(uuid::Uuid::new_v4().to_string());
@@ -48,7 +45,6 @@ fn history_retention_does_not_forget_live_roots_or_pending_validation() {
     assert!(state.launches.contains(&live));
 }
 
-#[test]
 fn an_unknown_permission_snapshot_preserves_the_last_known_human_wait() {
     let directory = tempfile::tempdir().unwrap();
     let monitor = Monitor { directory: directory.path().into() };
@@ -60,7 +56,6 @@ fn an_unknown_permission_snapshot_preserves_the_last_known_human_wait() {
     assert!(state.active().is_none());
 }
 
-#[test]
 fn an_unreadable_validation_record_does_not_stop_incident_escalation() {
     let directory = tempfile::tempdir().unwrap();
     let monitor = Monitor { directory: directory.path().into() };
@@ -78,7 +73,6 @@ fn an_unreadable_validation_record_does_not_stop_incident_escalation() {
     assert!(validation::refresh(directory.path(), &mut state).is_err(), "bad records still fail admission closed");
 }
 
-#[test]
 fn tickets_preserve_late_exact_exit_and_do_not_overwrite_a_new_generation() {
     let directory = tempfile::tempdir().unwrap();
     let monitor = Arc::new(Monitor { directory: directory.path().into() });
@@ -95,7 +89,6 @@ fn tickets_preserve_late_exact_exit_and_do_not_overwrite_a_new_generation() {
     assert!(state.active().is_some(), "an exit alone does not demonstrate recovery");
 }
 
-#[test]
 fn export_allowlist_excludes_secrets_even_in_identifiers_and_child_output() {
     let secret = "token=secret /Users/alice/private source prompt transcript history alice@example.com";
     let mut state = Snapshot { launches: vec![launch(secret, Phase::AwaitingReady)], ..Snapshot::default() };
@@ -128,7 +121,6 @@ fn export_allowlist_excludes_secrets_even_in_identifiers_and_child_output() {
     assert!(report.contains("23"));
 }
 
-#[test]
 fn pending_probe_is_deduplicated_across_restarts_and_never_prevents_escalation() {
     let directory = tempfile::tempdir().unwrap();
     let mut state = Snapshot { launches: vec![launch("tab:a", Phase::AwaitingReady)], ..Snapshot::default() };
@@ -143,7 +135,6 @@ fn pending_probe_is_deduplicated_across_restarts_and_never_prevents_escalation()
     assert!(state.active().unwrap().recovered_at.is_none());
 }
 
-#[test]
 fn late_health_result_is_retained_but_does_not_resume_a_still_stalled_child() {
     let directory = tempfile::tempdir().unwrap();
     let mut state = Snapshot { launches: vec![launch("tab:a", Phase::AwaitingReady)], ..Snapshot::default() };
@@ -167,7 +158,6 @@ pub(super) fn recorder_exit(code: i32, at: i64) -> RecorderExit {
     RecorderExit { finished_at: at, exit_code: Some(code), signal: None, failure: None, os_error: None }
 }
 
-#[test]
 fn dead_probe_owner_is_retained_after_reopen_without_recovery_or_duplicate_children() {
     let directory = tempfile::tempdir().unwrap();
     let mut state = Snapshot { launches: vec![launch("tab:a", Phase::AwaitingReady)], ..Snapshot::default() };
@@ -191,7 +181,6 @@ fn dead_probe_owner_is_retained_after_reopen_without_recovery_or_duplicate_child
     assert!(reopened.active().is_some());
 }
 
-#[test]
 fn completed_probe_needs_the_durable_wait_after_reopening() {
     let directory = tempfile::tempdir().unwrap();
     let mut state = Snapshot { launches: vec![launch("tab:a", Phase::AwaitingReady)], ..Snapshot::default() };
@@ -223,7 +212,6 @@ fn completed_probe_needs_the_durable_wait_after_reopening() {
     assert_eq!(reopened.launches[0].exit_code, None, "health does not invent a lost child's outcome");
 }
 
-#[test]
 fn delayed_callbacks_cannot_revive_an_exit_or_erase_its_exact_status() {
     let directory = tempfile::tempdir().unwrap();
     let monitor = Arc::new(Monitor { directory: directory.path().into() });
@@ -238,7 +226,6 @@ fn delayed_callbacks_cannot_revive_an_exit_or_erase_its_exact_status() {
     assert_eq!(state.launches[0].pid, None);
 }
 
-#[test]
 fn spawn_is_progress_and_repeated_readiness_is_not_new_progress() {
     let directory = tempfile::tempdir().unwrap();
     let monitor = Arc::new(Monitor { directory: directory.path().into() });
@@ -256,7 +243,6 @@ fn spawn_is_progress_and_repeated_readiness_is_not_new_progress() {
     assert_eq!(state.launches[0].last_progress_at, 2);
 }
 
-#[test]
 fn permission_observation_is_not_progress_and_dismissal_keeps_startup_proven() {
     let directory = tempfile::tempdir().unwrap();
     let monitor = Monitor { directory: directory.path().into() };
@@ -280,7 +266,6 @@ fn completed_health(state: &mut Snapshot, started_at: i64, finished_at: i64) {
         result: Some(probe::ProbeResult { finished_at, native: probe::Captured { stdout: "terminalx-startup-ready\n".into(), ..shell.clone() }, shell }) });
 }
 
-#[test]
 fn new_overdue_launch_joins_before_health_can_recover_the_host_incident() {
     let directory = tempfile::tempdir().unwrap();
     let monitor = Monitor { directory: directory.path().into() };
@@ -315,7 +300,6 @@ fn waiting(pane: &str, proven: bool, since: i64) -> Launch {
 
 // PRO-575: on the owner's Mac two agents had waited at a card since before the incident, and
 // no probe could ever clear it while they did.
-#[test]
 fn an_unrelated_pane_waiting_since_before_the_incident_does_not_block_recovery() {
     let directory = tempfile::tempdir().unwrap();
     let mut state = Snapshot { launches: vec![waiting("tab:human", true, 60_000), launch("tab:a", Phase::AwaitingReady)], ..Snapshot::default() };
@@ -329,7 +313,6 @@ fn an_unrelated_pane_waiting_since_before_the_incident_does_not_block_recovery()
     assert_eq!(state.launches[0].phase, Phase::PermissionPrompt, "recovery does not answer or touch the wait");
 }
 
-#[test]
 fn a_wait_in_the_incidents_own_pane_still_blocks_recovery() {
     let directory = tempfile::tempdir().unwrap();
     let mut state = Snapshot { launches: vec![launch("tab:a", Phase::AwaitingReady)], ..Snapshot::default() };
@@ -347,7 +330,6 @@ fn a_wait_in_the_incidents_own_pane_still_blocks_recovery() {
     assert!(state.active().is_none(), "once answered, the passing probe after the incident's own progress stands");
 }
 
-#[test]
 fn an_unproven_start_waiting_after_detection_blocks_recovery_in_any_pane() {
     let directory = tempfile::tempdir().unwrap();
     let mut state = Snapshot { launches: vec![launch("tab:a", Phase::AwaitingReady)], ..Snapshot::default() };
@@ -362,7 +344,6 @@ fn an_unproven_start_waiting_after_detection_blocks_recovery_in_any_pane() {
 }
 
 // PRO-575: each new card in any tab moved the freshness boundary, so a probe went stale within a minute.
-#[test]
 fn an_unrelated_panes_progress_does_not_invalidate_a_probe() {
     let directory = tempfile::tempdir().unwrap();
     let mut state = Snapshot { launches: vec![launch("tab:a", Phase::AwaitingReady), launch("tab:busy", Phase::Running)], ..Snapshot::default() };
@@ -381,7 +362,6 @@ fn an_unrelated_panes_progress_does_not_invalidate_a_probe() {
     assert!(state.active().is_none());
 }
 
-#[test]
 fn observation_lost_after_a_passing_probe_recovers_once_the_incidents_panes_have_closed() {
     let directory = tempfile::tempdir().unwrap();
     let mut state = Snapshot { launches: vec![launch("tab:a", Phase::AwaitingReady), closed(launch("tab:b", Phase::AwaitingReady))], ..Snapshot::default() };
@@ -402,7 +382,6 @@ fn observation_lost_after_a_passing_probe_recovers_once_the_incidents_panes_have
     assert_eq!(reopened.launches[1].exit_code, None, "recovery does not invent the lost child's outcome");
 }
 
-#[test]
 fn observation_lost_after_the_probe_still_needs_new_health_while_a_launch_may_be_alive() {
     let directory = tempfile::tempdir().unwrap();
     // The birth is unknown, so nothing proves the lost launch has closed.
@@ -420,7 +399,6 @@ fn observation_lost_after_the_probe_still_needs_new_health_while_a_launch_may_be
 
 // The owner's Mac on 2026-11-26: 3,228 launches, 2,782 of them unobserved and 2,805 waits kept on the
 // open incident, read and rewritten on every refresh.
-#[test]
 fn a_state_with_thousands_of_records_loads_and_is_pruned_to_the_bound_on_first_refresh() {
     let directory = tempfile::tempdir().unwrap();
     let mut state = Snapshot { launches: vec![launch("tab:a", Phase::AwaitingReady)], ..Snapshot::default() };
@@ -453,7 +431,6 @@ fn a_state_with_thousands_of_records_loads_and_is_pruned_to_the_bound_on_first_r
     assert_eq!(again, pruned);
 }
 
-#[test]
 fn pruning_never_drops_live_or_unsettled_records_even_over_the_bound() {
     let mut state = Snapshot { launches: (0..HISTORY + 10).map(|_| launch("tab:live", Phase::Running)).collect(), ..Snapshot::default() };
     state.launches.extend((0..5).map(|_| launch("tab:waiting", Phase::AwaitingReady)));
@@ -463,7 +440,6 @@ fn pruning_never_drops_live_or_unsettled_records_even_over_the_bound() {
     assert!(state.launches.iter().all(|launch| launch.phase != Phase::Exited));
 }
 
-#[test]
 fn a_dismissed_banner_stays_hidden_for_the_same_incident_across_restart() {
     let directory = tempfile::tempdir().unwrap();
     let mut state = Snapshot { launches: vec![launch("tab:a", Phase::AwaitingReady)], ..Snapshot::default() };
@@ -486,7 +462,6 @@ fn a_dismissed_banner_stays_hidden_for_the_same_incident_across_restart() {
     assert!(state.active().unwrap().dismissed.is_some(), "another launch in the same pane is not worse");
 }
 
-#[test]
 fn the_banner_returns_when_the_incident_escalates_or_reaches_more_panes() {
     let mut state = Snapshot { launches: vec![launch("tab:a", Phase::AwaitingReady)], ..Snapshot::default() };
     state.tick(120_000);
@@ -504,7 +479,6 @@ fn the_banner_returns_when_the_incident_escalates_or_reaches_more_panes() {
     assert_eq!(state.active().unwrap().dismissed, None, "a second affected pane is worse");
 }
 
-#[test]
 fn a_new_incident_shows_its_banner_after_an_earlier_one_was_dismissed() {
     let directory = tempfile::tempdir().unwrap();
     let mut state = Snapshot { launches: vec![launch("tab:a", Phase::AwaitingReady)], ..Snapshot::default() };
@@ -532,7 +506,6 @@ fn validation_blocker_in(state: &mut Snapshot) -> Option<String> {
     validation_blocker(None).unwrap()
 }
 
-#[test]
 fn unrelated_pipeline_permission_card_does_not_join_or_block_on_a_startup_incident() {
     use crate::issue_pipeline::{engine::Host, host::LocalHost, Pipeline, SessionRef};
     let _home = crate::store::temp_home();
@@ -575,7 +548,6 @@ fn unrelated_pipeline_permission_card_does_not_join_or_block_on_a_startup_incide
     assert!(host.startup_blocker(&pipeline, true).unwrap().is_some(), "new heavy validation is still held");
 }
 
-#[test]
 fn durable_wait_finishing_after_observation_window_is_late_success() {
     let directory = tempfile::tempdir().unwrap();
     let mut state = Snapshot { launches: vec![launch("tab:a", Phase::AwaitingReady)], ..Snapshot::default() };
@@ -587,7 +559,6 @@ fn durable_wait_finishing_after_observation_window_is_late_success() {
     assert_eq!(probe::export(restored.active().unwrap().probe.as_ref().unwrap())["status"], "lateSuccess");
 }
 
-#[test]
 fn shell_signal_is_exported_while_native_probe_is_still_pending() {
     let directory = tempfile::tempdir().unwrap();
     let mut state = Snapshot { launches: vec![launch("tab:a", Phase::AwaitingReady)], ..Snapshot::default() };
@@ -608,7 +579,6 @@ fn shell_signal_is_exported_while_native_probe_is_still_pending() {
     assert!(!report.to_string().contains("alice"));
 }
 
-#[test]
 fn health_must_be_strictly_newer_than_the_latest_affected_progress() {
     let directory = tempfile::tempdir().unwrap();
     let mut state = Snapshot { launches: vec![launch("tab:a", Phase::AwaitingReady)], ..Snapshot::default() };
@@ -623,7 +593,6 @@ fn health_must_be_strictly_newer_than_the_latest_affected_progress() {
     assert!(state.active().is_none());
 }
 
-#[test]
 fn health_started_before_or_during_progress_cannot_recover_after_reopening() {
     for phase in [Phase::Running, Phase::Exited] {
         for progress_at in [130_000, 135_000, 140_000] {
@@ -650,7 +619,6 @@ fn health_started_before_or_during_progress_cannot_recover_after_reopening() {
     }
 }
 
-#[test]
 fn probe_refresh_cannot_recover_before_joining_another_overdue_launch() {
     let directory = tempfile::tempdir().unwrap();
     let mut state = Snapshot { launches: vec![launch("tab:a", Phase::AwaitingReady)], ..Snapshot::default() };
@@ -664,4 +632,52 @@ fn probe_refresh_cannot_recover_before_joining_another_overdue_launch() {
     assert_eq!(state.active().unwrap().id, incident);
     assert_eq!(state.incidents.len(), 1);
     assert_eq!(state.active().unwrap().launches.len(), 2);
+}
+
+#[test]
+fn startup_batch_1() {
+    never_ready_children_make_one_incident_and_escalate_without_metadata_changes();
+    quiet_running_compiles_and_human_prompts_are_not_failed();
+    history_retention_does_not_forget_live_roots_or_pending_validation();
+    an_unknown_permission_snapshot_preserves_the_last_known_human_wait();
+    an_unreadable_validation_record_does_not_stop_incident_escalation();
+    tickets_preserve_late_exact_exit_and_do_not_overwrite_a_new_generation();
+    export_allowlist_excludes_secrets_even_in_identifiers_and_child_output();
+    pending_probe_is_deduplicated_across_restarts_and_never_prevents_escalation();
+}
+
+#[test]
+fn startup_batch_2() {
+    late_health_result_is_retained_but_does_not_resume_a_still_stalled_child();
+    dead_probe_owner_is_retained_after_reopen_without_recovery_or_duplicate_children();
+    completed_probe_needs_the_durable_wait_after_reopening();
+    delayed_callbacks_cannot_revive_an_exit_or_erase_its_exact_status();
+    spawn_is_progress_and_repeated_readiness_is_not_new_progress();
+    permission_observation_is_not_progress_and_dismissal_keeps_startup_proven();
+    new_overdue_launch_joins_before_health_can_recover_the_host_incident();
+    an_unrelated_pane_waiting_since_before_the_incident_does_not_block_recovery();
+}
+
+#[test]
+fn startup_batch_3() {
+    a_wait_in_the_incidents_own_pane_still_blocks_recovery();
+    an_unproven_start_waiting_after_detection_blocks_recovery_in_any_pane();
+    an_unrelated_panes_progress_does_not_invalidate_a_probe();
+    observation_lost_after_a_passing_probe_recovers_once_the_incidents_panes_have_closed();
+    observation_lost_after_the_probe_still_needs_new_health_while_a_launch_may_be_alive();
+    a_state_with_thousands_of_records_loads_and_is_pruned_to_the_bound_on_first_refresh();
+    pruning_never_drops_live_or_unsettled_records_even_over_the_bound();
+    a_dismissed_banner_stays_hidden_for_the_same_incident_across_restart();
+}
+
+#[test]
+fn startup_batch_4() {
+    the_banner_returns_when_the_incident_escalates_or_reaches_more_panes();
+    a_new_incident_shows_its_banner_after_an_earlier_one_was_dismissed();
+    unrelated_pipeline_permission_card_does_not_join_or_block_on_a_startup_incident();
+    durable_wait_finishing_after_observation_window_is_late_success();
+    shell_signal_is_exported_while_native_probe_is_still_pending();
+    health_must_be_strictly_newer_than_the_latest_affected_progress();
+    health_started_before_or_during_progress_cannot_recover_after_reopening();
+    probe_refresh_cannot_recover_before_joining_another_overdue_launch();
 }

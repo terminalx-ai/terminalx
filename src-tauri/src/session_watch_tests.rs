@@ -28,14 +28,12 @@ const SESSION: &str = "watched-session";
 const TAB: &str = "watched-tab";
 const FIXTURE: &str = include_str!("harness/claude/fixtures/interactive_session.jsonl");
 
-#[test]
 fn automation_completion_waits_for_a_followup_turn_already_open() {
     let rig = Rig::new();
     rig.start_turn();
     assert!(rig.manager.automation_execution_continues(SESSION, TAB));
 }
 
-#[test]
 fn automation_completion_holds_the_tab_lock_through_the_transition() {
     let rig = Rig::new();
     let manager = rig.manager.clone();
@@ -60,7 +58,6 @@ fn automation_completion_holds_the_tab_lock_through_the_transition() {
     assert_eq!(rig.manager.with_automation_quiescent(SESSION, TAB, Some(0), || "stale"), None);
 }
 
-#[test]
 fn deferred_automation_keeps_tab_working_until_reconciled() {
     let rig = Rig::new();
     let entry: index::SessionEntry = serde_json::from_value(json!({
@@ -79,7 +76,6 @@ fn deferred_automation_keeps_tab_working_until_reconciled() {
     assert_eq!(index::get(SESSION).unwrap().tab(TAB).unwrap().status, TabStatus::Completed);
 }
 
-#[test]
 fn row_status_distinguishes_live_permission_question_and_plan_and_clears_after_answer() {
     let rig = Rig::new();
     for (tool, expected) in [("Bash", "needs_permission"), ("AskUserQuestion", "needs_answer"), ("ExitPlanMode", "review_plan")] {
@@ -102,7 +98,6 @@ fn row_status_distinguishes_live_permission_question_and_plan_and_clears_after_a
     assert_eq!(row_status::activity(&rt), Some("setup_failed"));
 }
 
-#[test]
 fn row_status_keeps_a_failed_launch_through_completion_and_idle_until_work_restarts() {
     let rig = Rig::new();
     let mut rt = rig.rt.lock().unwrap();
@@ -183,7 +178,6 @@ struct Rig {
     _home: store::TempHome,
 }
 
-#[test]
 fn a_shared_session_may_switch_to_bypass_at_the_hosts_choice() {
     struct StopBeforeGuards<'a>(&'a SessionManager);
     impl Drop for StopBeforeGuards<'_> {
@@ -242,7 +236,6 @@ fn a_shared_session_may_switch_to_bypass_at_the_hosts_choice() {
     }
 }
 
-#[test]
 fn a_shared_session_takes_a_bypass_tab_at_the_hosts_choice() {
     let rig = Rig::new();
     let entry: index::SessionEntry = serde_json::from_value(json!({
@@ -547,7 +540,6 @@ impl Rig {
     }
 }
 
-#[test]
 fn codex_pretool_reports_acknowledge_without_overriding_the_provider_policy() {
     for mode in ["bypassPermissions", "auto", "plan"] {
         let rig = Rig::in_mode(CliKind::Codex, mode);
@@ -563,7 +555,6 @@ fn codex_pretool_reports_acknowledge_without_overriding_the_provider_policy() {
     }
 }
 
-#[test]
 fn a_pretool_report_from_a_replaced_launch_is_not_acknowledged() {
     let rig = Rig::in_mode(CliKind::Codex, "bypassPermissions");
     let reply = rig.manager.on_hook_pumping(HookFrame {
@@ -696,7 +687,6 @@ fn fixture_paths(text: &str) -> String {
     if cfg!(windows) { text.replace("/workspace/", "C:/workspace/") } else { text.to_string() }
 }
 
-#[test]
 fn permission_context_survives_the_hook_without_changing_tool_input() {
     // The app's own gate is said apart from the agent's words (#775).
     for (gate, input, description, reason) in [
@@ -818,7 +808,6 @@ const JUSTIFICATION: &str = "Probe: may I create a file outside the workspace?";
 /// card that stayed live after Allow, and answering it ran the command
 /// again. Now the repeat files no card and is turned away with a reason the
 /// model reads, and the command runs once.
-#[test]
 fn a_command_run_again_while_it_waits_on_its_card_files_no_second_card() {
     let rig = Rig::in_mode(CliKind::Codex, "manual");
     let cards = replay_codex_hooks(&rig, REPEATED_WHILE_WAITING);
@@ -834,7 +823,6 @@ fn a_command_run_again_while_it_waits_on_its_card_files_no_second_card() {
 /// A repeat is the same command whichever gate it reaches and whichever gate
 /// the first call waits at: here the first waits to leave the sandbox and
 /// the repeat asks at `PreToolUse`. It files no card, and the command runs once.
-#[test]
 fn a_command_run_again_while_it_waits_to_leave_the_sandbox_files_no_second_card() {
     let rig = Rig::in_mode(CliKind::Codex, "manual");
     let cards = replay_codex_hooks(&rig, REPEATED_WHILE_LEAVING_SANDBOX);
@@ -850,7 +838,6 @@ fn a_command_run_again_while_it_waits_to_leave_the_sandbox_files_no_second_card(
 /// The model's words are not what runs: a repeat whose justification is
 /// reworded is still the command already waiting, in a mode where only the
 /// sandbox asks.
-#[test]
 fn a_command_run_again_with_a_reworded_justification_files_no_second_card() {
     let rig = Rig::in_mode(CliKind::Codex, "auto");
     let cards = replay_codex_hooks(&rig, REPEATED_REWORDED_IN_AUTO);
@@ -864,7 +851,6 @@ fn a_command_run_again_with_a_reworded_justification_files_no_second_card() {
 /// Allowing the command at `PreToolUse` does not let it out of the sandbox:
 /// Codex then asks for that at `PermissionRequest`, on its own card, which
 /// says so and carries the model's justification.
-#[test]
 fn a_codex_command_asked_about_runs_outside_the_sandbox_only_when_that_is_allowed_too() {
     let rig = Rig::in_mode(CliKind::Codex, "manual");
     let cards = replay_codex_hooks(&rig, FIRST_COMMAND);
@@ -880,7 +866,6 @@ fn a_codex_command_asked_about_runs_outside_the_sandbox_only_when_that_is_allowe
 /// A denied command is blocked at `PreToolUse`, and Codex does not ask about
 /// it again. When the model runs it once more, that run is asked about too:
 /// an earlier answer stands for nothing but the call it was given to.
-#[test]
 fn a_denied_codex_command_run_again_is_asked_about_again() {
     let rig = Rig::in_mode(CliKind::Codex, "manual");
     let cards = replay_codex_hooks(&rig, DENIED);
@@ -1019,7 +1004,6 @@ fn a_command_terminalx_ran_for_codex_gets_its_own_row() {
 /// TerminalX runs discovery outside the provider's sandbox, so a sandbox
 /// that could narrow reads keeps every command on the card (PRO-330
 /// review); the CLI then runs an allowed one inside its sandbox.
-#[test]
 fn a_provider_sandbox_that_could_narrow_reads_keeps_discovery_on_the_card() {
     for (kind, file, text) in [
         (CliKind::Claude, ".claude/settings.local.json", r#"{"sandbox":{"enabled":true,"filesystem":{"denyRead":["~/.ssh"]}}}"#),
@@ -1211,7 +1195,6 @@ fn a_verifier_s_read_only_command_is_answered_at_pre_tool_use_or_refused() {
     }
 }
 
-#[test]
 fn codex_normalized_input_never_reuses_unguarded_turn_answers() {
     let rig = Rig::in_mode(CliKind::Codex, "manual");
     // Codex 0.164 reports session A here even when exec_command runs in B.
@@ -1281,7 +1264,6 @@ fn codex_0164_discovery_and_session_grants_enforce_their_directory_at_execution(
     assert!(rig.events().iter().any(|e| matches!(&e.payload, Payload::PermissionRequested { reason: Some(reason), .. } if reason.contains("Session allowances are limited to"))));
 }
 
-#[test]
 fn execution_directory_never_falls_back_to_a_codex_session_directory() {
     let mut payload = json!({"cwd":&*fixture_paths("/workspace/a"), "tool_name":"Bash", "tool_input":{"command":"git diff"}});
     assert_eq!(permission_directory(CliKind::Codex, &payload), None);
@@ -1307,7 +1289,6 @@ fn turning_the_builtin_list_off_asks_on_the_next_command_in_a_running_tab() {
     }
 }
 
-#[test]
 fn session_allowance_matches_the_exact_input_directory_and_tab_across_turns() {
     for kind in [CliKind::Claude, CliKind::Codex] {
         let rig = Rig::in_mode(kind, "manual");
@@ -1344,7 +1325,6 @@ fn automatic_discovery_and_session_grants_never_answer_codex_escalation() {
     answer_command(&rig, command_frame(&rig, "PermissionRequest", "touch note", &fixture_paths("/workspace/app")), "deny", false);
 }
 
-#[test]
 fn a_codex_cmd_approval_cannot_authorize_a_different_write_in_the_same_turn() {
     let rig = Rig::in_mode(CliKind::Codex, "manual");
     let mut allowed = command_frame(&rig, "PreToolUse", "", &fixture_paths("/workspace/app"));
@@ -1357,7 +1337,6 @@ fn a_codex_cmd_approval_cannot_authorize_a_different_write_in_the_same_turn() {
     answer_command(&rig, frame, "deny", true);
 }
 
-#[test]
 fn claude_read_only_safety_requests_in_bypass_still_ask() {
     let rig = Rig::in_mode(CliKind::Claude, "bypassPermissions");
     answer_command(&rig, command_frame(&rig, "PermissionRequest", "pwd", "/workspace/app"), "deny", false);
@@ -1368,7 +1347,6 @@ fn claude_read_only_safety_requests_in_bypass_still_ask() {
 /// agent's description of the command; a card in a mode that asks says
 /// nothing of the kind. The hook's mode is the one Claude asks in, and the
 /// tab's stands in for a frame without it.
-#[test]
 fn a_claude_card_in_bypass_mode_says_claudes_safety_check_asked() {
     let command = r#"a=("${(@f)$(printf "x\ny")}"); echo ${#a}"#;
     let input = json!({"command": command, "description": "Split printf output into lines"});
@@ -1401,7 +1379,6 @@ fn a_claude_card_in_bypass_mode_says_claudes_safety_check_asked() {
 
 /// A send opens the turn before the input thread types anything. Silence
 /// before that send must not make the new turn look stalled (#237).
-#[test]
 fn a_prompt_sent_to_an_idle_cli_counts_as_activity_before_the_pane_draws() {
     for kind in [CliKind::Claude, CliKind::Codex] {
         let rig = Rig::of(kind, "");
@@ -1433,7 +1410,6 @@ fn a_prompt_sent_to_an_idle_cli_counts_as_activity_before_the_pane_draws() {
     }
 }
 
-#[test]
 fn the_watcher_completes_an_automation_with_the_last_assistant_message_once() {
     let rig = Rig::new();
     // Both turns in the recorded conversation, so the saved reply must be
@@ -1456,7 +1432,6 @@ fn the_watcher_completes_an_automation_with_the_last_assistant_message_once() {
     assert_eq!(rig.observer.completed.lock().unwrap().len(), 1, "a late hook must not complete the automation again");
 }
 
-#[test]
 fn the_watcher_can_complete_a_turn_without_an_assistant_message() {
     let rig = Rig::new();
     rig.hook("UserPromptSubmit", json!({ "prompt": "hello" }));
@@ -1467,7 +1442,6 @@ fn the_watcher_can_complete_a_turn_without_an_assistant_message() {
     assert_eq!(*rig.observer.completed.lock().unwrap(), [(SESSION.to_string(), TAB.to_string(), None)]);
 }
 
-#[test]
 fn a_stop_hook_still_notifies_automation_when_only_a_hook_opened_the_turn() {
     let rig = Rig::new();
     // Without the prompt's transcript record the close latch is still shut.
@@ -1477,7 +1451,6 @@ fn a_stop_hook_still_notifies_automation_when_only_a_hook_opened_the_turn() {
     assert_eq!(*rig.observer.completed.lock().unwrap(), [(SESSION.to_string(), TAB.to_string(), None)]);
 }
 
-#[test]
 fn the_watcher_runs_a_pending_settings_restart_after_closing_the_turn() {
     let rig = Rig::new();
     let entry: index::SessionEntry = serde_json::from_value(json!({
@@ -1518,7 +1491,6 @@ fn the_watcher_runs_a_pending_settings_restart_after_closing_the_turn() {
 
 /// A single step longer than the limit — a long build, a long generation —
 /// with the terminal drawing throughout is work, not a stall.
-#[test]
 fn a_long_step_with_live_terminal_output_is_not_a_stall() {
     let rig = Rig::new();
     rig.start_turn();
@@ -1543,7 +1515,6 @@ fn a_long_step_with_live_terminal_output_is_not_a_stall() {
 
 /// Nothing from the agent on any channel: the warning is still raised, at
 /// the limit and not before it.
-#[test]
 fn a_hung_agent_with_no_output_and_no_events_still_raises_the_warning() {
     let rig = Rig::new();
     rig.pane_draws();
@@ -1582,7 +1553,6 @@ fn compact_prompt() -> String {
     }))
 }
 
-#[test]
 fn completed_compaction_never_becomes_a_stall() {
     for scenario in ["manual", "automatic", "idle", "never_started"] {
         // Exercise both one tail read and separate reads around the summary.
@@ -1625,7 +1595,6 @@ fn completed_compaction_never_becomes_a_stall() {
     }
 }
 
-#[test]
 fn compaction_does_not_hide_a_real_hung_turn() {
     for manual in [false, true] {
         let rig = Rig::new();
@@ -1639,7 +1608,6 @@ fn compaction_does_not_hide_a_real_hung_turn() {
     }
 }
 
-#[test]
 fn compact_after_a_command_or_unsettled_turn_completes() {
     for before in ["command", "ended_same_read", "ended_previous_read"] {
         let rig = Rig::new();
@@ -1663,7 +1631,6 @@ fn compact_after_a_command_or_unsettled_turn_completes() {
     }
 }
 
-#[test]
 fn a_repeated_compact_record_does_not_reopen_a_completed_command() {
     let rig = Rig::new();
     rig.append(&compact_prompt());
@@ -1678,7 +1645,6 @@ fn a_repeated_compact_record_does_not_reopen_a_completed_command() {
     assert_eq!(rig.recovery(), None);
 }
 
-#[test]
 fn a_queued_compact_echo_preserves_command_classification() {
     for completed in [false, true] {
         let rig = Rig::new();
@@ -1720,7 +1686,6 @@ fn a_queued_compact_echo_preserves_command_classification() {
     }
 }
 
-#[test]
 fn completed_compaction_does_not_consume_the_next_turns_end() {
     let rig = Rig::new();
     rig.append(&compact_prompt());
@@ -1736,7 +1701,6 @@ fn completed_compaction_does_not_consume_the_next_turns_end() {
     assert_eq!(rig.recovery(), None);
 }
 
-#[test]
 fn a_new_compact_request_needs_its_own_completion() {
     for timestamp in [Some("2026-10-20T12:01:00.000Z"), None] {
         let rig = Rig::new();
@@ -1753,7 +1717,6 @@ fn a_new_compact_request_needs_its_own_completion() {
     }
 }
 
-#[test]
 fn an_unfinished_compact_command_still_warns() {
     let rig = Rig::new();
     rig.append(&compact_prompt());
@@ -1763,7 +1726,6 @@ fn an_unfinished_compact_command_still_warns() {
     assert_eq!(rig.recovery(), Some(RecoveryKind::Timeout));
 }
 
-#[test]
 fn real_work_after_manual_compaction_still_warns() {
     for next in ["prompt", "tool"] {
         let rig = Rig::new();
@@ -1785,7 +1747,6 @@ fn real_work_after_manual_compaction_still_warns() {
     }
 }
 
-#[test]
 fn working_status_without_an_open_turn_is_not_stall_evidence() {
     let rig = Rig::new();
     rig.rt.lock().unwrap().status = TabStatus::InProgress;
@@ -1794,7 +1755,6 @@ fn working_status_without_an_open_turn_is_not_stall_evidence() {
     assert_eq!(rig.recovery(), None);
 }
 
-#[test]
 fn stall_diagnostics_identify_the_opener_without_its_content() {
     for source in ["transcript_user_message", "hook_user_prompt_submit", "hook"] {
         let rig = Rig::new();
@@ -1823,7 +1783,6 @@ fn stall_diagnostics_identify_the_opener_without_its_content() {
 
 /// A silence warning is not a turn boundary: cloud idle suspension must
 /// still see the live turn after the five-minute UI warning (#419).
-#[test]
 fn a_silent_live_turn_keeps_counting_after_the_warning() {
     let rig = Rig::with_live_pane();
     rig.start_turn();
@@ -1862,7 +1821,6 @@ fn a_silent_live_turn_has_a_separate_one_hour_cloud_budget() {
     assert_eq!(rig.counts(), (0, 0), "the budget applies even before the watcher next runs");
 }
 
-#[test]
 fn a_silence_warning_does_not_keep_a_dead_process_awake() {
     let rig = Rig::with_live_pane();
     rig.start_turn();
@@ -1874,7 +1832,6 @@ fn a_silence_warning_does_not_keep_a_dead_process_awake() {
     assert_eq!(rig.counts(), (0, 0));
 }
 
-#[test]
 fn cloud_counts_distinguish_silence_from_errors_and_unconfirmed_delivery() {
     for kind in [RecoveryKind::Timeout, RecoveryKind::DeliveryUnconfirmed, RecoveryKind::Disconnected] {
         let rig = Rig::with_live_pane();
@@ -1892,7 +1849,6 @@ fn cloud_counts_distinguish_silence_from_errors_and_unconfirmed_delivery() {
 /// (`cloud_grants::agent_env_for_launch`), so that is what a running CLI
 /// tab is asked about (PRO-110): asked as `session/tab`, a Claude tab that
 /// started signed in read as needing a sign-in once the login was removed.
-#[test]
 fn a_cli_tab_is_asked_about_its_launch_under_its_pane() {
     let rig = Rig::new();
     assert_eq!(rig.rt.lock().unwrap().launch_key(), rig.pane);
@@ -1903,7 +1859,6 @@ fn a_cli_tab_is_asked_about_its_launch_under_its_pane() {
     assert_eq!(rig.manager.sign_in_required(SESSION, TAB, "claude"), None);
 }
 
-#[test]
 fn a_silent_turn_waiting_for_approval_is_counted_separately() {
     let rig = Rig::with_live_pane();
     rig.start_turn();
@@ -1924,7 +1879,6 @@ fn a_silent_turn_waiting_for_approval_is_counted_separately() {
 }
 
 /// A pane that has never drawn is judged on the events alone.
-#[test]
 fn a_pane_that_never_drew_does_not_hold_the_warning_back() {
     let rig = Rig::new();
     rig.start_turn();
@@ -1935,7 +1889,6 @@ fn a_pane_that_never_drew_does_not_hold_the_warning_back() {
 
 /// The hooks never arrived (#202), but the transcript recorded the end of
 /// the turn: the turn is closed, and no warning is raised.
-#[test]
 fn a_turn_the_transcript_completed_is_closed_instead_of_warned_about() {
     let rig = Rig::new();
     rig.start_turn();
@@ -1951,7 +1904,6 @@ fn a_turn_the_transcript_completed_is_closed_instead_of_warned_about() {
 
 /// A turn that ended in the transcript is still the hooks' to close while
 /// they may be on their way: the watcher does not race a `Stop` hook.
-#[test]
 fn a_transcript_end_waits_out_the_hooks_before_the_watcher_closes_it() {
     let rig = Rig::new();
     rig.start_turn();
@@ -1970,7 +1922,6 @@ fn a_transcript_end_waits_out_the_hooks_before_the_watcher_closes_it() {
 /// `/clear` ends Claude Code's session to start a new one (#1498): the turn
 /// the composer opened for it is a command that ran, not a stopped turn, and
 /// an automation that sent it completed. Any other end still aborts.
-#[test]
 fn clear_ends_its_turn_as_a_command_that_ran() {
     for (reason, ended) in [("clear", TurnStatus::Ok), ("other", TurnStatus::Aborted), ("logout", TurnStatus::Aborted)] {
         let rig = Rig::new();
@@ -1995,7 +1946,6 @@ fn clear_ends_its_turn_as_a_command_that_ran() {
 
 /// With no `Stop` hook at all, the watcher closes the turn once the hooks
 /// have had their time, and not a moment sooner.
-#[test]
 fn a_transcript_end_is_acted_on_exactly_when_the_hooks_time_is_up() {
     let rig = Rig::new();
     rig.start_turn();
@@ -2012,7 +1962,6 @@ fn a_transcript_end_is_acted_on_exactly_when_the_hooks_time_is_up() {
 
 /// The warning was raised on a quiet pane; then the pane drew again. The
 /// banner goes away and the tab is working again, without any hook.
-#[test]
 fn a_raised_warning_clears_itself_when_the_terminal_shows_progress() {
     let rig = Rig::new();
     rig.pane_draws();
@@ -2037,7 +1986,6 @@ fn a_raised_warning_clears_itself_when_the_terminal_shows_progress() {
 
 /// The warning was raised; then the transcript recorded the end of the turn
 /// and no hook ever came. The turn closes and the banner goes.
-#[test]
 fn a_raised_warning_clears_itself_when_the_transcript_completes_the_turn() {
     let rig = Rig::new();
     rig.start_turn();
@@ -2056,7 +2004,6 @@ fn a_raised_warning_clears_itself_when_the_transcript_completes_the_turn() {
 /// The warning was raised; then a late `Stop` hook closed the turn with no
 /// transcript record in between. A completed turn is not left needing
 /// attention.
-#[test]
 fn a_raised_warning_does_not_outlive_a_completed_turn() {
     let rig = Rig::new();
     rig.start_turn();
@@ -2072,7 +2019,6 @@ fn a_raised_warning_does_not_outlive_a_completed_turn() {
 
 /// A provider that reported a timeout is a real failure, not the watcher's
 /// guess: the terminal redrawing does not clear it.
-#[test]
 fn terminal_output_does_not_clear_a_timeout_the_provider_reported() {
     let rig = Rig::new();
     rig.start_turn();
@@ -2095,7 +2041,6 @@ fn terminal_output_does_not_clear_a_timeout_the_provider_reported() {
 /// from racing; only a prompt does that. The transcript then records the end
 /// and no `Stop` hook comes. The watcher used to ask the latch, be refused,
 /// and skip the tab on every pass: "Working" for good, and never a warning.
-#[test]
 fn a_turn_a_hook_opened_is_closed_by_the_transcript_s_end_whatever_the_latch_says() {
     let rig = Rig::new();
     rig.hook("PreToolUse", json!({ "tool_name": "Bash", "tool_input": { "command": "ls" } }));
@@ -2116,7 +2061,6 @@ fn a_turn_a_hook_opened_is_closed_by_the_transcript_s_end_whatever_the_latch_say
 /// The `Stop` hook closes a turn before the CLI writes that turn's
 /// `turn_duration`. A prompt sent in between is already open when the record
 /// is read, and the record is not that prompt's end.
-#[test]
 fn the_last_turn_s_late_end_record_does_not_close_the_turn_after_it() {
     let rig = Rig::new();
     rig.start_turn();
@@ -2146,7 +2090,6 @@ fn the_last_turn_s_late_end_record_does_not_close_the_turn_after_it() {
 /// A turn can stop being open without a boundary: a prompt that never
 /// reached the CLI is taken back that way. An "ended" left over from it is
 /// not the next turn's.
-#[test]
 fn opening_a_turn_forgets_what_the_transcript_said_about_the_one_before() {
     let rig = Rig::new();
     if let Engine::Cli(p) = &mut rig.rt.lock().unwrap().engine {
@@ -2170,7 +2113,6 @@ fn opening_a_turn_forgets_what_the_transcript_said_about_the_one_before() {
 /// pane's own output event. The moment the watcher judges from is taken from
 /// what the pane reported, so how long the machine took to get there does
 /// not enter into it.
-#[test]
 fn what_a_real_pane_draws_is_what_holds_the_warning_back() {
     let rig = Rig::new();
     rig.start_turn();
@@ -2222,7 +2164,6 @@ impl Drop for Rig {
     }
 }
 
-#[test]
 fn dropping_the_last_manager_releases_its_background_watcher() {
     let rig = Rig::new();
     let observer = Arc::downgrade(&rig.observer);
@@ -2287,7 +2228,6 @@ impl Rig {
 /// The frames a real Claude Code sent as its model and effort were changed in
 /// the terminal — by `/model sonnet`, `/effort high`, the `/model` picker and
 /// the `/effort` slider — each move the tab, with nothing asked of the app.
-#[test]
 fn a_model_or_effort_changed_in_the_claude_terminal_reaches_the_tab() {
     let rig = Rig::on(CliKind::Claude, "opus", Some("high"));
     let (sent, updated) = std::sync::mpsc::channel();
@@ -2326,7 +2266,6 @@ fn a_model_or_effort_changed_in_the_claude_terminal_reaches_the_tab() {
     assert!(updated.try_recv().is_err());
 }
 
-#[test]
 fn a_change_from_the_chat_is_pending_until_claude_says_it_is_running() {
     let rig = Rig::on(CliKind::Claude, "opus", Some("high"));
     rig.manager.set_model(SESSION, TAB, "sonnet").unwrap();
@@ -2346,7 +2285,6 @@ fn a_change_from_the_chat_is_pending_until_claude_says_it_is_running() {
 }
 
 /// With no status line to go on, the command's own printed result settles it.
-#[test]
 fn claude_taking_the_command_settles_a_change_the_status_line_never_named() {
     let rig = Rig::on(CliKind::Claude, "opus", Some("high"));
     rig.manager.set_model(SESSION, TAB, "sonnet").unwrap();
@@ -2360,7 +2298,6 @@ fn claude_taking_the_command_settles_a_change_the_status_line_never_named() {
 
 /// "Set model to …" names no id. Printed for a `/model` the reader typed in
 /// the terminal, it is not the answer to a change the app is waiting on.
-#[test]
 fn a_model_command_typed_in_the_terminal_does_not_settle_the_apps_request() {
     let rig = Rig::on(CliKind::Claude, "opus", Some("high"));
     rig.manager.set_model(SESSION, TAB, "haiku").unwrap();
@@ -2376,7 +2313,6 @@ fn a_model_command_typed_in_the_terminal_does_not_settle_the_apps_request() {
 }
 
 /// Two changes waiting, one taken back: the other still has its deadline.
-#[test]
 fn taking_one_change_back_leaves_the_other_its_deadline() {
     let rig = Rig::on(CliKind::Claude, "opus", Some("high"));
     rig.manager.set_effort(SESSION, TAB, Some("low")).unwrap();
@@ -2389,7 +2325,6 @@ fn taking_one_change_back_leaves_the_other_its_deadline() {
 }
 
 /// Asked for max, given high: what the CLI printed is what is running.
-#[test]
 fn an_effort_the_cli_set_to_something_else_is_not_shown_as_the_one_asked_for() {
     let rig = Rig::on(CliKind::Claude, "opus", Some("low"));
     rig.manager.set_effort(SESSION, TAB, Some("max")).unwrap();
@@ -2399,7 +2334,6 @@ fn an_effort_the_cli_set_to_something_else_is_not_shown_as_the_one_asked_for() {
     assert_eq!(rig.shown(), shown("opus", Some("high"), None, Some("max")));
 }
 
-#[test]
 fn a_change_claude_turns_down_reverts_with_its_reason() {
     let rig = Rig::on(CliKind::Claude, "opus", Some("high"));
     rig.manager.set_model(SESSION, TAB, "claude-haiku-5-5").unwrap();
@@ -2415,7 +2349,6 @@ fn a_change_claude_turns_down_reverts_with_its_reason() {
     assert!(!rig.kinds().iter().any(|k| k == "user_message"));
 }
 
-#[test]
 fn a_change_claude_never_answers_is_taken_back() {
     let rig = Rig::on(CliKind::Claude, "opus", Some("high"));
     rig.status_line("claude-opus-5-5", "high");
@@ -2442,7 +2375,6 @@ fn a_change_claude_never_answers_is_taken_back() {
 /// so. That is the tab's model when nothing better has spoken — and not once
 /// the status line has, since a record can name a fallback the session is
 /// not set to.
-#[test]
 fn the_model_an_assistant_record_names_stands_in_for_a_silent_status_line() {
     let rig = Rig::on(CliKind::Claude, "", None);
     rig.start_turn();
@@ -2457,7 +2389,6 @@ fn the_model_an_assistant_record_names_stands_in_for_a_silent_status_line() {
 }
 
 /// What the `/model` picker of a real Codex wrote, and the turns either side.
-#[test]
 fn a_model_or_effort_changed_in_the_codex_terminal_reaches_the_tab() {
     let rig = Rig::on(CliKind::Codex, "gpt-5.6-sol", Some("high"));
     let mut seen = Vec::new();
@@ -2476,7 +2407,6 @@ fn a_model_or_effort_changed_in_the_codex_terminal_reaches_the_tab() {
 
 /// Codex only reads its model at startup. Asked mid-turn, the change waits
 /// for the turn and is never shown as what the running turn is on.
-#[test]
 fn a_change_to_codex_mid_turn_is_pending_until_the_restart_that_applies_it() {
     let rig = Rig::on(CliKind::Codex, "gpt-5.6-sol", Some("low"));
     rig.rt.lock().unwrap().turn_open = true;
@@ -2504,7 +2434,6 @@ fn a_change_to_codex_mid_turn_is_pending_until_the_restart_that_applies_it() {
 
 /// A headless agent that exits before answering leaves nothing "switching":
 /// the change is what its next launch is given.
-#[test]
 fn a_change_a_headless_agent_never_answered_is_settled_when_it_exits() {
     let rig = Rig::on(CliKind::Claude, "auto", None);
     {
@@ -2522,7 +2451,6 @@ fn a_change_a_headless_agent_never_answered_is_settled_when_it_exits() {
     assert_eq!(rig.shown(), shown("sonnet-4.5", None, None, None));
 }
 
-#[test]
 fn a_restart_that_did_not_put_codex_on_the_model_asked_for_says_so() {
     let rig = Rig::on(CliKind::Codex, "gpt-6-astra", Some("high"));
     {
@@ -2540,7 +2468,6 @@ fn a_restart_that_did_not_put_codex_on_the_model_asked_for_says_so() {
 
 /// A tab on Codex's own default was not restarted onto any model in
 /// particular, so whichever one it reports is not a miss.
-#[test]
 fn a_restarted_tab_on_the_default_model_is_not_told_it_missed() {
     let rig = Rig::on(CliKind::Codex, "", Some("high"));
     {
@@ -2554,7 +2481,6 @@ fn a_restarted_tab_on_the_default_model_is_not_told_it_missed() {
 }
 
 /// Clearing the effort mid-turn still needs the restart that applies it.
-#[test]
 fn clearing_codex_effort_mid_turn_still_schedules_the_restart() {
     let rig = Rig::on(CliKind::Codex, "gpt-5.6-sol", Some("high"));
     rig.rt.lock().unwrap().turn_open = true;
@@ -2564,7 +2490,6 @@ fn clearing_codex_effort_mid_turn_still_schedules_the_restart() {
 
 /// A tab that is not running has nobody to wait for: the choice is what the
 /// next launch gets.
-#[test]
 fn a_change_to_a_tab_that_is_not_running_is_current_at_once() {
     for kind in [CliKind::Claude, CliKind::Codex] {
         let rig = Rig::on(kind, "before", Some("low"));
@@ -2575,7 +2500,6 @@ fn a_change_to_a_tab_that_is_not_running_is_current_at_once() {
     }
 }
 
-#[test]
 fn an_agent_with_no_effort_setting_refuses_one() {
     let rig = Rig::on(CliKind::Claude, "auto", None);
     {
@@ -2640,7 +2564,6 @@ impl Rig {
 /// A command that exits non-zero in a running turn is the agent's to read,
 /// not the reader's: the tab stays "Working" through the failure, through the
 /// thinking after it, and through the work that follows (#400).
-#[test]
 fn a_failed_command_in_a_running_turn_does_not_ask_for_attention() {
     for kind in [CliKind::Claude, CliKind::Codex] {
         let rig = Rig::working(kind);
@@ -2660,7 +2583,6 @@ fn a_failed_command_in_a_running_turn_does_not_ask_for_attention() {
 
 /// The last thing a turn did was a command that failed, and then the turn
 /// ended normally: it is completed, not in need of attention.
-#[test]
 fn a_turn_whose_last_tool_failed_and_then_completes_is_completed() {
     for kind in [CliKind::Claude, CliKind::Codex] {
         let rig = Rig::working(kind);
@@ -2675,7 +2597,6 @@ fn a_turn_whose_last_tool_failed_and_then_completes_is_completed() {
 
 /// A turn that ends in an error is the reader's to look at, failed tools
 /// before it or not.
-#[test]
 fn a_turn_that_ends_in_an_error_asks_for_attention() {
     for kind in [CliKind::Claude, CliKind::Codex] {
         let rig = Rig::working(kind);
@@ -2692,7 +2613,6 @@ fn a_turn_that_ends_in_an_error_asks_for_attention() {
 }
 
 /// Asking still waits, and a failed command while it waits changes nothing.
-#[test]
 fn a_pending_permission_still_waits_for_input_after_a_failed_command() {
     let rig = Rig::working(CliKind::Claude);
     rig.append(&failed_command(CliKind::Claude, "call-1"));
@@ -2764,7 +2684,6 @@ fn now_in(mode: &str) -> (String, Option<String>) {
 
 /// The frames a real Claude Code sent as its mode was cycled with Shift+Tab,
 /// a prompt after each press: the prompt's own hook is where each is heard.
-#[test]
 fn a_mode_cycled_in_the_claude_terminal_reaches_the_tab_with_the_next_prompt() {
     let rig = Rig::in_mode(CliKind::Claude, "manual");
     let (sent, updated) = std::sync::mpsc::channel();
@@ -2789,7 +2708,6 @@ fn a_mode_cycled_in_the_claude_terminal_reaches_the_tab_with_the_next_prompt() {
 
 /// A tool call's frame carries the mode too, so a change mid-turn is known
 /// before the tool it would judge is.
-#[test]
 fn a_mode_changed_mid_turn_reaches_the_tab_with_the_next_tool_call() {
     let rig = Rig::in_mode(CliKind::Claude, "plan");
     rig.hook("UserPromptSubmit", json!({ "permission_mode": "plan", "prompt": "go" }));
@@ -2802,7 +2720,6 @@ fn a_mode_changed_mid_turn_reaches_the_tab_with_the_next_tool_call() {
     assert_eq!(rig.mode(), now_in("acceptEdits"));
 }
 
-#[test]
 fn a_mode_the_app_has_no_entry_for_is_shown_as_reported() {
     let rig = Rig::in_mode(CliKind::Claude, "auto");
     rig.hook("UserPromptSubmit", json!({ "permission_mode": "dontAsk" }));
@@ -2820,7 +2737,6 @@ fn a_mode_the_app_has_no_entry_for_is_shown_as_reported() {
 
 /// What a real Codex wrote as its `/permissions` menu was taken through its
 /// three presets, from a tab launched in Plan.
-#[test]
 fn a_stance_changed_in_the_codex_terminal_reaches_the_tab() {
     let rig = Rig::in_mode(CliKind::Codex, "plan");
     let mut seen = Vec::new();
@@ -2835,7 +2751,6 @@ fn a_stance_changed_in_the_codex_terminal_reaches_the_tab() {
 /// "Ask every time" is the app's own gate over a stance other modes share,
 /// so a report of that stance leaves the tab in it. Leaving the stance in
 /// the terminal leaves the gate behind too.
-#[test]
 fn a_codex_tab_keeps_its_own_mode_under_a_stance_that_mode_launches() {
     let rig = Rig::in_mode(CliKind::Codex, "manual");
     let turn = |approval: &str, sandbox: &str| format!("{{\"type\":\"turn_context\",\"payload\":{{\"approval_policy\":\"{approval}\",\"sandbox_policy\":{{\"type\":\"{sandbox}\"}}}}}}\n");
@@ -2847,7 +2762,6 @@ fn a_codex_tab_keeps_its_own_mode_under_a_stance_that_mode_launches() {
     assert!(!codex::asks_every_tool(&rig.launch_mode().unwrap()), "the reader took the tab out of asking");
 }
 
-#[test]
 fn authenticated_codex_non_gating_hooks_acknowledge_without_overriding_native_policy() {
     for mode in ["bypassPermissions", "auto", "plan"] {
         let rig = Rig::in_mode(CliKind::Codex, mode);
@@ -2869,7 +2783,6 @@ fn authenticated_codex_non_gating_hooks_acknowledge_without_overriding_native_po
 /// The CLI is only restarted between turns, so a mode chosen in the chat
 /// mid-turn is not the mode the turn is being judged under, and is not shown
 /// as if it were.
-#[test]
 fn a_mode_from_the_chat_mid_turn_is_pending_until_the_restart_that_applies_it() {
     for kind in [CliKind::Claude, CliKind::Codex] {
         let rig = Rig::in_mode(kind, "auto");
@@ -2898,7 +2811,6 @@ fn a_mode_from_the_chat_mid_turn_is_pending_until_the_restart_that_applies_it() 
     }
 }
 
-#[test]
 fn asking_for_the_mode_the_tab_is_in_takes_a_waiting_change_back() {
     let rig = Rig::in_mode(CliKind::Claude, "auto");
     rig.rt.lock().unwrap().turn_open = true;
@@ -2918,7 +2830,6 @@ fn asking_for_the_mode_the_tab_is_in_takes_a_waiting_change_back() {
     assert!(matches!(&rig.rt.lock().unwrap().engine, Engine::Cli(p) if p.restart_when_idle));
 }
 
-#[test]
 fn a_mode_for_a_tab_that_is_not_running_is_current_at_once() {
     let rig = Rig::in_mode(CliKind::Claude, "auto");
     rig.rt.lock().unwrap().engine = Engine::None;
@@ -2928,7 +2839,6 @@ fn a_mode_for_a_tab_that_is_not_running_is_current_at_once() {
 }
 
 /// Outside a share, Bypass reached in the terminal is the mode the tab is in.
-#[test]
 fn bypass_chosen_in_the_terminal_is_shown_when_nothing_forbids_it() {
     let rig = Rig::in_mode(CliKind::Claude, "auto");
     rig.hook("UserPromptSubmit", json!({ "permission_mode": "bypassPermissions" }));
@@ -2938,7 +2848,6 @@ fn bypass_chosen_in_the_terminal_is_shown_when_nothing_forbids_it() {
 
 /// A shared session may be in Bypass, at the host's choice: a switch to it in
 /// the terminal is taken as reported, as any other mode is, and the CLI kept.
-#[test]
 fn a_shared_session_takes_a_switch_to_bypass_in_the_terminal_as_reported() {
     let rig = Rig::in_mode(CliKind::Claude, "plan");
     rig.share();
@@ -3107,7 +3016,6 @@ fn the_readers_enter_goes_only_where_a_nudge_would() {
     assert_eq!(delivery_stages(&rig), ["nudged"]);
 }
 
-#[test]
 fn no_enter_is_written_while_the_cli_is_asking_something_an_enter_would_answer() {
     let rig = Rig::with_live_pane();
     enter_written_unacknowledged(&rig, 8);
@@ -3125,7 +3033,6 @@ fn no_enter_is_written_while_the_cli_is_asking_something_an_enter_would_answer()
     assert!(delivery_stages(&rig).is_empty(), "an Enter here would answer the question");
 }
 
-#[test]
 fn send_now_keeps_pending_identities_and_echo_order_after_interrupt() {
     let rig = Rig::with_live_pane();
     rig.start_turn();
@@ -3158,7 +3065,6 @@ fn send_now_keeps_pending_identities_and_echo_order_after_interrupt() {
     assert_eq!(p.resend_after_abort, Some(42), "still pending work until provider acceptance");
 }
 
-#[test]
 fn message_timestamps_preserve_source_and_first_stream_chunk_on_disk() {
     let rig = Rig::new();
     let mut rt = rig.rt.lock().unwrap();
@@ -3182,7 +3088,6 @@ fn message_timestamps_preserve_source_and_first_stream_chunk_on_disk() {
     assert_eq!(saved, vec![committed, source, unknown]);
 }
 
-#[test]
 fn transcript_message_timestamps_survive_tailing() {
     let rig = Rig::new();
     rig.append(
@@ -3211,7 +3116,6 @@ fn compaction_rig_scope(rig: &Rig) -> CompactionScope {
         provider: "claude".into(), thread_id: "thread".into(), subagent_id: None }
 }
 
-#[test]
 fn compaction_admission_fences_replacement_and_reconciles_lost_owner() {
     let rig = Rig::new();
     let scope = compaction_rig_scope(&rig);
@@ -3234,7 +3138,6 @@ fn compaction_admission_fences_replacement_and_reconciles_lost_owner() {
     assert_eq!(rt.seq, seq, "replay must not append duplicate loss");
 }
 
-#[test]
 fn compaction_append_failure_emits_uncertainty_and_latches_admission() {
     let rig = Rig::new();
     let scope = compaction_rig_scope(&rig);
@@ -3261,7 +3164,6 @@ fn compaction_append_failure_emits_uncertainty_and_latches_admission() {
     assert_eq!(std::fs::read(&rig.rt.lock().unwrap().log_path).unwrap(), before);
 }
 
-#[test]
 fn compaction_reconciliation_preserves_old_provider_after_conversation_switch() {
     let rig = Rig::new();
     let scope = compaction_rig_scope(&rig);
@@ -3320,7 +3222,6 @@ fn compaction_reconciliation_preserves_old_provider_after_conversation_switch() 
 /// hook is one `permissions list` shows. The CLI asking in its own screen, and
 /// an error the agent stopped on, leave the tab waiting too, with nothing in
 /// that list: the first with no error to name, the second with one.
-#[test]
 fn wait_tells_a_permission_ask_from_an_agent_that_stopped_on_an_error() {
     let rig = Rig::in_mode(CliKind::Codex, "manual");
     let manager = rig.manager.clone();
@@ -3444,7 +3345,6 @@ fn handover_keeps_a_completion_callback_from_being_lost() {
 /// prompt the reader typed into the CLI's own terminal, and a permission the
 /// reader answered. A turn the CLI starts itself, and an event it has only
 /// been offered, are nobody's answer.
-#[test]
 fn the_observer_hears_the_readers_prompts_and_answers_and_not_the_clis_own_turns() {
     let rig = Rig::new();
     let heard = || rig.observer.answered.lock().unwrap().clone();
@@ -3486,7 +3386,6 @@ fn the_observer_hears_the_readers_prompts_and_answers_and_not_the_clis_own_turns
 
 /// A real PTY exits, but a per-launch inspection failure leaves its ownership
 /// unresolved. Exercise the actual destructive caller, not a model of it.
-#[test]
 fn deleting_session_preserves_history_when_detached_ownership_is_unconfirmed() {
     let mut rig = Rig::new();
     rig.pane = SessionManager::pane_id(TAB);
@@ -3525,7 +3424,6 @@ fn deleting_session_preserves_history_when_detached_ownership_is_unconfirmed() {
     assert!(index::get(SESSION).is_err(), "confirmed retry should complete deletion");
 }
 
-#[test]
 fn stop_retry_keeps_its_detached_launch_and_does_not_stop_a_replacement() {
     let rig = Rig::with_live_pane();
     let failure = rig.manager.terminals.inspection_failure_for_test(&rig.pane);
@@ -3557,7 +3455,6 @@ fn stop_retry_keeps_its_detached_launch_and_does_not_stop_a_replacement() {
     assert!(!rig.rt.lock().unwrap().stopping);
 }
 
-#[test]
 fn relocation_refuses_unconfirmed_agent_exit_and_retains_workspace_metadata() {
     let rig = Rig::with_live_pane();
     let entry: index::SessionEntry = serde_json::from_value(json!({
@@ -3588,7 +3485,6 @@ fn relocation_refuses_unconfirmed_agent_exit_and_retains_workspace_metadata() {
 /// An earlier launch whose exit cannot be confirmed refuses only the start
 /// that found it (#467 review): the tab is not left stopping, and Stop still
 /// finds the launch by its pane and ends it.
-#[test]
 fn startup_refuses_only_itself_while_detached_ownership_is_unconfirmed() {
     let rig = Rig::with_live_pane();
     let failure = rig.manager.terminals.inspection_failure_for_test(&rig.pane);
@@ -3683,7 +3579,6 @@ fn restartable(rig: &Rig) {
     index::save(&[entry]).unwrap();
 }
 
-#[test]
 fn restart_stop_retains_unconfirmed_launch_during_wait_and_after_failed_completion() {
     for complete_failure in [false, true] {
         let rig = Rig::with_live_pane();
@@ -3716,7 +3611,6 @@ fn restart_stop_retains_unconfirmed_launch_during_wait_and_after_failed_completi
     }
 }
 
-#[test]
 fn restart_completion_retires_only_its_exact_current_handle() {
     for superseded in [false, true] {
         let rig = Rig::with_live_pane();
@@ -3750,7 +3644,6 @@ fn restart_completion_retires_only_its_exact_current_handle() {
     }
 }
 
-#[test]
 fn later_pty_confirmation_resolves_only_the_captured_batch_failure() {
     let rig = Rig::with_live_pane();
     let failure = rig.manager.terminals.inspection_failure_for_test(&rig.pane);
@@ -3779,7 +3672,6 @@ fn later_pty_confirmation_resolves_only_the_captured_batch_failure() {
     assert!(crate::harness::host::is_alive(replacement), "confirmation must not target the reused pane");
 }
 
-#[test]
 fn confirmed_pty_stop_preserves_unrelated_tab_failure() {
     let rig = Rig::with_live_pane();
     let entry: index::SessionEntry = serde_json::from_value(json!({
@@ -3880,7 +3772,6 @@ fn user_texts(rig: &Rig) -> Vec<String> {
 
 /// #1294: a `!` command typed in the terminal is no prompt. Both its records
 /// are drawn, and neither opens a turn: no model turn or Stop would end it.
-#[test]
 fn a_shell_command_typed_in_the_terminal_opens_no_turn() {
     let rig = Rig::new();
     rig.append(&shell_record("shell-in", SHELL_INPUT));
@@ -3894,7 +3785,6 @@ fn a_shell_command_typed_in_the_terminal_opens_no_turn() {
 /// but is not one (the reader's words between the tags, the parts out of
 /// order, a tag closed as another) is a prompt: the chat draws it as one, and
 /// it opens a turn and puts the tab to work like any other.
-#[test]
 fn a_prompt_shaped_like_a_shell_record_is_a_prompt() {
     for prompt in [
         "<bash-input>pwd</bash-input> please explain <bash-stdout>ok</bash-stdout>",
@@ -3914,7 +3804,6 @@ fn a_prompt_shaped_like_a_shell_record_is_a_prompt() {
 /// its output settles it, whether the CLI records the output apart or in the
 /// command's own record. The output is drawn either way; the command's
 /// record is the composer prompt's echo, not a second message.
-#[test]
 fn a_shell_command_from_the_composer_settles_at_its_output() {
     for combined in [false, true] {
         let rig = Rig::new();
@@ -3941,7 +3830,6 @@ fn a_shell_command_from_the_composer_settles_at_its_output() {
 /// terminal that opens with the same input tags and goes on in the reader's
 /// words is theirs, drawn as a message. The real shell record that follows
 /// is still the composer prompt's echo.
-#[test]
 fn a_prompt_with_the_pending_commands_input_tags_is_not_its_echo() {
     let rig = Rig::new();
     let prompt = PromptText { bot: None, request_id: None, collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: "!git status".into(), display: "!git status".into() };
@@ -3955,7 +3843,6 @@ fn a_prompt_with_the_pending_commands_input_tags_is_not_its_echo() {
 
 /// #1294: should the agent take up a `!` command's output (Claude Code
 /// 2.1.295 did), the turn is the agent's and is not cut short at the output.
-#[test]
 fn a_shell_command_the_agent_answers_ends_with_the_agents_turn() {
     let rig = Rig::new();
     let prompt = PromptText { bot: None, request_id: None, collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: "!git status".into(), display: "!git status".into() };
@@ -4031,7 +3918,6 @@ fn prompt_told(rig: &Rig) -> Option<Option<tui::ScreenPrompt>> {
     rig.events().iter().filter_map(|e| match &e.payload { Payload::TerminalPrompt { prompt } => Some(prompt.clone()), _ => None }).next_back()
 }
 
-#[test]
 fn a_question_claude_code_drew_itself_has_a_card_and_is_answered_from_the_chat() {
     let Some((rig, _dir, chosen)) = offer_rig() else { return };
 
@@ -4062,7 +3948,6 @@ fn a_question_claude_code_drew_itself_has_a_card_and_is_answered_from_the_chat()
 
 /// A CLI that keeps redrawing something around the dialog (a timer) never
 /// goes quiet: the same question read on two passes is shown all the same.
-#[test]
 fn a_question_read_the_same_on_two_passes_is_shown_while_the_pane_keeps_drawing() {
     let Some((rig, _dir, _chosen)) = offer_rig() else { return };
     rig.pane_draws();
@@ -4077,7 +3962,6 @@ fn a_question_read_the_same_on_two_passes_is_shown_while_the_pane_keeps_drawing(
 
 /// The CLI goes while its question is up (Stop, Ctrl+C, a restart): the card
 /// goes with it, and a hook's request in the meantime is answered on its own.
-#[test]
 fn a_question_goes_with_the_cli_and_waits_behind_a_hooks_request() {
     let Some((rig, _dir, chosen)) = offer_rig() else { return };
     rig.pane_draws();
@@ -4273,4 +4157,168 @@ fn wait_for_card(rig: &Rig, worker: &std::thread::JoinHandle<HookReply>) -> Stri
         assert!(Instant::now() < deadline, "the call must publish a card");
         std::thread::sleep(MOMENT);
     }
+}
+
+#[test]
+fn session_watch_batch_1() {
+    automation_completion_waits_for_a_followup_turn_already_open();
+    automation_completion_holds_the_tab_lock_through_the_transition();
+    deferred_automation_keeps_tab_working_until_reconciled();
+    row_status_distinguishes_live_permission_question_and_plan_and_clears_after_answer();
+    row_status_keeps_a_failed_launch_through_completion_and_idle_until_work_restarts();
+    a_shared_session_may_switch_to_bypass_at_the_hosts_choice();
+    a_shared_session_takes_a_bypass_tab_at_the_hosts_choice();
+    codex_pretool_reports_acknowledge_without_overriding_the_provider_policy();
+    a_pretool_report_from_a_replaced_launch_is_not_acknowledged();
+    permission_context_survives_the_hook_without_changing_tool_input();
+}
+
+#[test]
+fn session_watch_batch_2() {
+    a_command_run_again_while_it_waits_on_its_card_files_no_second_card();
+    a_command_run_again_while_it_waits_to_leave_the_sandbox_files_no_second_card();
+    a_command_run_again_with_a_reworded_justification_files_no_second_card();
+    a_codex_command_asked_about_runs_outside_the_sandbox_only_when_that_is_allowed_too();
+    a_denied_codex_command_run_again_is_asked_about_again();
+    a_provider_sandbox_that_could_narrow_reads_keeps_discovery_on_the_card();
+    codex_normalized_input_never_reuses_unguarded_turn_answers();
+    execution_directory_never_falls_back_to_a_codex_session_directory();
+    session_allowance_matches_the_exact_input_directory_and_tab_across_turns();
+    a_codex_cmd_approval_cannot_authorize_a_different_write_in_the_same_turn();
+}
+
+#[test]
+fn session_watch_batch_3() {
+    claude_read_only_safety_requests_in_bypass_still_ask();
+    a_claude_card_in_bypass_mode_says_claudes_safety_check_asked();
+    a_prompt_sent_to_an_idle_cli_counts_as_activity_before_the_pane_draws();
+    the_watcher_completes_an_automation_with_the_last_assistant_message_once();
+    the_watcher_can_complete_a_turn_without_an_assistant_message();
+    a_stop_hook_still_notifies_automation_when_only_a_hook_opened_the_turn();
+    the_watcher_runs_a_pending_settings_restart_after_closing_the_turn();
+    a_long_step_with_live_terminal_output_is_not_a_stall();
+    a_hung_agent_with_no_output_and_no_events_still_raises_the_warning();
+    completed_compaction_never_becomes_a_stall();
+}
+
+#[test]
+fn session_watch_batch_4() {
+    compaction_does_not_hide_a_real_hung_turn();
+    compact_after_a_command_or_unsettled_turn_completes();
+    a_repeated_compact_record_does_not_reopen_a_completed_command();
+    a_queued_compact_echo_preserves_command_classification();
+    completed_compaction_does_not_consume_the_next_turns_end();
+    a_new_compact_request_needs_its_own_completion();
+    an_unfinished_compact_command_still_warns();
+    real_work_after_manual_compaction_still_warns();
+    working_status_without_an_open_turn_is_not_stall_evidence();
+    stall_diagnostics_identify_the_opener_without_its_content();
+}
+
+#[test]
+fn session_watch_batch_5() {
+    a_silent_live_turn_keeps_counting_after_the_warning();
+    a_silence_warning_does_not_keep_a_dead_process_awake();
+    cloud_counts_distinguish_silence_from_errors_and_unconfirmed_delivery();
+    a_cli_tab_is_asked_about_its_launch_under_its_pane();
+    a_silent_turn_waiting_for_approval_is_counted_separately();
+    a_pane_that_never_drew_does_not_hold_the_warning_back();
+    a_turn_the_transcript_completed_is_closed_instead_of_warned_about();
+    a_transcript_end_waits_out_the_hooks_before_the_watcher_closes_it();
+    clear_ends_its_turn_as_a_command_that_ran();
+    a_transcript_end_is_acted_on_exactly_when_the_hooks_time_is_up();
+}
+
+#[test]
+fn session_watch_batch_6() {
+    a_raised_warning_clears_itself_when_the_terminal_shows_progress();
+    a_raised_warning_clears_itself_when_the_transcript_completes_the_turn();
+    a_raised_warning_does_not_outlive_a_completed_turn();
+    terminal_output_does_not_clear_a_timeout_the_provider_reported();
+    a_turn_a_hook_opened_is_closed_by_the_transcript_s_end_whatever_the_latch_says();
+    the_last_turn_s_late_end_record_does_not_close_the_turn_after_it();
+    opening_a_turn_forgets_what_the_transcript_said_about_the_one_before();
+    what_a_real_pane_draws_is_what_holds_the_warning_back();
+    dropping_the_last_manager_releases_its_background_watcher();
+    a_model_or_effort_changed_in_the_claude_terminal_reaches_the_tab();
+}
+
+#[test]
+fn session_watch_batch_7() {
+    a_change_from_the_chat_is_pending_until_claude_says_it_is_running();
+    claude_taking_the_command_settles_a_change_the_status_line_never_named();
+    a_model_command_typed_in_the_terminal_does_not_settle_the_apps_request();
+    taking_one_change_back_leaves_the_other_its_deadline();
+    an_effort_the_cli_set_to_something_else_is_not_shown_as_the_one_asked_for();
+    a_change_claude_turns_down_reverts_with_its_reason();
+    a_change_claude_never_answers_is_taken_back();
+    the_model_an_assistant_record_names_stands_in_for_a_silent_status_line();
+    a_model_or_effort_changed_in_the_codex_terminal_reaches_the_tab();
+    a_change_to_codex_mid_turn_is_pending_until_the_restart_that_applies_it();
+}
+
+#[test]
+fn session_watch_batch_8() {
+    a_change_a_headless_agent_never_answered_is_settled_when_it_exits();
+    a_restart_that_did_not_put_codex_on_the_model_asked_for_says_so();
+    a_restarted_tab_on_the_default_model_is_not_told_it_missed();
+    clearing_codex_effort_mid_turn_still_schedules_the_restart();
+    a_change_to_a_tab_that_is_not_running_is_current_at_once();
+    an_agent_with_no_effort_setting_refuses_one();
+    a_failed_command_in_a_running_turn_does_not_ask_for_attention();
+    a_turn_whose_last_tool_failed_and_then_completes_is_completed();
+    a_turn_that_ends_in_an_error_asks_for_attention();
+    a_pending_permission_still_waits_for_input_after_a_failed_command();
+}
+
+#[test]
+fn session_watch_batch_9() {
+    a_mode_cycled_in_the_claude_terminal_reaches_the_tab_with_the_next_prompt();
+    a_mode_changed_mid_turn_reaches_the_tab_with_the_next_tool_call();
+    a_mode_the_app_has_no_entry_for_is_shown_as_reported();
+    a_stance_changed_in_the_codex_terminal_reaches_the_tab();
+    a_codex_tab_keeps_its_own_mode_under_a_stance_that_mode_launches();
+    authenticated_codex_non_gating_hooks_acknowledge_without_overriding_native_policy();
+    a_mode_from_the_chat_mid_turn_is_pending_until_the_restart_that_applies_it();
+    asking_for_the_mode_the_tab_is_in_takes_a_waiting_change_back();
+    a_mode_for_a_tab_that_is_not_running_is_current_at_once();
+    bypass_chosen_in_the_terminal_is_shown_when_nothing_forbids_it();
+}
+
+#[test]
+fn session_watch_batch_10() {
+    a_shared_session_takes_a_switch_to_bypass_in_the_terminal_as_reported();
+    no_enter_is_written_while_the_cli_is_asking_something_an_enter_would_answer();
+    send_now_keeps_pending_identities_and_echo_order_after_interrupt();
+    message_timestamps_preserve_source_and_first_stream_chunk_on_disk();
+    transcript_message_timestamps_survive_tailing();
+    compaction_admission_fences_replacement_and_reconciles_lost_owner();
+    compaction_append_failure_emits_uncertainty_and_latches_admission();
+    compaction_reconciliation_preserves_old_provider_after_conversation_switch();
+    wait_tells_a_permission_ask_from_an_agent_that_stopped_on_an_error();
+    the_observer_hears_the_readers_prompts_and_answers_and_not_the_clis_own_turns();
+}
+
+#[test]
+fn session_watch_batch_11() {
+    deleting_session_preserves_history_when_detached_ownership_is_unconfirmed();
+    stop_retry_keeps_its_detached_launch_and_does_not_stop_a_replacement();
+    relocation_refuses_unconfirmed_agent_exit_and_retains_workspace_metadata();
+    startup_refuses_only_itself_while_detached_ownership_is_unconfirmed();
+    restart_stop_retains_unconfirmed_launch_during_wait_and_after_failed_completion();
+    restart_completion_retires_only_its_exact_current_handle();
+    later_pty_confirmation_resolves_only_the_captured_batch_failure();
+    confirmed_pty_stop_preserves_unrelated_tab_failure();
+    a_shell_command_typed_in_the_terminal_opens_no_turn();
+    a_prompt_shaped_like_a_shell_record_is_a_prompt();
+}
+
+#[test]
+fn session_watch_batch_12() {
+    a_shell_command_from_the_composer_settles_at_its_output();
+    a_prompt_with_the_pending_commands_input_tags_is_not_its_echo();
+    a_shell_command_the_agent_answers_ends_with_the_agents_turn();
+    a_question_claude_code_drew_itself_has_a_card_and_is_answered_from_the_chat();
+    a_question_read_the_same_on_two_passes_is_shown_while_the_pane_keeps_drawing();
+    a_question_goes_with_the_cli_and_waits_behind_a_hooks_request();
 }

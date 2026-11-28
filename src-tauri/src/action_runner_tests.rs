@@ -203,7 +203,7 @@ fn a_running_non_concurrent_action_is_returned_and_restart_replaces_it() {
     let again = run(&rig.manager, &entry.id, "server", RunOptions::default()).unwrap();
     assert!(!again.started, "nothing new starts");
     assert_eq!(again.run, first.run, "the running tab comes back for the UI to focus");
-    std::thread::sleep(Duration::from_millis(300));
+    std::thread::sleep(Duration::from_millis(100));
     assert_eq!(std::fs::read_to_string(&count).unwrap(), "x");
     assert_eq!(rig.action_panes(), vec![first.run.pane_id.clone()]);
 
@@ -313,7 +313,7 @@ fn run_after_setup_starts_once_per_workspace() {
     after_setup(&rig.manager, &entry.id);
     after_setup(&rig.manager, &entry.id);
     wait_until("the first start", || cwd.join("runs").exists());
-    std::thread::sleep(Duration::from_millis(400));
+    std::thread::sleep(Duration::from_millis(120));
     assert_eq!(std::fs::read_to_string(cwd.join("runs")).unwrap(), "w", "a second call starts nothing, even for an action that may run several at once");
     assert_eq!(rig.states(&entry.id).len(), 1);
 }

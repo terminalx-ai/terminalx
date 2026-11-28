@@ -573,7 +573,7 @@ async fn revoking_the_computer_ends_its_relay_connection_and_the_relay_refuses_i
     rig.direct.restore();
     rig.until("access removed", |state| *state == MachineConnectionState::AccessRemoved).await;
     let (attaches, accepted) = (rig.relay.attaches(&rig.machine_id), rig.direct.accepted());
-    tokio::time::sleep(Duration::from_secs(5)).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
     let mut later = Vec::new();
     while let Ok(state) = rig.states.try_recv() {
         later.push(state);
