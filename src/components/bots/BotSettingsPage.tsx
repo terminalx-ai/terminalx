@@ -44,7 +44,7 @@ export function BotSettingsPage({ botId }: { botId: string }) {
       </header>
       <div className="min-h-0 flex-1 overflow-y-auto scrollbar-thin">
         <div className="px-8 py-4">
-          <BotSettings bot={bot} />
+          <BotSettings key={bot.id} bot={bot} />
         </div>
       </div>
     </div>

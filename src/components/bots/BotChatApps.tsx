@@ -15,6 +15,7 @@ import { WithTooltip } from "@/components/ui/tooltip";
 import { botsApi, errorMessage } from "@/lib/api";
 import { chatAppName, refreshChatApps, setChatApps, useChatApps } from "@/lib/botChatApps";
 import { cn } from "@/lib/cn";
+import { confirmInApp } from "@/lib/confirm";
 import { relativeTime } from "@/lib/time";
 import type { Bot } from "@/types/bots";
 import type { BotChatAppsView, ChatAppMadeCode, ChatAppService, ChatAppServiceView } from "@/types/botChatApps";
@@ -190,7 +191,25 @@ export function ChatAppDialog({ bot, service, onClose }: { bot: Bot; service: Ch
             <Activity view={view} service={service} />
             {error && <p role="alert" className="text-xs text-destructive" data-testid="bot-chat-app-error">{error}</p>}
             <div className="flex items-center justify-between gap-2">
-              <Button variant="ghost" size="sm" className="text-destructive" disabled={!!busy} onClick={() => void act("disconnect", () => botsApi.chatAppDisconnect(bot.id, service))} data-testid="bot-chat-app-disconnect">Disconnect</Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="text-destructive"
+                disabled={!!busy}
+                onClick={async () => {
+                  const yes = await confirmInApp({
+                    title: `Disconnect ${name}?`,
+                    body: `Its stored token and linked chats for ${bot.name} will be removed. You will need to reconnect to use ${name} again.`,
+                    action: "Disconnect",
+                    destructive: true,
+                  });
+                  if (!yes) return;
+                  await act("disconnect", () => botsApi.chatAppDisconnect(bot.id, service));
+                }}
+                data-testid="bot-chat-app-disconnect"
+              >
+                Disconnect
+              </Button>
               <Button size="sm" onClick={onClose}>Done</Button>
             </div>
           </div>

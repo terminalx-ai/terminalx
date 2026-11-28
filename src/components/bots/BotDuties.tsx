@@ -43,7 +43,7 @@ const WAKES: { label: string; note: string; icon: typeof CalendarClock; group: W
 ];
 
 /** The icon for what wakes a duty. */
-function wakeIcon(duty: Automation): typeof CalendarClock {
+export function wakeIcon(duty: Automation): typeof CalendarClock {
   const wake = wakeOf(duty);
   if (!wake) return CalendarClock;
   return { github: Github, linear: CircleDot, bot: Users, watch: Hourglass, unknown: Zap }[wakeFamily(wake.source)];
@@ -247,7 +247,7 @@ export function BotDuties({ bot, onOpenSession }: { bot: Bot; onOpenSession: (se
                 </span>
               </button>
             );
-            return ready ? tile : <WithTooltip key={label} label="Needs a connector">{tile}</WithTooltip>;
+            return ready ? tile : <WithTooltip key={label} label="Needs a connector"><span className="inline-flex w-full min-w-0">{tile}</span></WithTooltip>;
           })}
         </div>
       </section>

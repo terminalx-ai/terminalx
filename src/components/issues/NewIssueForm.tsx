@@ -19,6 +19,7 @@ import { AvatarStack, PeoplePicker, PeoplePickerAction } from "@/components/issu
 import { LabelChooser, LabelDot, PRIORITY_NAMES, PriorityIcon, useEscapeCancels } from "@/components/issues/IssueFields";
 import { groupWorkflowStates } from "@/components/issues/IssueStatusPicker";
 import { errorMessage, issues, type IssueTeam } from "@/lib/api";
+import { confirmInApp } from "@/lib/confirm";
 import { clearIssueDraft, draftHasContent, emptyIssueDraft, getIssueDraft, issueDraftRevision, setIssueDraft, type IssueDraft } from "@/lib/newIssueDrafts";
 import { isIssueOpError, issueOps, type IssueCreate, type IssueDetails, type IssueOptions, type IssueProvider, type IssueTemplate, type IssueUser } from "@/lib/issueOps";
 import { issueViewer } from "@/lib/issueViewer";
@@ -667,8 +668,15 @@ export function NewIssueForm({
                 variant="ghost"
                 size="sm"
                 aria-disabled={busy}
-                onClick={() => {
+                onClick={async () => {
                   if (busy) return;
+                  const yes = await confirmInApp({
+                    title: "Discard issue draft?",
+                    body: "The title, description, and fields you entered will be cleared.",
+                    action: "Discard draft",
+                    destructive: true,
+                  });
+                  if (!yes) return;
                   setReplacing(null);
                   update(() => emptyIssueDraft(draft.teamId));
                 }}

@@ -120,4 +120,34 @@ describe("issue confirmation", () => {
     expect(screen.getByRole("dialog")).toBeTruthy();
     expect(invoke.mock.calls.filter(([command]) => command === "issue_confirmation_reply")).toHaveLength(1);
   });
+
+  it("announces the banner with role=alert, shows a countdown, and shows Expired instead of vanishing mid-review (U-49)", async () => {
+    vi.useFakeTimers();
+    try {
+      pending = { ...request(), expiresAt: Date.now() + 15_000 };
+      render(<IssueConfirmation />);
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      const banner = screen.getByRole("alert", { name: "Pending issue request" });
+      expect(banner.className).toContain("z-(--z-notice)");
+      expect(screen.getByTestId("issue-confirmation-countdown").textContent).toMatch(/Expires in 15s/);
+
+      fireEvent.click(screen.getByRole("button", { name: "Review" }));
+      expect(screen.getByRole("dialog")).toBeTruthy();
+
+      await act(async () => {
+        vi.advanceTimersByTime(16_000);
+      });
+      // Stays open with an Expired notice instead of vanishing mid-review.
+      expect(screen.getByRole("dialog")).toBeTruthy();
+      expect(screen.getByTestId("issue-confirmation-expired").textContent).toContain("Expired");
+      expect(screen.queryByRole("button", { name: "Delete issue" })).toBeNull();
+      fireEvent.click(screen.getByRole("button", { name: "Close" }));
+      expect(screen.queryByRole("dialog")).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

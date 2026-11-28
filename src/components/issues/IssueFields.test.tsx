@@ -116,7 +116,7 @@ async function openIssue(provider: IssueProvider) {
   render(<IssuesView />);
   fireEvent.click(await screen.findByText(TITLES[provider]));
   // The whole issue is read before anything can be edited.
-  return screen.findByRole("button", { name: "Edit title" });
+  return screen.findByRole("button", { name: /^Edit title:/ });
 }
 
 /** Another Escape binding, as a tab's interrupt would have, and a listener on the page behind it. */
@@ -144,7 +144,7 @@ describe.each(["github", "linear"] as const)("%s title", (provider) => {
     await waitFor(() => expect(writes("issue_set_title")).toHaveLength(1));
     expect(writes("issue_set_title")[0].args).toMatchObject({ provider, id: ids(provider), title: "Keep sessions alive during long commands" });
     await waitFor(() => expect(screen.queryByRole("textbox", { name: "Title" })).toBeNull());
-    expect(screen.getByRole("button", { name: "Edit title" }).textContent).toBe("Keep sessions alive during long commands");
+    expect(screen.getByRole("button", { name: "Edit title: Keep sessions alive during long commands" }).textContent).toBe("Keep sessions alive during long commands");
     expect(listRow().textContent).toContain("Keep sessions alive during long commands");
   });
 
@@ -156,7 +156,7 @@ describe.each(["github", "linear"] as const)("%s title", (provider) => {
       fireEvent.change(input, { target: { value: "Something else" } });
       fireEvent.keyDown(input, { key: "Escape" });
       expect(screen.queryByRole("textbox", { name: "Title" })).toBeNull();
-      expect(screen.getByRole("button", { name: "Edit title" }).textContent).toBe(TITLES[provider]);
+      expect(screen.getByRole("button", { name: `Edit title: ${TITLES[provider]}` }).textContent).toBe(TITLES[provider]);
       expect(others.binding).not.toHaveBeenCalled();
       expect(others.page).not.toHaveBeenCalled();
       expect(writes("issue_set_title")).toHaveLength(0);
@@ -430,7 +430,7 @@ describe("an edit on its way when another issue is opened", () => {
     fireEvent.keyDown(input, { key: "Enter" });
     await waitFor(() => expect(writes("issue_set_title")).toHaveLength(1));
     fireEvent.click(screen.getByText("Speed up the startup"));
-    fireEvent.click(await screen.findByRole("button", { name: "Edit title" }));
+    fireEvent.click(await screen.findByRole("button", { name: /^Edit title:/ }));
     const next = screen.getByRole("textbox", { name: "Title" }) as HTMLInputElement;
     expect(next.value).toBe("Speed up the startup");
     expect(next.readOnly).toBe(false);
@@ -485,7 +485,7 @@ describe("the focus, and Escape, while a save is on its way", () => {
       expect(screen.queryByRole("textbox", { name: "Title" })).toBeNull();
       expect(others.binding).not.toHaveBeenCalled();
       // Back on the title it edited.
-      expect(document.activeElement).toBe(screen.getByRole("button", { name: "Edit title" }));
+      expect(document.activeElement).toBe(screen.getByRole("button", { name: /^Edit title:/ }));
     } finally {
       others.off();
     }
@@ -496,7 +496,7 @@ describe("the focus, and Escape, while a save is on its way", () => {
     const input = screen.getByRole("textbox", { name: "Title" });
     fireEvent.change(input, { target: { value: "Renamed" } });
     fireEvent.keyDown(input, { key: "Enter" });
-    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Edit title" })));
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: /^Edit title:/ })));
   });
 
   it("description: Save leaves the focus in the editor, and Escape stays the editor's", async () => {
@@ -534,4 +534,25 @@ it("label search: Enter that ends an IME composition picks nothing", async () =>
   expect(screen.getByRole("option", { name: "bug" }).getAttribute("aria-selected")).toBe("true");
   fireEvent.keyDown(search, { key: "Enter" });
   expect(screen.getByRole("option", { name: "bug" }).getAttribute("aria-selected")).toBe("false");
+});
+
+it("title: exposes title in aria-label, offers Save/Cancel buttons, and saves on blur (U-50)", async () => {
+  const trigger = await openIssue("github");
+  expect(trigger.getAttribute("aria-label")).toBe(`Edit title: ${TITLES.github}`);
+  fireEvent.click(trigger);
+  const input = screen.getByRole("textbox", { name: "Title" });
+  expect(screen.getByRole("button", { name: "Save" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Cancel" })).toBeTruthy();
+
+  fireEvent.change(input, { target: { value: "Discarded title" } });
+  fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+  expect(screen.queryByRole("textbox", { name: "Title" })).toBeNull();
+  expect(writes("issue_set_title")).toHaveLength(0);
+
+  fireEvent.click(screen.getByRole("button", { name: `Edit title: ${TITLES.github}` }));
+  const input2 = screen.getByRole("textbox", { name: "Title" });
+  fireEvent.change(input2, { target: { value: "Saved on blur" } });
+  fireEvent.blur(input2, { relatedTarget: document.body });
+  await waitFor(() => expect(writes("issue_set_title")).toHaveLength(1));
+  expect(writes("issue_set_title")[0].args).toMatchObject({ title: "Saved on blur" });
 });
