@@ -22,7 +22,7 @@ import { CloudWorkspaceRow } from "@mobile/ui/CloudWorkspaceRow";
 import { EdgeFade } from "@mobile/ui/EdgeFade";
 import { newSessionInBar, useTabBarInset } from "@mobile/ui/tab-bar-inset";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { withTextSizePage } from "@mobile/ui/text-size";
+import { useLargeText, withTextSizePage } from "@mobile/ui/text-size";
 import { useTheme } from "@mobile/ui/theme";
 
 /** The filter last chosen, for as long as the app runs. */
@@ -39,6 +39,7 @@ function SessionsScreen() {
   const [searching, setSearching] = useState(false);
   const [query, setQuery] = useState("");
   const insets = useSafeAreaInsets();
+  const large = useLargeText();
   const bar = useTabBarInset();
   const [headerHeight, setHeaderHeight] = useState(insets.top + 104);
   const [switching, setSwitching] = useState(false);
@@ -107,7 +108,7 @@ function SessionsScreen() {
     <View testID="top-bar-status" style={[styles.status, { height: insets.top, backgroundColor: palette.page }]} />
     <View style={styles.header}>
       {/* The Mac these sessions are on. */}
-      <View style={styles.topBar} onLayout={({ nativeEvent }) => setTopBarBottom(nativeEvent.layout.y + nativeEvent.layout.height)}>
+      <View style={[styles.topBar, large && styles.topBarWrap]} onLayout={({ nativeEvent }) => setTopBarBottom(nativeEvent.layout.y + nativeEvent.layout.height)}>
         {/* The Mac's name with a chevron, and beneath it the connection in the words every screen uses (#983).
             A tap opens "Switch machine"; a long press, like "…", opens its actions (PRO-465, 22.08). */}
         <Pressable accessibilityRole="button" accessibilityLabel={`Switch machine, ${hostName}`} accessibilityHint="Lists your paired machines" accessibilityValue={{ text: connectionWords(state) ?? undefined }} accessibilityActions={[{ name: "options", label: "Machine options" }]} onAccessibilityAction={(event) => { if (event.nativeEvent.actionName === "options") menu.open(host); }} onPress={() => setSwitching(true)} onLongPress={() => menu.open(host)} style={styles.hostName}>
@@ -147,7 +148,7 @@ function SessionsScreen() {
 
   const switcher = switching ? <MachineSwitcher machines={menu.machines.paired} top={insets.top + topBarBottom + 4} onChoose={choose} onAdd={() => { setSwitching(false); openPairing(); }} onClose={() => setSwitching(false)} /> : null;
 
-  return <View style={[styles.screen, { backgroundColor: palette.page }]}>{menu.element}{switcher}<SectionList
+  return <View style={[styles.screen, { backgroundColor: palette.page }]}>{menu.element}{switcher}{header}<SectionList
     sections={sections}
     keyExtractor={(item) => item.key}
     contentInsetAdjustmentBehavior="never"
@@ -169,7 +170,7 @@ function SessionsScreen() {
       : <SessionListRow row={item} hostId={host.id} first={index === 0} last={index === section.data.length - 1} inPinned={section.key === PINNED_SECTION} actions={pins.sessionActions(item)} onOpen={(tabId) => open(item, tabId)} />}
     ListFooterComponent={waiting}
     ListEmptyComponent={empty}
-  />{header}</View>;
+  /></View>;
 }
 
 
@@ -177,18 +178,19 @@ const styles = StyleSheet.create({
   page: { flex: 1, paddingHorizontal: 24, justifyContent: "center", gap: 12 },
   flex: { flex: 1 },
   screen: { flex: 1 },
-  sticky: { position: "absolute", top: 0, left: 0, right: 0 },
+  sticky: { position: "absolute", top: 0, left: 0, right: 0, zIndex: 10, elevation: 10 },
   status: { position: "absolute", top: 0, left: 0, right: 0 },
   header: { gap: 10, paddingHorizontal: 16, paddingTop: 2, paddingBottom: 8 },
   topBar: { flexDirection: "row", alignItems: "center", gap: 10 },
-  hostName: { flexShrink: 1, flexDirection: "row", alignItems: "center", gap: 9, minHeight: 44 },
+  topBarWrap: { flexWrap: "wrap" },
+  hostName: { flexShrink: 1, minWidth: 0, flexDirection: "row", alignItems: "center", gap: 9, minHeight: 44 },
   hostTitles: { flexShrink: 1, gap: 1 },
   nameLine: { flexDirection: "row", alignItems: "center", gap: 4, flexShrink: 1 },
   hostText: { flexShrink: 1, fontSize: 17, fontWeight: "600", letterSpacing: -0.4 },
   search: { flexDirection: "row", alignItems: "center", gap: 8, minHeight: 40, borderRadius: 12, borderWidth: StyleSheet.hairlineWidth, paddingHorizontal: 12 },
   searchInput: { flex: 1, fontSize: 16, paddingVertical: 8 },
-  filters: { flexDirection: "row", gap: 8 },
-  filter: { minHeight: 34, borderRadius: 10, paddingHorizontal: 12, justifyContent: "center" },
+  filters: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
+  filter: { minHeight: 34, borderRadius: 10, paddingHorizontal: 12, paddingVertical: 6, justifyContent: "center" },
   filterText: { fontSize: 14, fontWeight: "600", fontVariant: ["tabular-nums"] },
   filterCount: { opacity: 0.6 },
   retry: { minHeight: 34, paddingHorizontal: 14 },

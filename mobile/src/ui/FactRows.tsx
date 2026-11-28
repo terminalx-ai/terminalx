@@ -1,5 +1,6 @@
 import { Platform, StyleSheet, Text, View } from "react-native";
 import { Card } from "./primitives";
+import { useLargeText } from "./text-size";
 import { useTheme } from "./theme";
 
 export interface Fact {
@@ -21,13 +22,14 @@ export interface Fact {
  */
 export function FactRows({ facts, layout = "pairs", embedded, testID }: { facts: readonly Fact[]; layout?: "pairs" | "sentences"; embedded?: boolean; testID?: string }) {
   const { palette } = useTheme();
+  const large = useLargeText();
   const rows = facts.map((fact, index) => {
     const color = fact.tone === "success" ? palette.success : fact.tone === "warning" ? palette.warning : fact.tone === "danger" ? palette.danger : palette.ink;
     const line = index > 0 || embedded ? { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: palette.border } : null;
     const face = fact.mono ? [styles.mono, { fontFamily: Platform.select({ ios: "Menlo", default: "monospace" }) }] : null;
-    if (fact.block) return <View key={index} accessible accessibilityLabel={`${fact.label}: ${fact.value}`} style={[styles.block, line]}>
+    if (fact.block || large) return <View key={index} accessible accessibilityLabel={`${fact.label}: ${fact.value}`} style={[styles.block, line]}>
       <Text style={[styles.pairLabel, { color: palette.muted }]}>{fact.label}</Text>
-      <Text selectable style={[styles.blockValue, face, { color }]}>{fact.value}</Text>
+      <Text selectable={fact.block || fact.mono} style={[styles.blockValue, face, { color }]}>{fact.value}</Text>
     </View>;
     return <View key={index} accessible accessibilityLabel={`${fact.label}: ${fact.value}`} style={[layout === "sentences" ? styles.sentence : styles.pair, line]}>
       <Text style={[layout === "sentences" ? styles.sentenceLabel : styles.pairLabel, { color: palette.muted }]}>{fact.label}</Text>

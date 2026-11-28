@@ -22,6 +22,10 @@ export interface Palette {
   terminal: string;
 }
 
+const DARK_SEMANTIC = { success: "#55b979", warning: "#d6a744", info: "#5b8def", danger: "#db695f" };
+// Dedicated darker Light Mode semantic colors achieving >=4.5:1 WCAG AA contrast on all light surfaces and tinted badges.
+const LIGHT_SEMANTIC = { success: "#14532d", warning: "#78350f", info: "#1e40af", danger: "#991b1b" };
+
 // Near-black pages with clear steps of elevation above them, text in the
 // system's greys, and hairlines of light rather than lines of colour.
 const dark: Record<ThemeName, Palette> = {
@@ -32,9 +36,9 @@ const dark: Record<ThemeName, Palette> = {
 };
 
 const light: Record<ThemeName, Palette> = {
-  Den: palette("#f8f7f4", "#ffffff", "#f2f0ec", "#e5e1da", "#29282b", "#706d70", "#999599", "#a96f27", "#ffffff"),
-  Slate: palette("#f7f8fa", "#ffffff", "#eff2f5", "#dfe4eb", "#252a31", "#68717d", "#929aa5", "#3f75c7", "#ffffff"),
-  Moss: palette("#f5f8f5", "#ffffff", "#edf3ee", "#dce8df", "#263028", "#647267", "#8d9990", "#2f8750", "#ffffff"),
+  Den: palette("#f8f7f4", "#ffffff", "#f2f0ec", "#e5e1da", "#29282b", "#706d70", "#999599", "#a96f27", "#ffffff", undefined, undefined, LIGHT_SEMANTIC),
+  Slate: palette("#f7f8fa", "#ffffff", "#eff2f5", "#dfe4eb", "#252a31", "#68717d", "#929aa5", "#3f75c7", "#ffffff", undefined, undefined, LIGHT_SEMANTIC),
+  Moss: palette("#f5f8f5", "#ffffff", "#edf3ee", "#dce8df", "#263028", "#647267", "#8d9990", "#2f8750", "#ffffff", undefined, undefined, LIGHT_SEMANTIC),
   Ember: dark.Ember,
 };
 
@@ -63,6 +67,6 @@ export function useTheme() {
   return value;
 }
 
-function palette(page: string, card: string, raised: string, selected: string, ink: string, muted: string, faint: string, accent: string, accentInk: string, border = `${muted}35`, terminal = "#171719"): Palette {
-  return { page, card, raised, selected, ink, muted, faint, accent, accentInk, success: "#55b979", warning: "#d6a744", info: "#5b8def", danger: "#db695f", border, terminal };
+function palette(page: string, card: string, raised: string, selected: string, ink: string, muted: string, faint: string, accent: string, accentInk: string, border = `${muted}35`, terminal = "#171719", semantic = DARK_SEMANTIC): Palette {
+  return { page, card, raised, selected, ink, muted, faint, accent, accentInk, ...semantic, border, terminal };
 }

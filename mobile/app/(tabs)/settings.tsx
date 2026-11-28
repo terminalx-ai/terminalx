@@ -18,7 +18,7 @@ import { hostDisplayName } from "@mobile/store/host-name";
 import { Notice } from "@mobile/ui/Notice";
 import { Button, Card, Screen, SectionTitle } from "@mobile/ui/primitives";
 import { Spinner } from "@mobile/ui/Spinner";
-import { withTextSizePage } from "@mobile/ui/text-size";
+import { useLargeText, withTextSizePage } from "@mobile/ui/text-size";
 import { THEMES, themePalette, useTheme } from "@mobile/ui/theme";
 
 /**
@@ -30,6 +30,7 @@ function SettingsScreen() {
   const app = useApp();
   const router = useRouter();
   const scheme = useColorScheme();
+  const large = useLargeText();
   const { name, palette, setName } = useTheme();
   const machine = useMachines().paired.find((item) => item.active);
   const notificationSettings = useNotificationSettings();
@@ -82,7 +83,7 @@ function SettingsScreen() {
     {pendingDeletion !== null ? <Notice testID="settings-deletion-pending" tone="info" title={accountDeletionText.doneHead(deletionDate(pendingDeletion))} text={accountDeletionText.doneKeep(deletionDate(pendingDeletion))} /> : null}
     {user ? <Card>
       <Pressable accessibilityRole="button" accessibilityLabel={`Account, ${who}`} onPress={() => router.push("/account")} style={({ pressed }) => [styles.accountRow, pressed && { backgroundColor: palette.raised }]}>
-        <View style={[styles.avatar, { backgroundColor: palette.selected }]}><Text style={[styles.avatarText, { color: palette.ink }]}>{[...(who ?? "?")][0]!.toUpperCase()}</Text></View>
+        <View style={[styles.avatar, { backgroundColor: palette.selected }]}><Text maxFontSizeMultiplier={1.4} style={[styles.avatarText, { color: palette.ink }]}>{[...(who ?? "?")][0]!.toUpperCase()}</Text></View>
         <View style={styles.flex}><Text numberOfLines={1} style={[styles.rowTitle, { color: palette.ink }]}>{user.displayName ?? "TerminalX account"}</Text><Text numberOfLines={1} style={[styles.detail, { color: palette.muted }]}>{user.email}</Text></View>
         <ChevronRight size={18} color={palette.faint} />
       </Pressable>
@@ -93,10 +94,10 @@ function SettingsScreen() {
     <Card><Pressable accessibilityRole="button" accessibilityLabel={`Notifications, ${notificationSettings ? settingsSummary(notificationSettings) : ""}`} onPress={() => router.push("/notifications")} style={({ pressed }) => [styles.settingRow, pressed && { backgroundColor: palette.raised }]}><Bell size={20} color={palette.ink} /><View style={styles.flex}><Text style={[styles.rowName, { color: palette.ink }]}>Notifications</Text>{notificationSettings ? <Text style={[styles.detail, { color: palette.muted }]}>{settingsSummary(notificationSettings)}</Text> : null}</View><ChevronRight size={18} color={palette.faint} /></Pressable></Card>
 
     <SectionTitle>Appearance</SectionTitle>
-    <View style={styles.themeGrid}>{THEMES.map((theme) => {
+    <View testID="theme-grid" style={[styles.themeGrid, large && styles.themeGridStacked]}>{THEMES.map((theme) => {
       const colours = themePalette(theme, scheme);
       const selected = theme === name;
-      return <Pressable key={theme} accessibilityRole="button" accessibilityLabel={`${theme} theme`} accessibilityState={{ selected }} onPress={() => setName(theme)} style={[styles.theme, { backgroundColor: palette.raised, borderColor: selected ? palette.accent : palette.border }]}>
+      return <Pressable key={theme} accessibilityRole="button" accessibilityLabel={`${theme} theme`} accessibilityState={{ selected }} onPress={() => setName(theme)} style={[styles.theme, large && styles.themeStacked, { backgroundColor: palette.raised, borderColor: selected ? palette.accent : palette.border }]}>
         <View testID={`theme-preview-${theme}`} style={[styles.swatch, { backgroundColor: colours.page, borderColor: palette.border }]}><View style={[styles.swatchAccent, { backgroundColor: colours.accent }]} /></View>
         <View style={styles.themeName}><Text style={[styles.themeLabel, { color: palette.ink }]}>{theme}</Text>{selected ? <Check size={15} color={palette.accent} /> : null}</View>
       </Pressable>;
@@ -143,7 +144,9 @@ const styles = StyleSheet.create({
   detail: { fontSize: 13, lineHeight: 18 },
   flex: { flex: 1 },
   themeGrid: { flexDirection: "row", gap: 8 },
+  themeGridStacked: { flexDirection: "column" },
   theme: { flex: 1, borderWidth: 1, borderRadius: 12, padding: 8, gap: 6 },
+  themeStacked: { flex: 0 },
   swatch: { height: 34, borderRadius: 8, borderWidth: StyleSheet.hairlineWidth, justifyContent: "flex-end", padding: 6 },
   swatchAccent: { width: 22, height: 6, borderRadius: 3 },
   themeName: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 2 },

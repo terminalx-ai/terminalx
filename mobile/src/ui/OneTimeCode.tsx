@@ -4,6 +4,7 @@ import * as Clipboard from "expo-clipboard";
 import { Check, Copy } from "lucide-react-native";
 import { clockText, useRemaining } from "./countdown";
 import { Button } from "./primitives";
+import { HEADING_MAX_POINTS, maxScaleFor } from "./text-size";
 import { useTheme } from "./theme";
 
 /**
@@ -54,7 +55,7 @@ export function OneTimeCode({ code, expiresAt, spent, onExpired, testID }: {
       {!over && expiresAt != null ? <Text testID="one-time-code-expiry" style={[styles.label, styles.clock, { color: palette.muted }]}>{`expires in ${clockText(remaining)}`}</Text> : null}
     </View>
     {/* Read out character by character, not as a word; long-press selects it. */}
-    <Text selectable testID="one-time-code" accessibilityLabel={`One-time code: ${[...code].join(" ")}${over ? ", no longer valid" : ""}`}
+    <Text selectable testID="one-time-code" maxFontSizeMultiplier={CODE_MAX_SCALE} accessibilityLabel={`One-time code: ${[...code].join(" ")}${over ? ", no longer valid" : ""}`}
       style={[styles.code, { fontFamily: Platform.select({ ios: "Menlo", default: "monospace" }), color: over ? palette.faint : palette.ink, backgroundColor: palette.raised, borderColor: palette.border }, over ? styles.struck : null]}>{code}</Text>
     {over ? null : <Button label={copied ? "Copied" : "Copy code"} accessibilityLabel="Copy code" kind="secondary" icon={(color) => (copied ? <Check size={16} color={color} /> : <Copy size={16} color={color} />)} onPress={copy} />}
     {failed && !over ? <Text accessibilityRole="alert" style={[styles.problem, { color: palette.danger }]}>Could not copy the code. Select it and copy it, or type it.</Text> : null}
@@ -63,10 +64,12 @@ export function OneTimeCode({ code, expiresAt, spent, onExpired, testID }: {
 
 const styles = StyleSheet.create({
   block: { gap: 10 },
-  labelRow: { flexDirection: "row", justifyContent: "space-between", gap: 8, marginHorizontal: 4, marginBottom: -4 },
+  labelRow: { flexDirection: "row", flexWrap: "wrap", justifyContent: "space-between", gap: 8, marginHorizontal: 4, marginBottom: -4 },
   label: { fontSize: 13, lineHeight: 18 },
   clock: { fontVariant: ["tabular-nums"] },
   code: { fontSize: 30, fontWeight: "500", letterSpacing: 4.2, textAlign: "center", paddingHorizontal: 8, paddingVertical: 18, borderRadius: 12, borderWidth: StyleSheet.hairlineWidth, overflow: "hidden" },
   struck: { textDecorationLine: "line-through" },
   problem: { fontSize: 13, lineHeight: 18, marginHorizontal: 4 },
 });
+
+const CODE_MAX_SCALE = maxScaleFor(styles.code.fontSize, HEADING_MAX_POINTS);

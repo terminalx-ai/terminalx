@@ -83,22 +83,24 @@ export function ChatTabs({ session, selectedTabId, onSelect, onAdd, onClose, act
   const scroll = useRef<ScrollViewInstance>(null);
   const offsets = useRef<Record<string, number>>({});
   useEffect(() => { scroll.current?.scrollTo({ x: Math.max(0, (offsets.current[selectedTabId] ?? 0) - 16), animated: true }); }, [selectedTabId]);
-  return <View style={[styles.strip, { borderBottomColor: palette.border }]}>
+  return <View accessibilityRole="tablist" style={[styles.strip, { borderBottomColor: palette.border }]}>
     <ScrollView ref={scroll} horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.tabs}>
       {chats.map((chat) => {
         const selected = chat.id === selectedTabId;
-        return <Pressable key={chat.id} accessibilityRole="tab" accessibilityLabel={selected ? `${chat.name}, open` : `Open ${chat.name}`} accessibilityState={{ selected }} onLayout={({ nativeEvent }) => { offsets.current[chat.id] = nativeEvent.layout.x; }} onPress={() => { if (!selected) onSelect(chat.id); }} style={styles.tab}>
+        return <View key={chat.id} onLayout={({ nativeEvent }) => { offsets.current[chat.id] = nativeEvent.layout.x; }} style={styles.tab}>
           <View style={styles.tabLabel}>
-            <AgentMark id={chat.harness} size={14} color={selected ? palette.ink : palette.muted} />
-            <Text numberOfLines={1} style={[styles.tabName, { color: selected ? palette.ink : palette.muted, fontWeight: selected ? "600" : "400" }]}>{chat.name}</Text>
-            <StateMark state={chat.state} info={palette.info} warning={palette.warning} />
-            {/* As on the Mac, a tab closes from its own ×: here the open one's, so a scroll is never a close. */}
-            {selected && onClose && chats.length > 1 ? <Pressable accessibilityRole="button" accessibilityLabel={`Close ${chat.name}`} accessibilityState={{ disabled: actionsDisabled }} disabled={actionsDisabled} hitSlop={10} onPress={() => onClose(chat.id)} style={({ pressed }) => [styles.close, { backgroundColor: pressed ? palette.selected : palette.raised, opacity: actionsDisabled ? 0.4 : 1 }]}>
+            <Pressable accessibilityRole="tab" accessibilityLabel={selected ? `${chat.name}, open` : `Open ${chat.name}`} accessibilityState={{ selected }} onPress={() => { if (!selected) onSelect(chat.id); }} style={styles.tabMain}>
+              <AgentMark id={chat.harness} size={14} color={selected ? palette.ink : palette.muted} />
+              <Text numberOfLines={1} style={[styles.tabName, { color: selected ? palette.ink : palette.muted, fontWeight: selected ? "600" : "400" }]}>{chat.name}</Text>
+              <StateMark state={chat.state} info={palette.info} warning={palette.warning} />
+            </Pressable>
+            {/* Sibling of the tab Pressable so VoiceOver/TalkBack can reach it directly. */}
+            {selected && onClose && chats.length > 1 ? <Pressable accessibilityRole="button" accessibilityLabel={`Close ${chat.name}`} accessibilityState={{ disabled: actionsDisabled }} disabled={actionsDisabled} hitSlop={13} onPress={() => onClose(chat.id)} style={({ pressed }) => [styles.close, { backgroundColor: pressed ? palette.selected : palette.raised, opacity: actionsDisabled ? 0.4 : 1 }]}>
               <X size={11} color={palette.muted} strokeWidth={2.4} />
             </Pressable> : null}
           </View>
           <View style={[styles.underline, { backgroundColor: selected ? palette.ink : "transparent" }]} />
-        </Pressable>;
+        </View>;
       })}
       {onAdd ? <Pressable accessibilityRole="button" accessibilityLabel="New chat in this branch" accessibilityState={{ disabled: actionsDisabled }} disabled={actionsDisabled} hitSlop={8} onPress={onAdd} style={({ pressed }) => [styles.add, { opacity: actionsDisabled ? 0.4 : pressed ? 0.5 : 1 }]}>
         <Plus size={18} color={palette.muted} strokeWidth={2} />
@@ -189,7 +191,8 @@ const styles = StyleSheet.create({
   strip: { borderBottomWidth: StyleSheet.hairlineWidth },
   tabs: { paddingHorizontal: 12, alignItems: "stretch" },
   tab: { paddingHorizontal: 10, paddingTop: 8, justifyContent: "space-between", maxWidth: 220 },
-  tabLabel: { flexDirection: "row", alignItems: "center", gap: 7, minHeight: 28 },
+  tabLabel: { flexDirection: "row", alignItems: "center", gap: 7, minHeight: 36 },
+  tabMain: { flexDirection: "row", alignItems: "center", gap: 7, flexShrink: 1, minHeight: 36 },
   tabName: { flexShrink: 1, fontSize: 15, letterSpacing: -0.2 },
   underline: { height: 2, borderRadius: 1, marginTop: 8 },
   add: { width: 40, alignItems: "center", justifyContent: "center", paddingBottom: 2 },
@@ -198,7 +201,7 @@ const styles = StyleSheet.create({
   grabber: { alignSelf: "center", width: 36, height: 5, borderRadius: 3 },
   sheetTitle: { fontSize: 17, fontWeight: "600", letterSpacing: -0.4 },
   agents: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
-  agent: { flexDirection: "row", alignItems: "center", gap: 7, height: 36, borderRadius: 18, borderWidth: StyleSheet.hairlineWidth, paddingHorizontal: 14 },
+  agent: { flexDirection: "row", alignItems: "center", gap: 7, minHeight: 44, borderRadius: 22, borderWidth: StyleSheet.hairlineWidth, paddingHorizontal: 14, paddingVertical: 8 },
   agentName: { fontSize: 15 },
   prompt: { minHeight: 96, maxHeight: 180, borderRadius: 14, paddingHorizontal: 14, paddingTop: 12, paddingBottom: 12, fontSize: 16, textAlignVertical: "top" },
   error: { fontSize: 13, lineHeight: 18 },

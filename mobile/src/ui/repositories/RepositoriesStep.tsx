@@ -1,5 +1,5 @@
-import { useState, type ReactNode } from "react";
-import { Keyboard, Pressable, StyleSheet, Text, View } from "react-native";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import { BackHandler, Keyboard, Pressable, StyleSheet, Text, View } from "react-native";
 import { ChevronRight, FolderGit2, GitFork, Globe, Link, Lock, SearchX, Settings2 } from "lucide-react-native";
 import type { CloudApi } from "@mobile/cloud/api";
 import { WORDS, chooseableInstallations, launchFull, launchRepository, matchesSearch, repositoriesView, repositoryProblem, sameRepository, suspendedInstallations } from "@mobile/cloud/github";
@@ -27,7 +27,7 @@ type Connect = ReturnType<typeof useGithubConnect>;
  * What is ticked here is a working copy: the form gets it when the foot's
  * button is pressed, and Back leaves the form as it was.
  */
-export function RepositoriesStep({ api, orgId, organization, repositories, problems, page, onUse, onBack, onToken }: {
+export function RepositoriesStep({ api, orgId, organization, repositories, problems, page, onRegisterBack, onUse, onBack, onToken }: {
   api: CloudApi;
   orgId: string;
   /** The organization's name. */
@@ -37,6 +37,7 @@ export function RepositoriesStep({ api, orgId, organization, repositories, probl
   /** What the last check before pricing said, about what the form holds. */
   problems: PreflightProblems | null;
   page: RepositoriesPage;
+  onRegisterBack?(handler: (() => void) | null): void;
   onUse(repositories: LaunchRepository[]): void;
   onBack(): void;
   /** To where the organization's GitHub token is saved. */
@@ -54,6 +55,26 @@ export function RepositoriesStep({ api, orgId, organization, repositories, probl
   const [url, setUrl] = useState(only?.cloneUrl ?? "");
   const [ref, setRef] = useState(only?.ref ?? "");
   const [invalid, setInvalid] = useState<string | null>(null);
+  const chooseBackRef = useRef<(() => void) | null>(null);
+  const handleBackRef = useRef<() => void>(onBack);
+  handleBackRef.current = () => {
+    if (typeof at === "object") { (chooseBackRef.current ?? (() => setAt("list")))(); return; }
+    if (at === "typed") { setInvalid(null); setAt("list"); return; }
+    if (branchOf) { setBranchOf(null); return; }
+    onBack();
+  };
+  useEffect(() => {
+    onRegisterBack?.(() => handleBackRef.current());
+    const subscription = BackHandler.addEventListener("hardwareBackPress", () => {
+      if (typeof at === "object") return false;
+      handleBackRef.current();
+      return true;
+    });
+    return () => {
+      subscription.remove();
+      onRegisterBack?.(null);
+    };
+  }, [at, onRegisterBack]);
 
   const app = github.read.status === "ready" ? github.read.app : null;
   const view = app ? repositoriesView(app) : null;
@@ -89,7 +110,9 @@ export function RepositoriesStep({ api, orgId, organization, repositories, probl
   </>;
 
   if (typeof at === "object" && app) {
-    return <ChooseRepositories api={api} orgId={orgId} app={app} installationId={at.installationId} page={page} onBack={() => setAt("list")} onReload={() => void github.reload()}
+    return <ChooseRepositories api={api} orgId={orgId} app={app} installationId={at.installationId} page={page}
+      onRegisterBack={(handler) => { chooseBackRef.current = handler; }}
+      onBack={() => setAt("list")} onReload={() => void github.reload()}
       onSaved={(next) => { github.put(next); connect.dismiss(); setAt("list"); }} />;
   }
 

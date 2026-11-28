@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from "react";
-import { Pressable, StyleSheet, Text, TextInput, View } from "react-native";
+import { Alert, KeyboardAvoidingView, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { keyboardAvoidingBehavior } from "@mobile/ui/keyboard";
 import { useRouter } from "expo-router";
 import { Check } from "lucide-react-native";
 import type { NewSessionOptions } from "@mobile/data/host-api";
@@ -27,6 +29,7 @@ export function NewSessionForm({ title, onStarted }: { title?: string; onStarted
   const app = useApp();
   const words = useHostWords();
   const { palette } = useTheme();
+  const insets = useSafeAreaInsets();
   const [options, setOptions] = useState<NewSessionOptions | null | undefined>(undefined);
   const [choices, setChoices] = useState<NewSessionChoices | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -67,8 +70,8 @@ export function NewSessionForm({ title, onStarted }: { title?: string; onStarted
       if (!result.created) { setError(result.message); return; }
       draftId.current = null;
       void app.refreshSessions();
+      if (result.sendError) Alert.alert("First message not sent", result.sendError);
       onStarted({ sessionId: result.sessionId, tabId: result.tabId, hostId: app.activeHost?.id ?? "", title: result.title });
-      if (result.sendError) setError(result.sendError);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -78,7 +81,7 @@ export function NewSessionForm({ title, onStarted }: { title?: string; onStarted
 
   const choice = (key: string, label: string, selected: boolean, onPress: () => void, detail?: string, disabled?: boolean) => <Pressable key={key} accessibilityRole="button" accessibilityLabel={label} accessibilityHint={detail} accessibilityState={{ selected, disabled }} disabled={disabled} onPress={onPress} style={[styles.choice, { backgroundColor: selected ? palette.selected : palette.raised, opacity: disabled ? 0.5 : 1 }]}><View style={styles.flex}><Text style={[styles.choiceLabel, { color: palette.ink }]}>{label}</Text>{detail ? <Text style={[styles.detail, { color: palette.muted }]}>{detail}</Text> : null}</View>{selected ? <Check size={17} color={palette.accent} /> : null}</Pressable>;
 
-  return <Screen title={title}>
+  return <KeyboardAvoidingView style={[styles.flex, { backgroundColor: palette.page }]} behavior={keyboardAvoidingBehavior()} keyboardVerticalOffset={title ? 0 : insets.top + 44}><Screen title={title}>
     <SectionTitle>Where</SectionTitle>
     <Card style={styles.group}>
       {options.projects.map((candidate) => choice(candidate.id, candidate.name, project?.id === candidate.id, () => change({ where: { projectId: candidate.id, useWorktree: candidate.git } }), candidate.git ? undefined : "Folder"))}
@@ -105,7 +108,7 @@ export function NewSessionForm({ title, onStarted }: { title?: string; onStarted
     {error ? <Text accessibilityRole="alert" style={[styles.detail, styles.note, { color: palette.danger }]}>{error}</Text> : null}
     <Button label={busy ? "Starting…" : "Start session"} disabled={!!reason || busy} onPress={() => void start()} />
     {reason && choices.text.trim() ? <Text style={[styles.detail, styles.note, { color: palette.muted }]}>{reason}</Text> : null}
-  </Screen>;
+  </Screen></KeyboardAvoidingView>;
 }
 
 const styles = StyleSheet.create({
@@ -115,7 +118,7 @@ const styles = StyleSheet.create({
   block: { padding: 12, gap: 10 },
   choice: { minHeight: 48, paddingHorizontal: 12, paddingVertical: 8, borderRadius: 10, flexDirection: "row", alignItems: "center", gap: 10 },
   choiceLabel: { fontSize: 15, fontWeight: "600" },
-  pill: { minHeight: 40, paddingHorizontal: 14, borderRadius: 10, justifyContent: "center" },
+  pill: { minHeight: 44, paddingHorizontal: 14, paddingVertical: 8, borderRadius: 10, justifyContent: "center" },
   detail: { fontSize: 13, lineHeight: 18 },
   note: { paddingHorizontal: 4 },
   input: { minHeight: 44, borderWidth: StyleSheet.hairlineWidth, borderRadius: 10, paddingHorizontal: 12, fontSize: 16 },

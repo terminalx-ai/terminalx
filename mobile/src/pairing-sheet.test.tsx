@@ -47,7 +47,7 @@ vi.mock("react-native", () => {
   const Box = ({ children }: { children?: ReactNode }) => <div>{children}</div>;
   return {
     useWindowDimensions: () => ({ width: 375, height: 667, scale: 2, fontScale: 1 }),
-    View: Box, Text: Box, Modal: Box, RefreshControl: () => null,
+    View: Box, Text: Box, ScrollView: Box, KeyboardAvoidingView: Box, Modal: Box, RefreshControl: () => null,
     Platform: { get OS() { return mocks.os; } },
     StyleSheet: { create: (styles: unknown) => styles, hairlineWidth: 1 },
     Pressable: ({ children, onPress, disabled, accessibilityLabel }: any) => <button disabled={disabled} aria-label={accessibilityLabel} onClick={onPress}>{children}</button>,
