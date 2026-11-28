@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openExternalWebUrl } from "@/lib/externalUrl";
 import { LoaderCircle, LogoLinear } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { errorMessage, issues as issuesApi } from "@/lib/api";
@@ -49,7 +49,7 @@ export function ConnectLinear({ onConnected }: { onConnected: () => void }) {
             className="h-8 w-full rounded-md bg-well px-2.5 font-mono text-xs outline-none ring-1 ring-hairline placeholder:text-faint focus:ring-ring/60"
           />
           <div className="flex items-center justify-between gap-2">
-            <button type="button" className="text-xs text-muted-foreground underline-offset-2 hover:text-foreground hover:underline" onClick={() => void openUrl(LINEAR_KEYS_URL).catch(() => {})}>
+            <button type="button" className="text-xs text-muted-foreground underline-offset-2 hover:text-foreground hover:underline" onClick={() => void openExternalWebUrl(LINEAR_KEYS_URL).catch(() => {})}>
               Create a key in Linear
             </button>
             <Button size="sm" type="submit" disabled={!key.trim() || saving}>

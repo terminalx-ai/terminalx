@@ -8,6 +8,7 @@ import * as ImagePicker from "expo-image-picker";
 import type { AgentEvent } from "@terminalx/portable/events";
 import SessionScreen from "../app/session/[sessionId]";
 import SessionsScreen from "../app/(tabs)/sessions";
+import { openLocalString } from "@mobile/data/local-crypto";
 import { forgetConversationState, sendHeldMessages } from "@mobile/state/conversation-state";
 import { RelayOuterError } from "./transport/relay-client";
 
@@ -1697,9 +1698,12 @@ describe("one quiet connection state in a session (#983)", () => {
       expect(mocks.storage.has(draftKey)).toBe(false);
       expect(mocks.listProps.data).toBe(initialData);
 
-      // Once the debounce interval elapses, the latest draft is persisted in one write.
+      // Once the debounce interval elapses, the latest draft is persisted in one encrypted write (P-45, S-48).
       await act(async () => { await vi.advanceTimersByTimeAsync(500); });
-      expect(mocks.storage.get(draftKey)).toBe("hello");
+      const stored = mocks.storage.get(draftKey);
+      expect(stored).toBeDefined();
+      expect(stored).not.toContain("hello");
+      expect(await openLocalString(stored!, draftKey)).toBe("hello");
     } finally {
       vi.useRealTimers();
     }

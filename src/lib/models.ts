@@ -41,29 +41,33 @@ export async function refreshModels() {
   }
 }
 
+function subscribeAndLoadModels(cb: () => void) {
+  listeners.add(cb);
+  void loadModels();
+  return () => { listeners.delete(cb); };
+}
+
+function subscribeModels(cb: () => void) {
+  listeners.add(cb);
+  return () => { listeners.delete(cb); };
+}
+
+function getModelsSnapshot(): ModelInfo[] {
+  return models;
+}
+
+function getModelsLoadedSnapshot(): boolean {
+  return loaded;
+}
+
 export function useModels(harness?: string): ModelInfo[] {
-  const all = useSyncExternalStore(
-    (cb) => {
-      listeners.add(cb);
-      void loadModels();
-      return () => listeners.delete(cb);
-    },
-    () => models,
-    () => models,
-  );
+  const all = useSyncExternalStore(subscribeAndLoadModels, getModelsSnapshot, getModelsSnapshot);
   return harness ? all.filter((m) => m.harness === harness) : all;
 }
 
 /** False until the first read of the agents' models has come back. */
 export function useModelsLoaded(): boolean {
-  return useSyncExternalStore(
-    (cb) => {
-      listeners.add(cb);
-      return () => listeners.delete(cb);
-    },
-    () => loaded,
-    () => loaded,
-  );
+  return useSyncExternalStore(subscribeModels, getModelsLoadedSnapshot, getModelsLoadedSnapshot);
 }
 
 export function modelLabel(harness: string, id: string): string {

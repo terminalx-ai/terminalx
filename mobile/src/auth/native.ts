@@ -9,20 +9,60 @@ const VERIFIER_KEY = "terminalx.cloud.pkce.verifier";
 const STATE_KEY = "terminalx.cloud.pkce.state";
 const NONCE_KEY = "terminalx.cloud.pkce.nonce";
 const REFRESH_SKEW_MS = 60_000;
+const CALLBACK_URI_PREFIX = "terminalx://auth/callback";
 let refreshInFlight: Promise<StoredRefreshOutcome> | null = null;
+/**
+ * In-memory cache of the active CloudSession while it is fresh beyond `REFRESH_SKEW_MS` (P-76).
+ * Avoids hitting native Keychain/Keystore + `JSON.parse` on every Cloud API request.
+ * Invalidated on store, clear, forget, sign-out, and refresh settlement.
+ */
+let cachedSession: CloudSession | null = null;
 /**
  * Bumped by every sign-in, sign-out and forget. A refresh that finishes after one of them belongs to a session that
  * is no longer the stored one: it must not write that session back, or delete the newer one (PRO-584).
  */
 let generation = 0;
 
+function isFreshSession(session: CloudSession): boolean {
+  return session.expiresAt > Date.now() + REFRESH_SKEW_MS;
+}
+
+/** Clears the in-memory CloudSession cache (used by tests that mutate mocked SecureStore directly). */
+export function resetSessionCacheForTests(): void {
+  cachedSession = null;
+}
+
+function constantTimeEqual(left: string, right: string): boolean {
+  const max = Math.max(left.length, right.length);
+  let diff = left.length ^ right.length;
+  for (let i = 0; i < max; i++) {
+    diff |= (left.charCodeAt(i) || 0) ^ (right.charCodeAt(i) || 0);
+  }
+  return diff === 0;
+}
+
+function parseCallbackForStateCheck(value: string): { validUri: boolean; state: string | null } {
+  const path = value.split("?")[0]?.replace(/\/+$/, "") ?? "";
+  if (path !== CALLBACK_URI_PREFIX) return { validUri: false, state: null };
+  const query = value.includes("?") ? value.slice(value.indexOf("?") + 1) : "";
+  const params = new URLSearchParams(query);
+  return { validUri: true, state: params.get("state") };
+}
+
+async function clearPkceState(): Promise<void> {
+  await Promise.all([VERIFIER_KEY, STATE_KEY, NONCE_KEY].map((key) => SecureStore.deleteItemAsync(key, OPTIONS).catch(() => undefined)));
+}
+
 async function storeSession(session: CloudSession): Promise<void> {
   generation++;
+  cachedSession = null;
   await SecureStore.setItemAsync(SESSION_KEY, JSON.stringify(session), OPTIONS);
+  cachedSession = isFreshSession(session) ? session : null;
 }
 
 async function clearSession(): Promise<void> {
   generation++;
+  cachedSession = null;
   await SecureStore.deleteItemAsync(SESSION_KEY, OPTIONS).catch(() => undefined);
 }
 
@@ -71,8 +111,17 @@ export async function beginSignIn(options: SignInOptions = {}): Promise<SignInRe
     SecureStore.setItemAsync(STATE_KEY, state, OPTIONS),
     SecureStore.setItemAsync(NONCE_KEY, nonce, OPTIONS),
   ]);
-  const result = await WebBrowser.openAuthSessionAsync(buildAuthorizeUrl(AUTH_CONFIG, challenge, state, nonce, { fresh: options.fresh }), "terminalx://auth/callback", options.fresh ? { preferEphemeralSession: true } : undefined);
+  let result: WebBrowser.WebBrowserAuthSessionResult;
+  try {
+    result = await WebBrowser.openAuthSessionAsync(buildAuthorizeUrl(AUTH_CONFIG, challenge, state, nonce, { fresh: options.fresh }), "terminalx://auth/callback", options.fresh ? { preferEphemeralSession: true } : undefined);
+  } catch (error) {
+    await clearPkceState();
+    expectedUserId = null;
+    throw error;
+  }
   if (result.type === "success") return finishSignIn(result.url);
+  await clearPkceState();
+  expectedUserId = null;
   const failure = authSessionFailure(result as { type: string; error?: string | null });
   if (failure) throw new Error(failure);
   return null;
@@ -88,18 +137,30 @@ let finished: { url: string; outcome: Promise<SignInResult> } | null = null;
 export function finishSignIn(callbackUrl: string): Promise<SignInResult> {
   if (finished?.url === callbackUrl) return finished.outcome;
   const outcome = completeSignIn(callbackUrl);
-  finished = { url: callbackUrl, outcome };
+  const entry = { url: callbackUrl, outcome };
+  finished = entry;
+  // Do not let an unsolicited invalid/mismatched deep link poison the replay cache.
+  void outcome.catch(() => {
+    if (finished === entry) finished = null;
+  });
   return outcome;
 }
 
 async function completeSignIn(callbackUrl: string): Promise<SignInResult> {
+  const parsed = parseCallbackForStateCheck(callbackUrl);
+  if (!parsed.validUri) throw new Error("invalid_callback_uri");
   const expected = expectedUserId;
   const [verifier, expectedState, nonce] = await Promise.all([
     SecureStore.getItemAsync(VERIFIER_KEY, OPTIONS),
     SecureStore.getItemAsync(STATE_KEY, OPTIONS),
     SecureStore.getItemAsync(NONCE_KEY, OPTIONS),
   ]);
-  await Promise.all([VERIFIER_KEY, STATE_KEY, NONCE_KEY].map((key) => SecureStore.deleteItemAsync(key, OPTIONS).catch(() => undefined)));
+  // Verify state in constant time BEFORE deleting PKCE secrets so an unsolicited
+  // deep link with a bogus state cannot abort an active sign-in (S-47).
+  if (!parsed.state || !expectedState || !constantTimeEqual(parsed.state, expectedState)) {
+    throw new Error("state_mismatch");
+  }
+  await clearPkceState();
   const outcome = await exchangeAuthorizationCode({ config: AUTH_CONFIG, callbackUrl, verifier, expectedState, nonce });
   if (!outcome.ok) {
     // A hold is an address with no account yet: never the account being signed in to again.
@@ -130,8 +191,11 @@ export async function redeemHeldAccessCode(hold: AccessHold, code: string): Prom
 }
 
 export async function readSession(): Promise<CloudSession | null> {
+  if (cachedSession && isFreshSession(cachedSession)) return cachedSession;
   const value = await SecureStore.getItemAsync(SESSION_KEY, OPTIONS).catch(() => null);
-  return value ? parseStoredSession(value) : null;
+  const parsed = value ? parseStoredSession(value) : null;
+  cachedSession = parsed && isFreshSession(parsed) ? parsed : null;
+  return parsed;
 }
 
 /**
@@ -141,11 +205,14 @@ export async function readSession(): Promise<CloudSession | null> {
  */
 export function refreshStoredSession(): Promise<StoredRefreshOutcome> {
   if (refreshInFlight) return refreshInFlight;
+  if (cachedSession && isFreshSession(cachedSession)) {
+    return Promise.resolve({ status: "fresh", session: cachedSession });
+  }
   const started = generation;
   const run = readSession().then(async (session): Promise<StoredRefreshOutcome> => {
     // Nothing stored: signed out, here or by a refusal elsewhere. Nothing is sent.
     if (!session) return { status: "rejected" };
-    if (session.expiresAt > Date.now() + REFRESH_SKEW_MS) return { status: "fresh", session };
+    if (isFreshSession(session)) return { status: "fresh", session };
     return settleRefresh(session, started, await refreshSession(AUTH_CONFIG, session));
   });
   refreshInFlight = run.finally(() => { refreshInFlight = null; });
@@ -155,14 +222,18 @@ export function refreshStoredSession(): Promise<StoredRefreshOutcome> {
 async function settleRefresh(session: CloudSession, started: number, outcome: RefreshOutcome): Promise<StoredRefreshOutcome> {
   // Signed in again (or out) while this ran: the stored session is newer than the one refreshed; leave it as it is.
   if (generation !== started) {
+    cachedSession = null;
     const current = await readSession();
     return current ? { status: "fresh", session: current } : { status: "rejected" };
   }
   if (outcome.status === "refreshed") {
+    cachedSession = null;
     await SecureStore.setItemAsync(SESSION_KEY, JSON.stringify(outcome.session), OPTIONS);
+    cachedSession = isFreshSession(outcome.session) ? outcome.session : null;
     return outcome;
   }
   if (outcome.status === "rejected") {
+    cachedSession = null;
     await SecureStore.deleteItemAsync(SESSION_KEY, OPTIONS).catch(() => undefined);
     return outcome;
   }

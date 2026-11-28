@@ -108,6 +108,7 @@ function Navigation() {
   const navigationReady = Boolean(useRootNavigationState()?.key) && app.ready;
   const opened = useRef(false);
   useEffect(() => {
+    if (typeof __DEV__ === "undefined" || !__DEV__) return;
     if (!navigationReady || opened.current) return;
     opened.current = true;
     const route = Platform.OS === "ios" ? Settings.get("openRoute") : undefined;

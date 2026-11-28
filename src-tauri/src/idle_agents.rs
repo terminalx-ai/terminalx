@@ -27,6 +27,7 @@
 //! transcript, its conversation stays (unread, if it was), and its next
 //! message starts it again on the same conversation.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
@@ -116,9 +117,15 @@ pub fn sweep(manager: &SessionManager, limit: Option<Duration>, now: Instant) ->
             return Vec::new();
         }
     };
+    let by_id: HashMap<&str, &SessionEntry> = sessions
+        .iter()
+        .map(|session| (session.id.as_str(), session))
+        .collect();
+    // Capture `/bin/ps` at most once for all idle tabs inspected in this sweep (P-54).
+    let _process_scope = ProcessTableScope::enter();
     let mut stopped = Vec::new();
     for (session_id, tab_id, quiet) in idle {
-        let Some(session) = sessions.iter().find(|session| session.id == session_id) else { continue };
+        let Some(session) = by_id.get(session_id.as_str()).copied() else { continue };
         let Some(why) = due(session, quiet, limit) else { continue };
         if let Some(what) = manager.background_work(&session_id, &tab_id) {
             log::debug!("idle agents: {session_id}:{tab_id} waits on {what}");
@@ -134,6 +141,97 @@ pub fn sweep(manager: &SessionManager, limit: Option<Duration>, now: Instant) ->
         }
     }
     stopped
+}
+
+/// Parsed `pid ppid pgid` process table indexed once per sweep so checking N
+/// idle agents forks `/bin/ps` at most once and looks up each group in O(group).
+#[cfg_attr(windows, allow(dead_code))]
+struct ParsedProcessTable {
+    parents: HashMap<u32, u32>,
+    by_pgid: HashMap<u32, Vec<u32>>,
+}
+
+#[cfg_attr(windows, allow(dead_code))]
+impl ParsedProcessTable {
+    fn parse(table: &str) -> Self {
+        let mut parents = HashMap::new();
+        let mut by_pgid: HashMap<u32, Vec<u32>> = HashMap::new();
+        for line in table.lines() {
+            let mut fields = line.split_whitespace();
+            let (Some(pid), Some(ppid), Some(pgid), None) = (
+                fields.next().and_then(|f| f.parse::<u32>().ok()),
+                fields.next().and_then(|f| f.parse::<u32>().ok()),
+                fields.next().and_then(|f| f.parse::<u32>().ok()),
+                fields.next(),
+            ) else {
+                continue;
+            };
+            parents.insert(pid, ppid);
+            if pgid != pid {
+                by_pgid.entry(pgid).or_default().push(pid);
+            }
+        }
+        Self { parents, by_pgid }
+    }
+
+    fn strays(&self, leader: u32) -> usize {
+        let Some(members) = self.by_pgid.get(&leader) else {
+            return 0;
+        };
+        let descends = |pid: u32| {
+            let mut at = pid;
+            // A chain of parents is short; the bound only guards a table read
+            // while it changed.
+            for _ in 0..256 {
+                match self.parents.get(&at) {
+                    Some(&parent) if parent == leader => return true,
+                    Some(&parent) if parent > 1 && parent != at => at = parent,
+                    _ => return false,
+                }
+            }
+            false
+        };
+        members.iter().filter(|&&pid| !descends(pid)).count()
+    }
+}
+
+#[cfg_attr(windows, allow(dead_code))]
+enum ScopedTableState {
+    Inactive,
+    Active(Option<Option<ParsedProcessTable>>),
+}
+
+thread_local! {
+    static SCOPED_PROCESS_TABLE: RefCell<ScopedTableState> = const { RefCell::new(ScopedTableState::Inactive) };
+}
+
+struct ProcessTableScope {
+    owns_scope: bool,
+}
+
+impl ProcessTableScope {
+    fn enter() -> Self {
+        let owns_scope = SCOPED_PROCESS_TABLE.with(|cell| {
+            let mut state = cell.borrow_mut();
+            if matches!(*state, ScopedTableState::Inactive) {
+                *state = ScopedTableState::Active(None);
+                true
+            } else {
+                false
+            }
+        });
+        Self { owns_scope }
+    }
+}
+
+impl Drop for ProcessTableScope {
+    fn drop(&mut self) {
+        if self.owns_scope {
+            SCOPED_PROCESS_TABLE.with(|cell| {
+                *cell.borrow_mut() = ScopedTableState::Inactive;
+            });
+        }
+    }
 }
 
 /// A process in the agent's process group that no longer descends from the
@@ -152,11 +250,33 @@ pub(crate) fn process_table() -> Option<String> {
     output.status.success().then(|| String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+#[cfg_attr(windows, allow(dead_code))]
+fn strays_with_probe(leader: u32, probe: impl FnOnce() -> Option<String>) -> Option<usize> {
+    SCOPED_PROCESS_TABLE.with(|cell| {
+        let mut state = cell.borrow_mut();
+        match &mut *state {
+            ScopedTableState::Active(cached) => {
+                if cached.is_none() {
+                    *cached = Some(probe().map(|table| ParsedProcessTable::parse(&table)));
+                }
+                cached
+                    .as_ref()
+                    .and_then(|opt| opt.as_ref())
+                    .map(|table| table.strays(leader))
+            }
+            ScopedTableState::Inactive => {
+                drop(state);
+                probe().map(|table| ParsedProcessTable::parse(&table).strays(leader))
+            }
+        }
+    })
+}
+
 pub fn left_running(leader: u32) -> Option<String> {
     #[cfg(windows)]
     let counted = windows_strays(leader);
     #[cfg(not(windows))]
-    let counted = process_table().map(|table| strays(&table, leader));
+    let counted = strays_with_probe(leader, process_table);
     match counted {
         Some(0) => None,
         Some(1) => Some("a process it left running".into()),
@@ -202,30 +322,7 @@ fn windows_strays(leader: u32) -> Option<usize> {
 /// do not descend from it.
 #[cfg_attr(windows, allow(dead_code))]
 pub(crate) fn strays(table: &str, leader: u32) -> usize {
-    let mut parents = HashMap::new();
-    let mut members = Vec::new();
-    for line in table.lines() {
-        let fields: Vec<u32> = line.split_whitespace().filter_map(|field| field.parse().ok()).collect();
-        let [pid, ppid, pgid] = fields[..] else { continue };
-        parents.insert(pid, ppid);
-        if pgid == leader && pid != leader {
-            members.push(pid);
-        }
-    }
-    let descends = |pid: u32| {
-        let mut at = pid;
-        // A chain of parents is short; the bound only guards a table read
-        // while it changed.
-        for _ in 0..256 {
-            match parents.get(&at) {
-                Some(&parent) if parent == leader => return true,
-                Some(&parent) if parent > 1 && parent != at => at = parent,
-                _ => return false,
-            }
-        }
-        false
-    };
-    members.into_iter().filter(|pid| !descends(*pid)).count()
+    ParsedProcessTable::parse(table).strays(leader)
 }
 
 /// Look at the agents every [`EVERY`], for as long as the runtime runs. The
@@ -305,5 +402,33 @@ mod tests {
         assert!(Why::Idle(240 * MINUTE).note().starts_with("Stopped after 4 hours "));
         assert!(Why::Idle(1440 * MINUTE).note().starts_with("Stopped after a day "));
         assert!(Why::WorkspaceRemoved.note().contains("in the project's folder"));
+    }
+
+    #[test]
+    fn process_table_scope_captures_once_across_multiple_leaders_and_resets_on_drop() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let probes = AtomicUsize::new(0);
+        let sample = "\
+          1     0     1
+        400     1   400
+        500     1   400
+        600     1   600
+        ";
+        let probe = || {
+            probes.fetch_add(1, Ordering::SeqCst);
+            Some(sample.to_string())
+        };
+
+        {
+            let _scope = ProcessTableScope::enter();
+            assert_eq!(strays_with_probe(400, probe), Some(1));
+            assert_eq!(strays_with_probe(600, probe), Some(0));
+            assert_eq!(strays_with_probe(400, probe), Some(1));
+            assert_eq!(probes.load(Ordering::SeqCst), 1);
+        }
+
+        // After scope drops, subsequent calls probe fresh again.
+        assert_eq!(strays_with_probe(400, probe), Some(1));
+        assert_eq!(probes.load(Ordering::SeqCst), 2);
     }
 }

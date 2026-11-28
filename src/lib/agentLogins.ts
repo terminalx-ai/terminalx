@@ -149,6 +149,7 @@ export interface AgentLoginNotice {
 let notices: AgentLoginNotice[] = [];
 let nextId = 1;
 const listeners = new Set<() => void>();
+const __subscribe_listeners = (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; };
 const emit = () => { for (const listener of [...listeners]) listener(); };
 
 export function showAgentLoginNotice(notice: Omit<AgentLoginNotice, "id">) {
@@ -163,7 +164,7 @@ export function dismissAgentLoginNotice(id: number) {
 }
 
 export function useAgentLoginNotices(): AgentLoginNotice[] {
-  return useSyncExternalStore((listener) => { listeners.add(listener); return () => { listeners.delete(listener); }; }, () => notices, () => notices);
+  return useSyncExternalStore(__subscribe_listeners, () => notices, () => notices);
 }
 
 /** For tests. */

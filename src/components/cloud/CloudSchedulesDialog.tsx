@@ -712,6 +712,7 @@ function NewScheduleForm({ orgId, workspaceId, contractsAvailable, onDirtyChange
 
 let schedulesTarget: SchedulesTarget | null = null;
 const schedulesListeners = new Set<() => void>();
+const __subscribe_schedulesListeners = (listener: () => void) => { schedulesListeners.add(listener); return () => { schedulesListeners.delete(listener); }; };
 
 export function openSchedulesDialog(target: SchedulesTarget | null) {
   if (schedulesTarget?.orgId !== target?.orgId || schedulesTarget?.workspaceId !== target?.workspaceId) {
@@ -725,10 +726,7 @@ export function openSchedulesDialog(target: SchedulesTarget | null) {
 /** Mounted once (AppShell): the scheduled tasks dialog for `openSchedulesDialog`. */
 export function CloudSchedulesDialogHost() {
   const target = useSyncExternalStore(
-    (listener) => {
-      schedulesListeners.add(listener);
-      return () => schedulesListeners.delete(listener);
-    },
+    __subscribe_schedulesListeners,
     () => schedulesTarget,
     () => null,
   );

@@ -395,11 +395,11 @@ function LaunchFlow({ catalog, organization, organizations, onOrganization, agai
   ]);
 
   // `subtitle`: a page about every workspace of the organization says so in place of its name (25.11's Choose repositories).
-  const page = (title: string, onBack: () => void, body: ReactNode, foot: ReactNode, subtitle?: string) => <KeyboardAvoidingView style={styles.page} behavior={keyboardAvoidingBehavior()}>
+  const page = (title: string, onBack: () => void, body: ReactNode, foot: ReactNode, subtitle?: string, options?: { scroll?: boolean }) => <KeyboardAvoidingView style={styles.page} behavior={keyboardAvoidingBehavior()}>
     <Stack.Screen options={{ title: "New workspace", headerShown: false, gestureEnabled: !blockLeave }} />
     {subtitle ? <ScreenHeader title={title} subtitle={subtitle} onBack={onBack} /> : header(title, onBack)}
-    <ScrollView ref={scroller} keyboardShouldPersistTaps="handled" contentContainerStyle={styles.content}
-      onContentSizeChange={() => { if (typing.current) scroller.current?.scrollToEnd({ animated: false }); }}>{body}</ScrollView>
+    {options?.scroll === false ? <View style={styles.page}>{body}</View> : <ScrollView ref={scroller} keyboardShouldPersistTaps="handled" contentContainerStyle={styles.content}
+      onContentSizeChange={() => { if (typing.current) scroller.current?.scrollToEnd({ animated: false }); }}>{body}</ScrollView>}
     {foot ? <View style={[styles.foot, { paddingBottom: insets.bottom + 12 }]}>{foot}</View> : null}
   </KeyboardAvoidingView>;
 

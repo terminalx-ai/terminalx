@@ -44,15 +44,19 @@ pub struct SessionSummary {
 
 /// Whole lines from the end of a file, newest first.
 ///
-/// Blocks are read from before whatever has been read so far and prepended to
-/// the buffer, so a line split across a block boundary is only handed out once
-/// its beginning arrives.
+/// Reads fixed-size blocks backwards in a single pass: bytes from the current
+/// block are scanned once, and lines spanning multiple blocks accumulate chunks
+/// without quadratic copying or rescanning (P-60).
 pub struct TailLines {
     file: fs::File,
     /// Offset of the earliest byte read; the next block is taken from before it.
     start: u64,
-    /// Bytes read but not yet handed out, ending where the last line began.
-    buf: Vec<u8>,
+    /// Current block buffer; unread bytes occupy `block[..cursor]`.
+    block: Vec<u8>,
+    cursor: usize,
+    /// Complete earlier-read suffix chunks belonging to a single line spanning
+    /// multiple blocks, stored newest-chunk-first (reversed when assembled).
+    tail_chunks: Vec<Vec<u8>>,
     scanned: u64,
     max_scan: Option<u64>,
 }
@@ -72,38 +76,73 @@ impl TailLines {
     fn open_with_limit(path: &Path, max_scan: Option<u64>) -> io::Result<Self> {
         let file = fs::File::open(path)?;
         let start = file.metadata()?.len();
-        Ok(Self { file, start, buf: Vec::new(), scanned: 0, max_scan })
+        Ok(Self {
+            file,
+            start,
+            block: Vec::new(),
+            cursor: 0,
+            tail_chunks: Vec::new(),
+            scanned: 0,
+            max_scan,
+        })
+    }
+
+    fn assemble_line(&mut self, head: &[u8]) -> Option<String> {
+        if self.tail_chunks.is_empty() {
+            if head.is_empty() {
+                return None;
+            }
+            return Some(String::from_utf8_lossy(head).into_owned());
+        }
+        let total = head.len() + self.tail_chunks.iter().map(Vec::len).sum::<usize>();
+        if total == 0 {
+            self.tail_chunks.clear();
+            return None;
+        }
+        let mut combined = Vec::with_capacity(total);
+        combined.extend_from_slice(head);
+        for chunk in self.tail_chunks.drain(..).rev() {
+            combined.extend_from_slice(&chunk);
+        }
+        Some(String::from_utf8_lossy(&combined).into_owned())
     }
 
     /// The next line counting back from the end, or `None` at the start of the
     /// file or once the scan cap is reached. Blank lines are skipped.
     pub fn next_line(&mut self) -> io::Result<Option<String>> {
         loop {
-            if let Some(i) = self.buf.iter().rposition(|b| *b == b'\n') {
-                let line = self.buf.split_off(i + 1);
-                self.buf.pop(); // the newline itself belongs to neither line
-                if line.is_empty() {
-                    continue;
+            if let Some(i) = self.block[..self.cursor].iter().rposition(|b| *b == b'\n') {
+                let end = self.cursor;
+                self.cursor = i;
+                // Copy slice range to avoid holding an immutable borrow on `self.block`.
+                let head = self.block[i + 1..end].to_vec();
+                if let Some(line) = self.assemble_line(&head) {
+                    return Ok(Some(line));
                 }
-                return Ok(Some(String::from_utf8_lossy(&line).into_owned()));
+                continue;
+            }
+            if self.cursor > 0 {
+                let mut carry = std::mem::take(&mut self.block);
+                carry.truncate(self.cursor);
+                self.cursor = 0;
+                self.tail_chunks.push(carry);
             }
             if self.start == 0 || self.max_scan.is_some_and(|limit| self.scanned >= limit) {
-                if self.buf.is_empty() {
+                if self.tail_chunks.is_empty() {
                     return Ok(None);
                 }
-                // Whatever is left is the first line of the file, or — at the
-                // cap — a fragment, which simply fails to parse as an event.
-                let line = std::mem::take(&mut self.buf);
-                return Ok(Some(String::from_utf8_lossy(&line).into_owned()));
+                return Ok(self.assemble_line(&[]));
             }
-            let remaining = self.max_scan.map(|limit| limit.saturating_sub(self.scanned)).unwrap_or(self.start);
+            let remaining = self
+                .max_scan
+                .map(|limit| limit.saturating_sub(self.scanned))
+                .unwrap_or(self.start);
             let take = BLOCK.min(self.start).min(remaining);
             self.start -= take;
-            let mut block = vec![0u8; take as usize];
+            self.block.resize(take as usize, 0);
             self.file.seek(SeekFrom::Start(self.start))?;
-            self.file.read_exact(&mut block)?;
-            block.append(&mut self.buf);
-            self.buf = block;
+            self.file.read_exact(&mut self.block)?;
+            self.cursor = take as usize;
             self.scanned += take;
         }
     }
@@ -149,7 +188,8 @@ pub fn read_log_tail(path: &Path, waiting: bool) -> LogTail {
         Ok(t) => t,
         Err(e) => {
             if e.kind() != io::ErrorKind::NotFound {
-                log::warn!("summary tail {}: {e}", path.display());
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("log");
+                log::warn!("summary tail {name}: {e}");
             }
             return out;
         }
@@ -164,7 +204,8 @@ pub fn read_log_tail(path: &Path, waiting: bool) -> LogTail {
             Ok(Some(l)) => l,
             Ok(None) => break,
             Err(e) => {
-                log::warn!("summary tail {}: {e}", path.display());
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("log");
+                log::warn!("summary tail {name}: {e}");
                 break;
             }
         };
@@ -292,8 +333,11 @@ pub fn generated_tab_titles(session: &SessionEntry) -> BTreeMap<String, String> 
         }
         return out;
     }
+    let Ok(root) = store::root() else {
+        return out;
+    };
     for tab in session.tabs.iter().filter(|tab| !tab.follow.title_pinned) {
-        let first = store::log_path(&session.id, &tab.id)
+        let first = store::log_path_for_tab(&root, &session.id, tab)
             .ok()
             .and_then(|path| cached_first_request(&path, tab.follow.conversation.as_deref()))
             .unwrap_or_default();
@@ -319,16 +363,59 @@ fn stamp(path: &Path) -> Option<Stamp> {
     Some((meta.len(), meta.modified().ok()))
 }
 
+const MAX_NAME_READS: usize = 512;
+
 /// What was read for each tab's name, kept for the next list: the phone asks
 /// for one on every change, and reading each transcript's tail again would
-/// cost megabytes a time for names that seldom change.
+/// cost megabytes a time for names that seldom change. Bounded with LRU
+/// eviction so prompt strings are never retained unboundedly (P-60).
+type NameRequestKey = (std::path::PathBuf, Option<String>);
+type NameRequestEntry = (u64, Result<String, Stamp>);
+
 #[derive(Default)]
 struct NameReads {
-    /// By log and conversation: the first request once found, which never
-    /// changes after; else the stamp of the log it was not in.
-    requests: HashMap<(std::path::PathBuf, Option<String>), Result<String, Stamp>>,
-    /// By transcript: the title its agent last gave it, and the stamp it was read at.
-    titles: HashMap<std::path::PathBuf, (Stamp, Option<String>)>,
+    tick: u64,
+    /// By log and conversation: `(last_used_tick, first_request_or_stamp)`.
+    requests: HashMap<NameRequestKey, NameRequestEntry>,
+    /// By transcript: `(last_used_tick, stamp, ai_title)`.
+    titles: HashMap<std::path::PathBuf, (u64, Stamp, Option<String>)>,
+}
+
+impl NameReads {
+    fn next_tick(&mut self) -> u64 {
+        self.tick = self.tick.wrapping_add(1);
+        self.tick
+    }
+
+    fn insert_request(&mut self, key: (std::path::PathBuf, Option<String>), value: Result<String, Stamp>) {
+        if !self.requests.contains_key(&key) && self.requests.len() >= MAX_NAME_READS {
+            if let Some(oldest) = self
+                .requests
+                .iter()
+                .min_by_key(|(_, (used, _))| *used)
+                .map(|(k, _)| k.clone())
+            {
+                self.requests.remove(&oldest);
+            }
+        }
+        let tick = self.next_tick();
+        self.requests.insert(key, (tick, value));
+    }
+
+    fn insert_title(&mut self, key: std::path::PathBuf, stamp: Stamp, title: Option<String>) {
+        if !self.titles.contains_key(&key) && self.titles.len() >= MAX_NAME_READS {
+            if let Some(oldest) = self
+                .titles
+                .iter()
+                .min_by_key(|(_, (used, _, _))| *used)
+                .map(|(k, _)| k.clone())
+            {
+                self.titles.remove(&oldest);
+            }
+        }
+        let tick = self.next_tick();
+        self.titles.insert(key, (tick, stamp, title));
+    }
 }
 
 static NAME_READS: LazyLock<Mutex<NameReads>> = LazyLock::new(Default::default);
@@ -338,34 +425,44 @@ static NAME_READS: LazyLock<Mutex<NameReads>> = LazyLock::new(Default::default);
 fn cached_first_request(path: &Path, conversation: Option<&str>) -> Option<String> {
     let key = (path.to_path_buf(), conversation.map(String::from));
     let now = stamp(path)?;
-    match NAME_READS.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).requests.get(&key) {
-        Some(Ok(found)) => return Some(found.clone()),
-        Some(Err(seen)) if *seen == now => return None,
-        _ => {}
+    {
+        let mut cache = NAME_READS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let tick = cache.next_tick();
+        if let Some((used, entry)) = cache.requests.get_mut(&key) {
+            *used = tick;
+            match entry {
+                Ok(found) => return Some(found.clone()),
+                Err(seen) if *seen == now => return None,
+                Err(_) => {}
+            }
+        }
     }
     let found = first_request(path, conversation);
     NAME_READS
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .requests
-        .insert(key, found.clone().ok_or(now));
+        .insert_request(key, found.clone().ok_or(now));
     found
 }
 
 /// The title Claude gave a conversation, read again only when its transcript has changed.
 fn cached_agent_title(path: &Path) -> Option<String> {
     let now = stamp(path)?;
-    if let Some((seen, title)) = NAME_READS.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).titles.get(path) {
-        if *seen == now {
-            return title.clone();
+    {
+        let mut cache = NAME_READS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let tick = cache.next_tick();
+        if let Some((used, seen, title)) = cache.titles.get_mut(path) {
+            if *seen == now {
+                *used = tick;
+                return title.clone();
+            }
         }
     }
     let title = crate::harness::claude::transcript::ai_title(path);
     NAME_READS
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .titles
-        .insert(path.to_path_buf(), (now, title.clone()));
+        .insert_title(path.to_path_buf(), now, title.clone());
     title
 }
 
@@ -402,6 +499,7 @@ fn first_request(path: &Path, conversation: Option<&str>) -> Option<String> {
 /// Summaries for the given sessions, or for every session when `None`.
 pub fn collect(session_ids: Option<Vec<String>>) -> Result<Vec<SessionSummary>> {
     let wanted: Option<HashSet<String>> = session_ids.map(|ids| ids.into_iter().collect());
+    let root = store::root()?;
     let mut out = Vec::new();
     for s in index::load()? {
         if wanted.as_ref().is_some_and(|w| !w.contains(&s.id)) {
@@ -415,7 +513,7 @@ pub fn collect(session_ids: Option<Vec<String>>) -> Result<Vec<SessionSummary>> 
         // a second tab costs about one block read.
         let mut merged = LogTail::default();
         for tab in &s.tabs {
-            let path = store::log_path(&s.id, &tab.id)?;
+            let path = store::log_path_for_tab(&root, &s.id, tab)?;
             let tail = read_log_tail(&path, tab.status == TabStatus::Waiting);
             keep_newer(&mut merged.last_prompt, tail.last_prompt);
             keep_newer(&mut merged.last_reply, tail.last_reply);
@@ -797,5 +895,34 @@ mod tests {
         let out = collect(None).unwrap();
         assert_eq!(out[0].last_prompt.as_deref(), Some("newer ask"));
         assert_eq!(out[0].last_reply.as_deref(), Some("newer answer"));
+    }
+
+    #[test]
+    fn tail_lines_reads_multi_block_single_line_linearly_and_bounds_name_reads_p60() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("huge-line.jsonl");
+        let big = "a".repeat((BLOCK as usize) * 3 + 123);
+        write(&p, &["first".into(), big.clone(), "last".into()]);
+        let mut tail = TailLines::open(&p).unwrap();
+        assert_eq!(tail.next_line().unwrap().as_deref(), Some("last"));
+        assert_eq!(tail.next_line().unwrap().as_deref(), Some(big.as_str()));
+        assert_eq!(tail.next_line().unwrap().as_deref(), Some("first"));
+        assert!(tail.next_line().unwrap().is_none());
+
+        // LRU cap on NameReads keeps memory bounded.
+        let mut cache = NameReads::default();
+        for i in 0..(MAX_NAME_READS + 50) {
+            cache.insert_request(
+                (std::path::PathBuf::from(format!("/tmp/log-{i}.jsonl")), None),
+                Ok(format!("prompt {i}")),
+            );
+            cache.insert_title(
+                std::path::PathBuf::from(format!("/tmp/tr-{i}.jsonl")),
+                (i as u64, None),
+                Some(format!("title {i}")),
+            );
+        }
+        assert_eq!(cache.requests.len(), MAX_NAME_READS);
+        assert_eq!(cache.titles.len(), MAX_NAME_READS);
     }
 }

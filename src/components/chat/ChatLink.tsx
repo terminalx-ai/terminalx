@@ -254,7 +254,7 @@ export function ChatLink({ context = EXTERNAL_CONTEXT, href = "", children, clas
               sideOffset={4}
               align="start"
               collisionPadding={8}
-              className="z-(--z-menu) flex max-w-md flex-col gap-2 rounded-lg bg-popover p-3 text-popover-foreground shadow-surface hairline animate-fade-in"
+              className="z-(--z-menu) flex max-w-[min(28rem,calc(100vw-16px))] flex-col gap-2 rounded-lg bg-popover p-3 text-popover-foreground shadow-surface hairline animate-fade-in"
               onClick={(event) => event.stopPropagation()}
             >
               <p className="text-xs font-medium text-foreground">

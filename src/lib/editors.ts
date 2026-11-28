@@ -240,23 +240,51 @@ let state: State = { ...restoreReviewTabs((() => {
   try { return localStorage.getItem(REVIEW_TABS_KEY); } catch { return null; }
 })()), lastFocused: "chat" };
 const listeners = new Set<() => void>();
+const PERSIST_DEBOUNCE_MS = 150;
+let persistTimer: ReturnType<typeof setTimeout> | null = null;
+let lastPersistedReviewTabs: string | null = null;
+
+/** Immediately write any pending debounced review-tab state to `localStorage`. */
+export function flushReviewTabsPersistence(): void {
+  if (persistTimer !== null) {
+    clearTimeout(persistTimer);
+    persistTimer = null;
+  }
+  const serialized = serializeReviewTabs(state);
+  if (serialized === lastPersistedReviewTabs) return;
+  lastPersistedReviewTabs = serialized;
+  try { localStorage.setItem(REVIEW_TABS_KEY, serialized); } catch { /* Optional persistence. */ }
+}
+
+function scheduleReviewTabsPersist(): void {
+  if (persistTimer !== null) clearTimeout(persistTimer);
+  persistTimer = setTimeout(flushReviewTabsPersistence, PERSIST_DEBOUNCE_MS);
+}
+
+if (typeof window !== "undefined") {
+  window.addEventListener("pagehide", flushReviewTabsPersistence);
+  window.addEventListener("beforeunload", flushReviewTabsPersistence);
+}
+
 function set(patch: Partial<State>) {
   state = { ...state, ...patch };
   if (patch.editors || patch.active || patch.collapsed) {
-    try { localStorage.setItem(REVIEW_TABS_KEY, serializeReviewTabs(state)); } catch { /* Optional persistence. */ }
+    scheduleReviewTabsPersist();
   }
   for (const l of listeners) l();
 }
 
+function subscribeEditors(cb: () => void) {
+  listeners.add(cb);
+  return () => { listeners.delete(cb); };
+}
+
+function getEditorsSnapshot(): State {
+  return state;
+}
+
 export function useEditors(): State {
-  return useSyncExternalStore(
-    (cb) => {
-      listeners.add(cb);
-      return () => listeners.delete(cb);
-    },
-    () => state,
-    () => state,
-  );
+  return useSyncExternalStore(subscribeEditors, getEditorsSnapshot, getEditorsSnapshot);
 }
 
 export function getEditors(): State {

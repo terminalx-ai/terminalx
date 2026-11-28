@@ -1,7 +1,7 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
-import { BackHandler, Keyboard, Pressable, StyleSheet, Text, View } from "react-native";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { BackHandler, FlatList, Keyboard, Pressable, StyleSheet, Text, View } from "react-native";
 import { ChevronRight, FolderGit2, GitFork, Globe, Link, Lock, SearchX, Settings2 } from "lucide-react-native";
-import type { CloudApi } from "@mobile/cloud/api";
+import type { CloudApi, CloudGithubRepository } from "@mobile/cloud/api";
 import { WORDS, chooseableInstallations, launchFull, launchRepository, matchesSearch, repositoriesView, repositoryProblem, sameRepository, suspendedInstallations } from "@mobile/cloud/github";
 import { MAX_LAUNCH_REPOSITORIES, REPOSITORY_INVALID, repositoryOf, type LaunchRepository, type PreflightProblems } from "@mobile/cloud/launch";
 import { useGithubApp, useGithubConnect, type GithubConnect } from "@mobile/cloud/useGithubConnect";
@@ -16,6 +16,7 @@ import { ChooseRepositories } from "./ChooseRepositories";
 import { BranchSheet, CountLine, Help, Lede, LinkRow, type RepositoriesPage } from "./parts";
 
 type Connect = ReturnType<typeof useGithubConnect>;
+const keyOfOrgRepository = (entry: CloudGithubRepository) => `${entry.installationId}:${entry.githubRepositoryId}`;
 
 /**
  * The launch form's Repositories page (25.11). Before anything is connected
@@ -80,6 +81,37 @@ export function RepositoriesStep({ api, orgId, organization, repositories, probl
   const view = app ? repositoriesView(app) : null;
   const over = connect.state.phase === "ended" ? connect.state : null;
   const full = launchFull(chosen);
+  // O(1) membership check per row instead of O(N*M) Array.some (P-79).
+  const chosenNames = useMemo(() => new Set(chosen.map((entry) => entry.fullName.toLowerCase())), [chosen]);
+  const toggle = useCallback(
+    (repository: LaunchRepository) => setChosen((held) => (held.some((entry) => sameRepository(entry, repository)) ? held.filter((entry) => !sameRepository(entry, repository)) : [...held, repository])),
+    [],
+  );
+  const shown = useMemo(
+    () => (app ? app.repositories.filter((repository) => matchesSearch(repository.fullName, search)) : []),
+    [app, search],
+  );
+  const renderRepository = useCallback(
+    ({ item: entry, index }: { item: CloudGithubRepository; index: number }) => {
+      const repository = launchRepository(entry);
+      const on = !!repository && chosenNames.has(repository.fullName.toLowerCase());
+      const suspended = entry.state === "installation-suspended";
+      return <View style={[styles.cardRow, { backgroundColor: palette.card, borderColor: palette.border }, index === 0 && styles.cardTop, index === shown.length - 1 && styles.cardBottom]}>
+        <RepositoryRow
+          testID={`repository-${entry.fullName}`}
+          fullName={entry.fullName}
+          isPrivate={entry.private}
+          branch={entry.defaultBranch}
+          first={index === 0}
+          on={on}
+          off={suspended || !repository || (!on && full)}
+          why={suspended ? null : repositoryProblem(entry)}
+          onPress={repository ? () => toggle(repository) : undefined}
+        />
+      </View>;
+    },
+    [chosenNames, full, palette.border, palette.card, shown.length, toggle],
+  );
 
   /** What the last check said of a repository, while it is still as it was checked. */
   const said = (repository: LaunchRepository) => {
@@ -151,7 +183,6 @@ export function RepositoriesStep({ api, orgId, organization, repositories, probl
     </>);
   }
 
-  const toggle = (repository: LaunchRepository) => setChosen(chosen.some((entry) => sameRepository(entry, repository)) ? chosen.filter((entry) => !sameRepository(entry, repository)) : [...chosen, repository]);
   const openTyped = () => { setInvalid(null); setAt("typed"); };
   const installations = app ? chooseableInstallations(app) : [];
   const choose = (installationId?: string | null) => { const id = installationId ?? installations[0]?.id; if (id) { Keyboard.dismiss(); setAt({ installationId: id }); } };
@@ -201,7 +232,7 @@ export function RepositoriesStep({ api, orgId, organization, repositories, probl
       onDone={(next) => { setChosen(chosen.map((entry) => (entry.cloneUrl === repository.cloneUrl ? { ...entry, ref: next } : entry))); setBranchOf(null); }}
       onRemove={() => { setChosen(chosen.filter((entry) => entry.cloneUrl !== repository.cloneUrl)); setBranchOf(null); }} />;
   })();
-  const framed = (body: ReactNode, foot: ReactNode) => <>{page("Repositories", onBack, body, foot)}{sheet}</>;
+  const framed = (body: ReactNode, foot: ReactNode, options?: { scroll?: boolean }) => <>{page("Repositories", onBack, body, foot, undefined, options)}{sheet}</>;
 
   if (github.read.status === "loading") {
     return framed(<>
@@ -240,34 +271,38 @@ export function RepositoriesStep({ api, orgId, organization, repositories, probl
   }
 
   const pickable = app.repositories.some((repository) => repository.state === "accessible");
-  const shown = app.repositories.filter((repository) => matchesSearch(repository.fullName, search));
   // Every installation was uninstalled on GitHub: an owner or admin can connect again from here.
   const reconnect = app.configured && app.canManage && !installations.length;
-  return framed(<>
-    {overBlock}
-    {reconnect && !over ? <ConnectCard connect={connect} /> : null}
-    {chosenBlock}
-    {suspendedInstallations(app).map((installation) => <Notice key={installation.id} testID="installation-suspended" tone="warning" title={installation.title} text={installation.text} />)}
-    {chosen.length ? <SectionTitle>All repositories</SectionTitle> : null}
-    {pickable ? <>
-      <TextField testID="repository-search" accessibilityLabel="Search repositories" value={search} onChangeText={setSearch} placeholder="Search repositories" autoCapitalize="none" autoCorrect={false} returnKeyType="search" />
-      <CountLine testID="repositories-count" label="Choose up to five" count={chosen.length ? `${chosen.length} of ${MAX_LAUNCH_REPOSITORIES} chosen` : ""} />
-    </> : null}
-    {shown.length ? <Card testID="repositories-list">
-      {shown.map((entry, index) => {
-        const repository = launchRepository(entry);
-        const on = !!repository && chosen.some((held) => sameRepository(held, repository));
-        const suspended = entry.state === "installation-suspended";
-        return <RepositoryRow key={`${entry.installationId}:${entry.githubRepositoryId}`} testID={`repository-${entry.fullName}`} fullName={entry.fullName} isPrivate={entry.private} branch={entry.defaultBranch} first={index === 0}
-          on={on} off={suspended || !repository || (!on && full)} why={suspended ? null : repositoryProblem(entry)} onPress={repository ? () => toggle(repository) : undefined} />;
-      })}
-    </Card> : <View testID="repositories-no-match"><EmptyState title="No repositories match." detail={WORDS.noMatchLaunch} icon={(color) => <SearchX size={34} color={color} strokeWidth={1.6} />} /></View>}
-    {full ? <Help testID="repositories-full">{WORDS.full}</Help> : null}
-    <Card>
-      {typedLink(true)}
-      {app.canManage && installations.length ? <LinkRow testID="choose-more" label="Choose more for the organization" icon={(color) => <Settings2 size={18} color={color} />} onPress={() => choose()} /> : null}
-    </Card>
-  </>, useFoot);
+  return framed(<FlatList
+    testID={shown.length ? "repositories-list" : undefined}
+    data={shown}
+    keyExtractor={keyOfOrgRepository}
+    renderItem={renderRepository}
+    keyboardShouldPersistTaps="handled"
+    contentContainerStyle={styles.listContent}
+    initialNumToRender={20}
+    maxToRenderPerBatch={20}
+    windowSize={7}
+    ListHeaderComponent={<View style={styles.sectionGap}>
+      {overBlock}
+      {reconnect && !over ? <ConnectCard connect={connect} /> : null}
+      {chosenBlock}
+      {suspendedInstallations(app).map((installation) => <Notice key={installation.id} testID="installation-suspended" tone="warning" title={installation.title} text={installation.text} />)}
+      {chosen.length ? <SectionTitle>All repositories</SectionTitle> : null}
+      {pickable ? <>
+        <TextField testID="repository-search" accessibilityLabel="Search repositories" value={search} onChangeText={setSearch} placeholder="Search repositories" autoCapitalize="none" autoCorrect={false} returnKeyType="search" />
+        <CountLine testID="repositories-count" label="Choose up to five" count={chosen.length ? `${chosen.length} of ${MAX_LAUNCH_REPOSITORIES} chosen` : ""} />
+      </> : null}
+    </View>}
+    ListEmptyComponent={<View testID="repositories-no-match"><EmptyState title="No repositories match." detail={WORDS.noMatchLaunch} icon={(color) => <SearchX size={34} color={color} strokeWidth={1.6} />} /></View>}
+    ListFooterComponent={<View style={styles.footerGap}>
+      {full ? <Help testID="repositories-full">{WORDS.full}</Help> : null}
+      <Card>
+        {typedLink(true)}
+        {app.canManage && installations.length ? <LinkRow testID="choose-more" label="Choose more for the organization" icon={(color) => <Settings2 size={18} color={color} />} onPress={() => choose()} /> : null}
+      </Card>
+    </View>}
+  />, useFoot, { scroll: false });
 }
 
 /** Connect GitHub (25.11), and what it becomes while the browser has the attempt: waiting, then checking. */
@@ -318,6 +353,12 @@ function WaitingCard({ connect, state, head }: { connect: Connect; state: Extrac
 }
 
 const styles = StyleSheet.create({
+  listContent: { paddingHorizontal: 16, paddingTop: 8, paddingBottom: 16 },
+  sectionGap: { gap: 12, marginBottom: 12 },
+  footerGap: { gap: 12, marginTop: 12 },
+  cardRow: { borderLeftWidth: StyleSheet.hairlineWidth, borderRightWidth: StyleSheet.hairlineWidth, overflow: "hidden" },
+  cardTop: { borderTopWidth: StyleSheet.hairlineWidth, borderTopLeftRadius: 16, borderTopRightRadius: 16 },
+  cardBottom: { borderBottomWidth: StyleSheet.hairlineWidth, borderBottomLeftRadius: 16, borderBottomRightRadius: 16 },
   row: { minHeight: 48, flexDirection: "row", alignItems: "center", gap: 10, paddingHorizontal: 14, paddingVertical: 9 },
   tall: { minHeight: 56 },
   tokenRow: { minHeight: 52 },

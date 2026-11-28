@@ -1,7 +1,7 @@
 import { requireOptionalNativeModule } from "expo";
 
-/** An image pasted into a text input, as JPEG. */
-export interface PastedImage { data: string; width: number; height: number }
+/** An image pasted into a text input, as JPEG (temp file URI on native, or legacy base64 data). */
+export interface PastedImage { uri?: string; data?: string; width: number; height: number }
 
 interface PasteImageModule { addListener(event: "onPasteImage", listener: (image: PastedImage) => void): { remove(): void } }
 const PasteImage = requireOptionalNativeModule<PasteImageModule>("PasteImage");

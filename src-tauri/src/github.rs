@@ -266,17 +266,70 @@ pub(crate) fn enrich_panel_pr(pr: &mut PullRequest, mut run: impl FnMut(&[&str])
     if let Err(error) = result { pr.details_error = Some(format!("{error:#}")); }
 }
 
+fn enrich_panel_pr_concurrent(pr: &mut PullRequest) {
+    pr.details_error = None;
+    pr.required_checks = None;
+    pr.merge_queue_entry = None;
+    pr.merge_queue_enabled = None;
+    pr.auto_merge_enabled = false;
+    if pr.state != "OPEN" { return; }
+    let url = pr.url.clone();
+    let ticket = crate::github_process::ticket();
+    let result = (|| -> Result<()> {
+        let (host, query) = queue_query(&url)?;
+        let (required, queue_out) = std::thread::scope(|scope| {
+            let req_ticket = ticket.clone();
+            let q_ticket = ticket.clone();
+            let req_handle = scope.spawn(move || {
+                crate::github_process::with_ticket(req_ticket, || {
+                    run_output(&outside_checkouts(), &["pr", "checks", &url, "--required", "--json", "name"])
+                })
+            });
+            let q_handle = scope.spawn(move || {
+                crate::github_process::with_ticket(q_ticket, || {
+                    run_output(&outside_checkouts(), &["api", "graphql", "--hostname", &host, "-f", &query])
+                })
+            });
+            (
+                req_handle.join().unwrap_or_else(|_| Err(anyhow::anyhow!("required checks thread panicked"))),
+                q_handle.join().unwrap_or_else(|_| Err(anyhow::anyhow!("queue query thread panicked"))),
+            )
+        });
+        let names = parse_required_checks(&required?)?.unwrap_or_default();
+        let out = queue_out?;
+        if !out.success { bail!("{}", out.stderr); }
+        apply_queue_response(pr, &parse_queue_response(&out.stdout)?)?;
+        pr.required_checks = Some(names);
+        Ok(())
+    })();
+    if let Err(error) = result { pr.details_error = Some(format!("{error:#}")); }
+}
+
 pub fn panel_prs_for_branch(cwd: &Path, branch: &str) -> Result<Vec<PullRequest>> {
     let _request = crate::github_process::scope();
+    let ticket = crate::github_process::ticket();
     let mut prs = prs_for_branch(cwd, branch)?;
-    for pr in &mut prs { enrich_panel_pr(pr, |args| run_output(&outside_checkouts(), args)); }
+    if prs.len() <= 1 {
+        for pr in &mut prs { enrich_panel_pr_concurrent(pr); }
+    } else {
+        std::thread::scope(|scope| {
+            for pr in &mut prs {
+                if pr.state == "OPEN" {
+                    let ticket = ticket.clone();
+                    scope.spawn(move || crate::github_process::with_ticket(ticket, || enrich_panel_pr_concurrent(pr)));
+                } else {
+                    enrich_panel_pr_concurrent(pr);
+                }
+            }
+        });
+    }
     Ok(prs)
 }
 
 pub fn panel_pr_details(cwd: &Path, number: u64, url: Option<&str>) -> Result<PullRequest> {
     let _request = crate::github_process::scope();
     let mut pr = associated_pr_details(cwd, number, url)?;
-    enrich_panel_pr(&mut pr, |args| run_output(&outside_checkouts(), args));
+    enrich_panel_pr_concurrent(&mut pr);
     Ok(pr)
 }
 
@@ -321,15 +374,17 @@ fn prs_for_branch_with(cwd: &Path, branch: &str, run: impl FnOnce(&Path, &[&str]
     prs.sort_by(|a, b| (b.state == "OPEN").cmp(&(a.state == "OPEN")).then(b.number.cmp(&a.number)));
     // Lookup is also used by workspace deletion checks, and runs while Stats
     // is closed. Only known workspaces/branches contribute installation totals.
-    let recorded = (|| -> Result<()> {
-        if tracked_pr_branches()?.contains(&(canonical_path(cwd), branch.to_string())) {
-            for pr in &prs { crate::stats::record_pr(&pr.url)?; }
+    if !prs.is_empty() {
+        let recorded = (|| -> Result<()> {
+            if is_tracked_pr_branch(cwd, branch)? {
+                for pr in &prs { crate::stats::record_pr(&pr.url)?; }
+            }
+            Ok(())
+        })();
+        if let Err(error) = recorded {
+            log::warn!("record discovered PRs: {error:#}");
+            crate::store::activity::report_error(format!("PRs were discovered, but their activity could not be saved: {error:#}"));
         }
-        Ok(())
-    })();
-    if let Err(error) = recorded {
-        log::warn!("record discovered PRs: {error:#}");
-        crate::store::activity::report_error(format!("PRs were discovered, but their activity could not be saved: {error:#}"));
     }
     Ok(prs)
 }
@@ -392,6 +447,47 @@ fn canonical_path(path: &Path) -> PathBuf {
     crate::paths::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
+/// Targeted membership check for a single `(cwd, branch)` without spawning
+/// `git worktree list` across every unrelated project on the machine.
+fn is_tracked_pr_branch(cwd: &Path, branch: &str) -> Result<bool> {
+    let target = canonical_path(cwd);
+    for session in crate::store::index::load()? {
+        if session.branch.as_deref() == Some(branch) {
+            let session_cwd = if Path::new(&session.cwd).exists() { &session.cwd } else { &session.project_path };
+            if canonical_path(Path::new(session_cwd)) == target {
+                return Ok(true);
+            }
+        }
+        if let Some(removed) = session.removed_workspace {
+            if removed.branch.as_deref() == Some(branch) && canonical_path(Path::new(&session.project_path)) == target {
+                return Ok(true);
+            }
+        }
+    }
+    let target_common = crate::git::common_dir(&target);
+    for project in crate::store::projects::list()?.0 {
+        let path = Path::new(&project.path);
+        if !path.exists() { continue; }
+        let project_canon = canonical_path(path);
+        // Only inspect the repository that actually owns `cwd`.
+        let same_repo = project_canon == target
+            || target.starts_with(&project_canon)
+            || target_common.as_ref().is_some_and(|c| crate::git::common_dir(&project_canon).as_ref() == Some(c));
+        if !same_repo { continue; }
+        if let Ok(worktrees) = crate::git::list_worktrees(path) {
+            for (wt_path, wt_branch) in worktrees {
+                if wt_branch.as_deref() == Some(branch) {
+                    let wt_cwd = if Path::new(&wt_path).exists() { Path::new(&wt_path) } else { path };
+                    if canonical_path(wt_cwd) == target {
+                        return Ok(true);
+                    }
+                }
+            }
+        }
+    }
+    Ok(false)
+}
+
 fn tracked_pr_branches() -> Result<BTreeSet<(PathBuf, String)>> {
     let mut branches = BTreeSet::new();
     for session in crate::store::index::load()? {
@@ -420,14 +516,38 @@ fn tracked_pr_branches() -> Result<BTreeSet<(PathBuf, String)>> {
     Ok(branches)
 }
 
+/// Group `(cwd, branch)` pairs by repository common-dir so batched GraphQL
+/// `branch_prs()` queries each repo once instead of spawning `gh pr list` per branch.
+fn group_branches_by_repo(tracked: BTreeSet<(PathBuf, String)>) -> Vec<(PathBuf, Vec<String>)> {
+    let mut by_repo: std::collections::BTreeMap<PathBuf, (PathBuf, BTreeSet<String>)> = std::collections::BTreeMap::new();
+    for (cwd, branch) in tracked {
+        let key = crate::git::common_dir(&cwd).unwrap_or_else(|| cwd.clone());
+        by_repo.entry(key).or_insert_with(|| (cwd, BTreeSet::new())).1.insert(branch);
+    }
+    by_repo.into_values().map(|(cwd, branches)| (cwd, branches.into_iter().collect())).collect()
+}
+
 /// Repeatable startup discovery, including retained archived/removed branches.
 /// No account-wide PR search and no dependence on opening the PR/Stats panels.
 pub fn recover_workspace_prs() -> Result<()> {
     let _request = crate::github_process::scope();
+    let grouped = group_branches_by_repo(tracked_pr_branches()?);
     let mut errors = Vec::new();
-    for (cwd, branch) in tracked_pr_branches()? {
-        if let Err(error) = prs_for_branch(&cwd, &branch) {
-            errors.push(format!("{} ({branch}): {error:#}", cwd.display()));
+    for (cwd, branches) in grouped {
+        if branches.is_empty() { continue; }
+        match branch_prs(&cwd, &branches) {
+            Ok(found) => {
+                for pr in found.values() {
+                    if !pr.url.is_empty() {
+                        if let Err(error) = crate::stats::record_pr(&pr.url) {
+                            errors.push(format!("{} ({}): {error:#}", cwd.display(), pr.url));
+                        }
+                    }
+                }
+            }
+            Err(error) => {
+                errors.push(format!("{} ({} branches): {error:#}", cwd.display(), branches.len()));
+            }
         }
     }
     if !errors.is_empty() { bail!("{}", errors.join("; ")); }
@@ -733,9 +853,265 @@ pub(crate) fn parse_required_checks(output: &GhOutput) -> Result<Option<Vec<Stri
 
 /// One pull request with its head commit, the checks on that commit, and
 /// which of them are required.
+/// Concurrent live PR snapshot: overlaps required-checks and the 4-way
+/// validation read waves to avoid 11+ sequential `gh` round-trips while keeping
+/// the exact same bracketing consistency guarantee as [`pr_snapshot_with`].
 pub fn pr_snapshot(cwd: &Path, number: u64) -> Result<PrSnapshot> {
     let _request = crate::github_process::scope();
-    pr_snapshot_with(cwd, number, run, run_output)
+    pr_snapshot_concurrent(cwd, number, run, run_output)
+}
+
+fn pr_snapshot_concurrent(
+    cwd: &Path,
+    number: u64,
+    run_fn: impl Fn(&Path, &[&str]) -> Result<String> + Sync,
+    run_output_fn: impl Fn(&Path, &[&str]) -> Result<GhOutput> + Sync,
+) -> Result<PrSnapshot> {
+    let n = number.to_string();
+    let (out, checks_unread) = match run_fn(cwd, &["pr", "view", &n, "--json", SNAPSHOT_FIELDS]) {
+        Ok(out) => (out, false),
+        Err(error) if not_permitted(&format!("{error:#}")) => (run_fn(cwd, &["pr", "view", &n, "--json", &without_checks(SNAPSHOT_FIELDS)]).map_err(|_| error)?, true),
+        Err(error) => return Err(error),
+    };
+    let mut snapshot = parse_snapshot(&serde_json::from_str(&out)?);
+    snapshot.checks_unread = checks_unread;
+    if snapshot.head_sha.is_empty() {
+        bail!("GitHub did not say which commit pull request #{number} is at.");
+    }
+    if snapshot.state == "OPEN" && !snapshot.checks_unread {
+        let ticket = crate::github_process::ticket();
+        let run_output_ref = &run_output_fn;
+        let run_ref = &run_fn;
+        let snapshot_ref = &snapshot;
+        let n_ref = n.as_str();
+        let (required_res, evidence_res) = std::thread::scope(|scope| {
+            let req_ticket = ticket.clone();
+            let ev_ticket = ticket.clone();
+            let req = scope.spawn(move || {
+                crate::github_process::with_ticket(req_ticket, || {
+                    run_output_ref(cwd, &["pr", "checks", n_ref, "--required", "--json", "name"])
+                })
+            });
+            let ev = scope.spawn(move || {
+                crate::github_process::with_ticket(ev_ticket, || {
+                    validation_concurrent(cwd, snapshot_ref, run_ref)
+                })
+            });
+            (
+                req.join().unwrap_or_else(|_| Err(anyhow::anyhow!("required checks thread panicked"))),
+                ev.join().unwrap_or_else(|_| Err(anyhow::anyhow!("validation thread panicked"))),
+            )
+        });
+        let required = required_res?;
+        if not_permitted(&required.stderr) {
+            snapshot.checks_unread = true;
+            snapshot.checks.clear();
+        } else {
+            snapshot.required_checks = parse_required_checks(&required)?;
+        }
+        if !snapshot.checks_unread {
+            match evidence_res {
+                Ok((validation, checks)) => {
+                    snapshot.validation = Some(validation);
+                    snapshot.checks = checks;
+                }
+                Err(error) if not_permitted(&format!("{error:#}")) => snapshot.checks_unread = true,
+                Err(error) => return Err(error),
+            }
+            let current: Value = serde_json::from_str(&run_fn(cwd, &["pr", "view", &n, "--json", "headRefOid"])?)?;
+            let head = current["headRefOid"].as_str().context("GitHub omitted the current head")?;
+            if head != snapshot.head_sha {
+                snapshot.head_sha = head.into();
+                snapshot.validation = None;
+            }
+        }
+    }
+    Ok(snapshot)
+}
+
+fn read_paginated_validation(cwd: &Path, path: &str, key: &str, run_fn: &(impl Fn(&Path, &[&str]) -> Result<String> + Sync)) -> Result<Vec<Value>> {
+    let pages: Vec<Value> = serde_json::from_str(&run_fn(cwd, &["api", path, "--paginate", "--slurp"])?)?;
+    let total = pages.first().and_then(|page| page["total_count"].as_u64()).context("GitHub omitted validation count")?;
+    let mut records = Vec::new();
+    let mut ids = BTreeSet::new();
+    for page in &pages {
+        if page["total_count"].as_u64() != Some(total) {
+            bail!("GitHub validation changed during pagination; retry the snapshot");
+        }
+        for record in page[key].as_array().context("GitHub omitted validation records")? {
+            let id = record["id"].as_u64().context("GitHub omitted validation identity")?;
+            if !ids.insert(id) { bail!("GitHub repeated validation records during pagination; retry the snapshot"); }
+            records.push(record.clone());
+        }
+    }
+    if records.len() as u64 != total {
+        bail!("GitHub returned incomplete validation evidence ({}/{total})", records.len());
+    }
+    records.sort_by_key(|record| record["id"].as_u64());
+    Ok(records)
+}
+
+type ValidationWave = (Vec<Value>, Vec<Value>, Vec<Value>, Vec<Value>);
+type WorkflowJobBatch = (u64, u64, Option<u64>, Vec<Value>);
+
+fn validation_concurrent(cwd: &Path, pr: &PrSnapshot, run_fn: &(impl Fn(&Path, &[&str]) -> Result<String> + Sync)) -> Result<(Vec<PrCheck>, Vec<PrCheck>)> {
+    let (repo, _) = pr_url_parts(&pr.url).context("GitHub omitted the pull request repository")?;
+    let workflow_path = format!("repos/{repo}/actions/runs?head_sha={}&per_page=100", pr.head_sha);
+    let suite_path = format!("repos/{repo}/commits/{}/check-suites?per_page=100", pr.head_sha);
+    let child_path = format!("repos/{repo}/commits/{}/check-runs?filter=latest&per_page=100", pr.head_sha);
+    let status_path = format!("repos/{repo}/commits/{}/status?per_page=100", pr.head_sha);
+
+    let ticket = crate::github_process::ticket();
+    let read_wave = || -> Result<ValidationWave> {
+        let wf_path = workflow_path.as_str();
+        let su_path = suite_path.as_str();
+        let ch_path = child_path.as_str();
+        let st_path = status_path.as_str();
+        let (wf, su, ch, st) = std::thread::scope(|scope| {
+            let t1 = ticket.clone();
+            let t2 = ticket.clone();
+            let t3 = ticket.clone();
+            let t4 = ticket.clone();
+            let h1 = scope.spawn(move || crate::github_process::with_ticket(t1, || read_paginated_validation(cwd, wf_path, "workflow_runs", run_fn)));
+            let h2 = scope.spawn(move || crate::github_process::with_ticket(t2, || read_paginated_validation(cwd, su_path, "check_suites", run_fn)));
+            let h3 = scope.spawn(move || crate::github_process::with_ticket(t3, || read_paginated_validation(cwd, ch_path, "check_runs", run_fn)));
+            let h4 = scope.spawn(move || crate::github_process::with_ticket(t4, || read_paginated_validation(cwd, st_path, "statuses", run_fn)));
+            (
+                h1.join().unwrap_or_else(|_| Err(anyhow::anyhow!("workflow validation thread panicked"))),
+                h2.join().unwrap_or_else(|_| Err(anyhow::anyhow!("suite validation thread panicked"))),
+                h3.join().unwrap_or_else(|_| Err(anyhow::anyhow!("check-runs validation thread panicked"))),
+                h4.join().unwrap_or_else(|_| Err(anyhow::anyhow!("status validation thread panicked"))),
+            )
+        });
+        Ok((wf?, su?, ch?, st?))
+    };
+
+    let (workflows, suite_records, children, statuses) = read_wave()?;
+    for workflow in &workflows {
+        workflow["run_attempt"].as_u64().filter(|attempt| *attempt > 0).context("GitHub omitted the workflow attempt")?;
+    }
+    let mut attempt_consistent = true;
+    let mut unexplained_workflows = BTreeSet::new();
+    let mut explained_suites = BTreeSet::new();
+    let failed_workflows: Vec<&Value> = workflows.iter()
+        .filter(|w| w["status"].as_str() == Some("completed") && validation_state(w).is_ok_and(failed_validation))
+        .collect();
+    let job_results: Vec<Result<WorkflowJobBatch>> = if failed_workflows.len() <= 1 {
+        failed_workflows.iter().map(|workflow| {
+            let id = workflow["id"].as_u64().context("GitHub omitted workflow identity")?;
+            let attempt = workflow["run_attempt"].as_u64().context("GitHub omitted the workflow attempt")?;
+            let jobs = read_paginated_validation(cwd, &format!("repos/{repo}/actions/runs/{id}/attempts/{attempt}/jobs?per_page=100"), "jobs", run_fn)?;
+            Ok((id, attempt, workflow["check_suite_id"].as_u64(), jobs))
+        }).collect()
+    } else {
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = failed_workflows.iter().map(|workflow| {
+                let repo = repo.as_str();
+                let t = ticket.clone();
+                scope.spawn(move || {
+                    crate::github_process::with_ticket(t, || {
+                        let id = workflow["id"].as_u64().context("GitHub omitted workflow identity")?;
+                        let attempt = workflow["run_attempt"].as_u64().context("GitHub omitted the workflow attempt")?;
+                        let jobs = read_paginated_validation(cwd, &format!("repos/{repo}/actions/runs/{id}/attempts/{attempt}/jobs?per_page=100"), "jobs", run_fn)?;
+                        Ok((id, attempt, workflow["check_suite_id"].as_u64(), jobs))
+                    })
+                })
+            }).collect();
+            handles.into_iter().map(|h| h.join().unwrap_or_else(|_| Err(anyhow::anyhow!("workflow jobs thread panicked")))).collect()
+        })
+    };
+    for result in job_results {
+        let (id, attempt, check_suite_id, jobs) = result?;
+        if !jobs.iter().any(|job| validation_state(job).is_ok_and(failed_validation)) {
+            unexplained_workflows.insert(id);
+        } else if let Some(suite) = check_suite_id {
+            explained_suites.insert(suite);
+        }
+        for job in jobs {
+            let check_id = job["check_run_url"].as_str().and_then(|url| url.rsplit('/').next()).and_then(|id| id.parse::<u64>().ok());
+            let matching_child = children.iter().find(|child| check_id.is_some() && child["id"].as_u64() == check_id);
+            if job["run_id"].as_u64() != Some(id) || job["head_sha"].as_str() != Some(&pr.head_sha)
+                || job.get("run_attempt").is_some_and(|value| value.as_u64() != Some(attempt))
+                || !matching_child.is_some_and(|child| child["check_suite"]["id"].as_u64() == check_suite_id
+                    && child["name"] == job["name"] && child["status"] == job["status"] && child["conclusion"] == job["conclusion"]) {
+                attempt_consistent = false;
+            }
+        }
+    }
+
+    let (workflows_after, suites_after, children_after, statuses_after) = read_wave()?;
+    if !attempt_consistent || workflows != workflows_after || suite_records != suites_after || children != children_after || statuses != statuses_after {
+        return Ok((vec![PrCheck { name: "validation changed during collection; waiting for a consistent attempt".into(), state: "pending".into(), url: None, actions: None, ..Default::default() }], Vec::new()));
+    }
+    assemble_validation_checks(pr, workflows, suite_records, children, statuses, &unexplained_workflows, &explained_suites)
+}
+
+fn assemble_validation_checks(
+    pr: &PrSnapshot,
+    workflows: Vec<Value>,
+    suite_records: Vec<Value>,
+    children: Vec<Value>,
+    statuses: Vec<Value>,
+    unexplained_workflows: &BTreeSet<u64>,
+    explained_suites: &BTreeSet<u64>,
+) -> Result<(Vec<PrCheck>, Vec<PrCheck>)> {
+    let mut checks = Vec::new();
+    for child in &children {
+        if child["head_sha"].as_str() != Some(&pr.head_sha) { bail!("GitHub returned a check for a different commit"); }
+        let url = child["details_url"].as_str().or_else(|| child["html_url"].as_str()).filter(|url| !url.is_empty()).map(String::from);
+        checks.push(PrCheck {
+            name: child["name"].as_str().context("GitHub omitted a check name")?.into(),
+            state: validation_state(child)?.into(),
+            actions: url.as_deref().and_then(|url| self::checks::map_check(&pr.url, url)),
+            url,
+            started_at: github_time(&child["started_at"]),
+            completed_at: github_time(&child["completed_at"]),
+            summary: check_summary(&child["output"]["title"]),
+        });
+    }
+    for status in statuses {
+        let state = status["state"].as_str().context("GitHub omitted a status state")?;
+        checks.push(PrCheck {
+            name: status["context"].as_str().context("GitHub omitted a status context")?.into(),
+            state: state.into(),
+            url: status["target_url"].as_str().filter(|url| !url.is_empty()).map(String::from),
+            actions: None,
+            started_at: None,
+            completed_at: None,
+            summary: check_summary(&status["description"]),
+        });
+    }
+    let mut validation = Vec::new();
+    let mut suites = BTreeSet::new();
+    let mut workflow_suites = Vec::new();
+    for (records, key) in [(workflows, "workflow_runs"), (suite_records, "check_suites")] {
+        for item in records {
+            if item["head_sha"].as_str() != Some(&pr.head_sha) { bail!("GitHub returned validation for a different commit"); }
+            let id = item["id"].as_u64().context("GitHub omitted validation identity")?;
+            let mut state = validation_state(&item)?;
+            let suite = if key == "check_suites" { Some(id) } else { item["check_suite_id"].as_u64() };
+            if key == "check_suites" {
+                suites.insert(id);
+                let expected = item["latest_check_runs_count"].as_u64().context("GitHub omitted the suite's check count")?;
+                let observed = children.iter().filter(|child| child["check_suite"]["id"].as_u64() == Some(id)).count() as u64;
+                if observed != expected { state = "pending"; }
+            } else {
+                workflow_suites.push(suite.context("GitHub omitted the workflow's check suite")?);
+            }
+            let explained = if key == "workflow_runs" { !unexplained_workflows.contains(&id) } else { explained_suites.contains(&id) };
+            if failed_validation(state) && explained && suite.is_some_and(|suite| children.iter().any(|child| child["check_suite"]["id"].as_u64() == Some(suite) && validation_state(child).is_ok_and(failed_validation))) {
+                state = "success";
+            }
+            let name = item["name"].as_str().or_else(|| item["app"]["slug"].as_str()).unwrap_or(key);
+            validation.push(PrCheck { name: format!("{name} ({key} #{id})"), state: state.into(), url: None, actions: None, ..Default::default() });
+        }
+    }
+    for suite in workflow_suites.into_iter().chain(children.iter().map(|child| child["check_suite"]["id"].as_u64().unwrap_or(0))) {
+        if !suites.contains(&suite) {
+            validation.push(PrCheck { name: format!("check suite #{suite}"), state: "pending".into(), url: None, actions: None, ..Default::default() });
+        }
+    }
+    Ok((validation, checks))
 }
 
 /// The fields of a snapshot without the checks: what a token that may not
@@ -751,6 +1127,7 @@ pub(crate) fn not_permitted(message: &str) -> bool {
     message.contains("Resource not accessible by integration")
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn pr_snapshot_with(
     cwd: &Path,
     number: u64,
@@ -804,6 +1181,7 @@ fn pr_snapshot_with(
 /// Read all workflow runs and suites for this exact commit, including queued
 /// runs whose jobs have not appeared and suites from non-Actions providers.
 /// Pagination and total counts are checked: truncated evidence cannot pass.
+#[cfg_attr(not(test), allow(dead_code))]
 fn validation_with(cwd: &Path, pr: &PrSnapshot, run: &mut impl FnMut(&Path, &[&str]) -> Result<String>) -> Result<(Vec<PrCheck>, Vec<PrCheck>)> {
     let (repo, _) = pr_url_parts(&pr.url).context("GitHub omitted the pull request repository")?;
     let mut read = |path: &str, key: &str| -> Result<Vec<Value>> {
@@ -1075,7 +1453,7 @@ fn outside_checkouts() -> PathBuf {
 pub fn pr_snapshot_in(repo: &str, number: u64) -> Result<PrSnapshot> {
     let _request = crate::github_process::scope();
     let cwd = outside_checkouts();
-    pr_snapshot_with(&cwd, number, |cwd, args| if args.first() == Some(&"api") { run(cwd, args) } else { run(cwd, &in_repo(args, repo)) }, |cwd, args| run_output(cwd, &in_repo(args, repo)))
+    pr_snapshot_concurrent(&cwd, number, |cwd, args| if args.first() == Some(&"api") { run(cwd, args) } else { run(cwd, &in_repo(args, repo)) }, |cwd, args| run_output(cwd, &in_repo(args, repo)))
 }
 
 /// [`merge_pr_at`] of a pull request in `repo` (`owner/name`).
@@ -1760,7 +2138,7 @@ const BRANCHES_PER_REQUEST: usize = 40;
 /// variables, never inside the query text.
 fn branch_prs_query(count: usize) -> String {
     let variables: String = (0..count).map(|i| format!(",$b{i}:String!")).collect();
-    let fields = "number title url state isCrossRepository headRefOid baseRefName";
+    let fields = "number title url state isDraft isCrossRepository headRefOid baseRefName";
     // Ask for the open PR separately: many closed attempts must not hide an
     // older, still-open PR. Two connections, still one request per project.
     let fields: String = (0..count).map(|i| format!(
@@ -3092,10 +3470,33 @@ pub(crate) fn pr_context_with(cwd: &Path, number: u64, run: impl FnOnce(&Path, &
     Ok(pr_markdown(&value))
 }
 
+const PR_ATTACHMENT_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 60 * 60);
+
+fn prune_aged_pr_attachments(dir: &Path, max_age: std::time::Duration) -> usize {
+    let Ok(entries) = std::fs::read_dir(dir) else { return 0 };
+    let now = std::time::SystemTime::now();
+    let mut removed = 0usize;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
+        if !name.starts_with("pr-") || !name.ends_with(".md") { continue; }
+        let Ok(meta) = entry.metadata() else { continue };
+        if !meta.is_file() { continue; }
+        let expired = meta.modified().ok()
+            .and_then(|modified| now.duration_since(modified).ok())
+            .is_some_and(|age| age > max_age);
+        if expired && std::fs::remove_file(&path).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
 fn attach_pr_with(cwd: &Path, number: u64, run: impl FnOnce(&Path, &[&str]) -> Result<String>) -> Result<String> {
     let text = pr_context_with(cwd, number, run)?;
     let dir = crate::store::root()?.join("pr-attachments");
     std::fs::create_dir_all(&dir)?;
+    let _ = prune_aged_pr_attachments(&dir, PR_ATTACHMENT_MAX_AGE);
     let path = dir.join(format!("pr-{number}-{}.md", uuid::Uuid::now_v7()));
     use std::io::Write;
     let mut options = std::fs::OpenOptions::new();
@@ -3250,5 +3651,46 @@ mod start_from_tests {
             assert_eq!(args, ["pr", "checkout", "12", "--branch", "raccoon/pr-12"]);
             Ok("Switched to a new branch 'raccoon/pr-12'\n".into())
         }).unwrap();
+    }
+
+    #[test]
+    fn aged_pr_attachments_are_pruned_while_recent_and_unrelated_files_remain() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = dir.path().join("pr-1-old.md");
+        let fresh = dir.path().join("pr-2-fresh.md");
+        let other = dir.path().join("notes.md");
+        std::fs::write(&old, "old").unwrap();
+        std::fs::write(&fresh, "fresh").unwrap();
+        std::fs::write(&other, "other").unwrap();
+        let ten_days_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(10 * 24 * 60 * 60);
+        std::fs::File::options().write(true).open(&old).unwrap().set_modified(ten_days_ago).unwrap();
+        std::fs::File::options().write(true).open(&other).unwrap().set_modified(ten_days_ago).unwrap();
+        let removed = prune_aged_pr_attachments(dir.path(), PR_ATTACHMENT_MAX_AGE);
+        assert_eq!(removed, 1);
+        assert!(!old.exists());
+        assert!(fresh.exists());
+        assert!(other.exists());
+    }
+
+    #[test]
+    fn group_branches_by_repo_batches_worktrees_of_the_same_repository() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let sh = |cwd: &Path, args: &[&str]| {
+            assert!(std::process::Command::new("git").args(args).current_dir(cwd).output().unwrap().status.success());
+        };
+        sh(&repo, &["init", "-q", "-b", "main"]);
+        sh(&repo, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init"]);
+        let wt = dir.path().join("wt-a");
+        sh(&repo, &["worktree", "add", "-q", "-b", "feat-a", wt.to_str().unwrap()]);
+        let tracked = BTreeSet::from([
+            (canonical_path(&repo), "main".to_string()),
+            (canonical_path(&wt), "feat-a".to_string()),
+            (canonical_path(&repo), "feat-b".to_string()),
+        ]);
+        let grouped = group_branches_by_repo(tracked);
+        assert_eq!(grouped.len(), 1, "worktrees sharing common git dir batch into one repo group");
+        assert_eq!(grouped[0].1, vec!["feat-a", "feat-b", "main"]);
     }
 }

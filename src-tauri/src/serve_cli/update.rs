@@ -762,16 +762,17 @@ fn listed_hash(sums: &str, name: &str) -> Option<String> {
 /// Enforce strict monotonic version upgrades: refuse same-version reinstalls
 /// and any downgrade below the installed or currently running runtime version.
 fn ensure_monotonic_upgrade(root: &Path, data: Option<&Path>, target: &semver::Version) -> Result<()> {
-    if let Ok(installed) = installed_version(root) {
-        if *target == installed {
+    let installed = installed_version(root).ok();
+    if let Some(ref installed) = installed {
+        if *target == *installed {
             bail!("terminalx-serve {target} is the installed version already; nothing was changed");
         }
-        if *target < installed {
+        if *target < *installed {
             bail!("refusing to downgrade terminalx-serve from {installed} to {target}; nothing was changed");
         }
     }
     if let Some(running) = data.and_then(running_version) {
-        if *target <= running {
+        if *target < running || (installed.is_none() && *target == running) {
             bail!("refusing to downgrade running terminalx-serve from {running} to {target}; nothing was changed");
         }
     }

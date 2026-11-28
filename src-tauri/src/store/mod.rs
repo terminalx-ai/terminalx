@@ -135,7 +135,8 @@ pub fn ensure_dir(p: PathBuf) -> Result<PathBuf> {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(&p, fs::Permissions::from_mode(0o700));
+            fs::set_permissions(&p, fs::Permissions::from_mode(0o700))
+                .with_context(|| format!("set 0o700 permissions on {}", p.display()))?;
         }
     }
     Ok(p)
@@ -156,6 +157,19 @@ pub fn attachments_dir(session_id: &str) -> Result<PathBuf> {
 pub fn log_path(session_id: &str, tab_id: &str) -> Result<PathBuf> {
     session_dir(session_id)?;
     log_path_in(&root()?, session_id, tab_id)
+}
+
+/// Derive a tab's event log path directly from an already-loaded [`index::TabEntry`]
+/// without re-reading or re-parsing `sessions/index.json` (P-60).
+pub fn log_path_for_tab(root: &Path, session_id: &str, tab: &index::TabEntry) -> Result<PathBuf> {
+    let name = match tab.unknown.get("resetLogId") {
+        None | Some(serde_json::Value::Null) => format!("{}.jsonl", tab.id),
+        Some(serde_json::Value::String(id)) if uuid::Uuid::parse_str(id).is_ok() => {
+            format!("{}.reset-{id}.jsonl", tab.id)
+        }
+        Some(_) => anyhow::bail!("Invalid reset log id."),
+    };
+    Ok(root.join("sessions").join(session_id).join(name))
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -445,7 +459,10 @@ pub fn read_lines<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Vec<T>>
         }
         match serde_json::from_str::<T>(line) {
             Ok(v) => out.push(v),
-            Err(e) => log::warn!("skipping unreadable log line in {}: {e}", path.display()),
+            Err(e) => {
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("log");
+                log::warn!("skipping unreadable log line in {name}: {e}");
+            }
         }
     }
     Ok(out)

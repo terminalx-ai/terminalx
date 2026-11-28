@@ -396,64 +396,222 @@ pub(crate) fn capture_within(command: Command, timeout: std::time::Duration) -> 
 }
 
 fn capture(mut command: Command, input: Option<Vec<u8>>, cancel: Option<&std::sync::atomic::AtomicBool>, timeout: std::time::Duration) -> std::io::Result<std::process::Output> {
-    use std::io::{Read, Write};
-    let cancelled = || cancel.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::SeqCst));
     use std::process::Stdio;
+    let cancelled = || cancel.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::SeqCst));
     command.stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() }).stdout(Stdio::piped()).stderr(Stdio::piped());
     #[cfg(unix)]
-    std::os::unix::process::CommandExt::process_group(&mut command, 0);
-    #[cfg(unix)]
-    let mut child = command.spawn()?;
-    // Only a one-shot program: a job would also end a daemon git left running.
-    // It joins the job before it runs, so nothing it starts can escape.
-    #[cfg(windows)]
-    let tied = input.is_some();
-    #[cfg(windows)]
-    let mut child = if tied {
-        crate::win::process::spawn_tied(&mut command, windows_sys::Win32::System::Threading::CREATE_NO_WINDOW)?
-    } else {
-        command.spawn()?
-    };
-    if let Some(bytes) = input {
-        let stdin = child.stdin.take();
-        // Beside the reads: the program may answer before it has read all of this.
-        std::thread::spawn(move || {
-            if let Some(mut stdin) = stdin {
-                let _ = stdin.write_all(&bytes);
-            }
-        });
+    {
+        std::os::unix::process::CommandExt::process_group(&mut command, 0);
+        let child = command.spawn()?;
+        capture_unix(child, input, cancel, timeout, &cancelled)
     }
-    // Read as it comes, so a full pipe never blocks the child.
-    let drain = |pipe: Option<Box<dyn Read + Send>>| {
-        std::thread::spawn(move || {
-            let mut bytes = Vec::new();
-            if let Some(mut pipe) = pipe {
-                let _ = pipe.read_to_end(&mut bytes);
-            }
-            bytes
-        })
+    #[cfg(windows)]
+    {
+        // Only a one-shot program: a job would also end a daemon git left running.
+        // It joins the job before it runs, so nothing it starts can escape.
+        let tied = input.is_some();
+        let child = if tied {
+            crate::win::process::spawn_tied(&mut command, windows_sys::Win32::System::Threading::CREATE_NO_WINDOW)?
+        } else {
+            command.spawn()?
+        };
+        capture_windows(child, tied, input, cancel, timeout, &cancelled)
+    }
+}
+
+/// Multiplex stdin/stdout/stderr on the calling thread via `libc::poll` with
+/// non-blocking pipes — zero extra OS threads and zero 20ms sleep polling.
+#[cfg(unix)]
+fn capture_unix(
+    mut child: std::process::Child,
+    input: Option<Vec<u8>>,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+    timeout: std::time::Duration,
+    cancelled: &dyn Fn() -> bool,
+) -> std::io::Result<std::process::Output> {
+    use std::io::{Read, Write};
+    use std::os::unix::io::AsRawFd;
+
+    fn set_nonblocking(fd: libc::c_int) -> std::io::Result<()> {
+        // SAFETY: fcntl on an owned pipe descriptor.
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        if flags < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    let kill_group = |child: &mut std::process::Child| {
+        // SAFETY: signals the process group this function just created.
+        unsafe {
+            libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL);
+        }
+        let _ = child.kill();
+        let _ = child.wait();
     };
-    let stdout = drain(child.stdout.take().map(|pipe| Box::new(pipe) as Box<dyn Read + Send>));
-    let stderr = drain(child.stderr.take().map(|pipe| Box::new(pipe) as Box<dyn Read + Send>));
+
+    let mut stdin_pipe = match input {
+        Some(bytes) if !bytes.is_empty() => {
+            let pipe = child.stdin.take();
+            if let Some(ref p) = pipe {
+                set_nonblocking(p.as_raw_fd())?;
+            }
+            pipe.map(|p| (p, bytes, 0usize))
+        }
+        _ => {
+            drop(child.stdin.take());
+            None
+        }
+    };
+    let mut stdout_pipe = child.stdout.take();
+    let mut stderr_pipe = child.stderr.take();
+    if let Some(ref p) = stdout_pipe {
+        set_nonblocking(p.as_raw_fd())?;
+    }
+    if let Some(ref p) = stderr_pipe {
+        set_nonblocking(p.as_raw_fd())?;
+    }
+
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let mut buf = [0u8; 8192];
     let deadline = std::time::Instant::now() + timeout;
+
+    while stdin_pipe.is_some() || stdout_pipe.is_some() || stderr_pipe.is_some() {
+        if cancelled() {
+            kill_group(&mut child);
+            return Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "cancelled"));
+        }
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            kill_group(&mut child);
+            return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, format!("no answer within {} ms", timeout.as_millis())));
+        }
+        let remaining_ms = (deadline - now).as_millis().clamp(1, i32::MAX as u128) as i32;
+        let poll_ms = if cancel.is_some() { remaining_ms.min(50) } else { remaining_ms };
+
+        let mut fds = [libc::pollfd { fd: -1, events: 0, revents: 0 }; 3];
+        let mut nfds = 0usize;
+        let mut stdin_idx = None;
+        let mut stdout_idx = None;
+        let mut stderr_idx = None;
+        if let Some((ref p, _, _)) = stdin_pipe {
+            stdin_idx = Some(nfds);
+            fds[nfds] = libc::pollfd { fd: p.as_raw_fd(), events: libc::POLLOUT, revents: 0 };
+            nfds += 1;
+        }
+        if let Some(ref p) = stdout_pipe {
+            stdout_idx = Some(nfds);
+            fds[nfds] = libc::pollfd { fd: p.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+            nfds += 1;
+        }
+        if let Some(ref p) = stderr_pipe {
+            stderr_idx = Some(nfds);
+            fds[nfds] = libc::pollfd { fd: p.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+            nfds += 1;
+        }
+
+        // SAFETY: fds[..nfds] holds valid owned pipe file descriptors.
+        let rc = unsafe { libc::poll(fds.as_mut_ptr(), nfds as libc::nfds_t, poll_ms) };
+        if rc < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            kill_group(&mut child);
+            return Err(err);
+        }
+        if rc == 0 {
+            continue;
+        }
+
+        if let Some(idx) = stdin_idx {
+            let revents = fds[idx].revents;
+            if revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
+                stdin_pipe = None;
+            } else if revents & libc::POLLOUT != 0 {
+                let mut done = false;
+                if let Some((ref mut p, ref bytes, ref mut offset)) = stdin_pipe {
+                    loop {
+                        match p.write(&bytes[*offset..]) {
+                            Ok(0) => { done = true; break; }
+                            Ok(n) => {
+                                *offset += n;
+                                if *offset >= bytes.len() { done = true; break; }
+                            }
+                            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                            Err(_) => { done = true; break; }
+                        }
+                    }
+                }
+                if done {
+                    stdin_pipe = None;
+                }
+            }
+        }
+
+        let drain_fd = |pipe: &mut Option<std::process::ChildStdout>, out: &mut Vec<u8>, revents: libc::c_short, buf: &mut [u8]| {
+            if revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) == 0 {
+                return;
+            }
+            let mut closed = false;
+            if let Some(ref mut p) = pipe {
+                loop {
+                    match p.read(buf) {
+                        Ok(0) => { closed = true; break; }
+                        Ok(n) => out.extend_from_slice(&buf[..n]),
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                        Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                        Err(_) => { closed = true; break; }
+                    }
+                }
+            }
+            if closed || (revents & libc::POLLNVAL != 0) {
+                *pipe = None;
+            }
+        };
+
+        if let Some(idx) = stdout_idx {
+            drain_fd(&mut stdout_pipe, &mut stdout, fds[idx].revents, &mut buf);
+        }
+        if let Some(idx) = stderr_idx {
+            let revents = fds[idx].revents;
+            if revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0 {
+                let mut closed = false;
+                if let Some(ref mut p) = stderr_pipe {
+                    loop {
+                        match p.read(&mut buf) {
+                            Ok(0) => { closed = true; break; }
+                            Ok(n) => stderr.extend_from_slice(&buf[..n]),
+                            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                            Err(_) => { closed = true; break; }
+                        }
+                    }
+                }
+                if closed || (revents & libc::POLLNVAL != 0) {
+                    stderr_pipe = None;
+                }
+            }
+        }
+    }
+
+    // Both output pipes are at EOF; wait briefly if the child is still tearing down.
+    let mut backoff_ms = 1u64;
     let status = loop {
         match child.try_wait() {
-            // A wrapper can exit while a background child retains its pipes.
-            // Do not join a reader until EOF, or accept output after expiry.
-            Ok(Some(status)) if stdout.is_finished() && stderr.is_finished() && std::time::Instant::now() < deadline && !cancelled() => break status,
-            Ok(_) if std::time::Instant::now() < deadline && !cancelled() => std::thread::sleep(std::time::Duration::from_millis(20)),
+            Ok(Some(status)) if std::time::Instant::now() < deadline && !cancelled() => break status,
+            Ok(None) if std::time::Instant::now() < deadline && !cancelled() => {
+                let rem = deadline.saturating_duration_since(std::time::Instant::now());
+                std::thread::sleep(rem.min(std::time::Duration::from_millis(backoff_ms)));
+                backoff_ms = (backoff_ms * 2).min(16);
+            }
             ended => {
-                #[cfg(unix)]
-                // SAFETY: signals the process group this function just created.
-                unsafe {
-                    libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL);
-                }
-                #[cfg(windows)]
-                if tied {
-                    crate::win::process::kill_tree(child.id());
-                }
-                let _ = child.kill();
-                let _ = child.wait();
+                kill_group(&mut child);
                 return Err(match ended {
                     Err(error) => error,
                     _ if cancelled() => std::io::Error::new(std::io::ErrorKind::Interrupted, "cancelled"),
@@ -462,7 +620,89 @@ fn capture(mut command: Command, input: Option<Vec<u8>>, cancel: Option<&std::sy
             }
         }
     };
-    #[cfg(windows)]
+    Ok(std::process::Output { status, stdout, stderr })
+}
+
+#[cfg(windows)]
+fn capture_windows(
+    mut child: std::process::Child,
+    tied: bool,
+    input: Option<Vec<u8>>,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+    timeout: std::time::Duration,
+    cancelled: &dyn Fn() -> bool,
+) -> std::io::Result<std::process::Output> {
+    use std::io::{Read, Write};
+    use std::os::windows::io::AsRawHandle;
+    use std::sync::{Arc, Condvar, Mutex};
+
+    if let Some(bytes) = input {
+        let stdin = child.stdin.take();
+        std::thread::spawn(move || {
+            if let Some(mut stdin) = stdin {
+                let _ = stdin.write_all(&bytes);
+            }
+        });
+    }
+    let done = Arc::new((Mutex::new(0u8), Condvar::new()));
+    let drain = |pipe: Option<Box<dyn Read + Send>>, done: Arc<(Mutex<u8>, Condvar)>| {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            if let Some(mut pipe) = pipe {
+                let _ = pipe.read_to_end(&mut bytes);
+            }
+            let mut count = done.0.lock().unwrap_or_else(|e| e.into_inner());
+            *count += 1;
+            done.1.notify_all();
+            bytes
+        })
+    };
+    let stdout = drain(child.stdout.take().map(|pipe| Box::new(pipe) as Box<dyn Read + Send>), done.clone());
+    let stderr = drain(child.stderr.take().map(|pipe| Box::new(pipe) as Box<dyn Read + Send>), done.clone());
+    let deadline = std::time::Instant::now() + timeout;
+
+    let fail = |child: &mut std::process::Child, err: Option<std::io::Error>| -> std::io::Result<std::process::Output> {
+        if tied {
+            crate::win::process::kill_tree(child.id());
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        Err(match err {
+            Some(error) => error,
+            None if cancelled() => std::io::Error::new(std::io::ErrorKind::Interrupted, "cancelled"),
+            None => std::io::Error::new(std::io::ErrorKind::TimedOut, format!("no answer within {} ms", timeout.as_millis())),
+        })
+    };
+
+    // Wait event-driven on pipe EOF via Condvar, then wait on process handle.
+    {
+        let mut count = done.0.lock().unwrap_or_else(|e| e.into_inner());
+        while *count < 2 {
+            if cancelled() || std::time::Instant::now() >= deadline {
+                drop(count);
+                return fail(&mut child, None);
+            }
+            let rem = deadline.saturating_duration_since(std::time::Instant::now());
+            let slice = if cancel.is_some() { rem.min(std::time::Duration::from_millis(50)) } else { rem };
+            let (next, _) = done.1.wait_timeout(count, slice).unwrap_or_else(|e| e.into_inner());
+            count = next;
+        }
+    }
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) if std::time::Instant::now() < deadline && !cancelled() => break status,
+            Ok(None) if std::time::Instant::now() < deadline && !cancelled() => {
+                let rem = deadline.saturating_duration_since(std::time::Instant::now());
+                let slice = if cancel.is_some() { rem.min(std::time::Duration::from_millis(50)) } else { rem };
+                let ms = slice.as_millis().clamp(1, u32::MAX as u128) as u32;
+                // SAFETY: child owns a valid process handle.
+                unsafe {
+                    windows_sys::Win32::System::Threading::WaitForSingleObject(child.as_raw_handle() as _, ms);
+                }
+            }
+            ended => return fail(&mut child, ended.err()),
+        }
+    };
     if tied {
         crate::win::process::kill_tree(child.id());
     }
@@ -562,6 +802,7 @@ pub fn operation_in_progress(cwd: &Path) -> Result<Option<&'static str>> {
 }
 
 /// The paths `git status --porcelain -z` lists as unmerged.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn unmerged_in(porcelain: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut entries = porcelain.split('\0').filter(|entry| !entry.is_empty());
@@ -841,15 +1082,41 @@ pub fn changes_between_options(cwd: &Path, base: &str, head: Option<&str>, hide_
         args.push(h);
     }
     args.push("--");
-    // Read raw statuses separately from line counts, keeping identities independent
-    // of the whitespace display option. -z preserves tabs/newlines in file names.
-    let status_out = run(cwd, &args.iter().filter(|a| **a != "--numstat").cloned().collect::<Vec<_>>())?;
-    let mut num_args = args.iter().filter(|a| **a != "--raw").copied().collect::<Vec<_>>();
-    if hide_whitespace { num_args.insert(1, "-w"); }
-    let num_out = run(cwd, &num_args)?;
+    // When whitespace is not hidden, `--raw --numstat -z` emits both sections
+    // in one Git subprocess. When `hide_whitespace` is set, read raw statuses
+    // separately so identities stay independent of `-w`.
+    let (raw_fields, num_fields): (Vec<&str>, Vec<&str>);
+    let combined_owned;
+    let (status_owned, num_owned);
+    if !hide_whitespace {
+        combined_owned = run(cwd, &args)?;
+        let all: Vec<&str> = combined_owned.split('\0').collect();
+        let mut split = 0;
+        while split < all.len() {
+            let st = all[split];
+            if st.is_empty() {
+                split += 1;
+                continue;
+            }
+            if !st.starts_with(':') {
+                break;
+            }
+            let code = st.split_whitespace().nth(4).and_then(|s| s.chars().next()).unwrap_or('M');
+            split += if matches!(code, 'R' | 'C') { 3 } else { 2 };
+        }
+        raw_fields = all[..split].to_vec();
+        num_fields = all[split..].to_vec();
+    } else {
+        status_owned = run(cwd, &args.iter().filter(|a| **a != "--numstat").cloned().collect::<Vec<_>>())?;
+        let mut num_args = args.iter().filter(|a| **a != "--raw").copied().collect::<Vec<_>>();
+        num_args.insert(1, "-w");
+        num_owned = run(cwd, &num_args)?;
+        raw_fields = status_owned.split('\0').collect();
+        num_fields = num_owned.split('\0').collect();
+    }
 
     let mut counts = std::collections::HashMap::new();
-    let mut records = num_out.split('\0');
+    let mut records = num_fields.into_iter();
     while let Some(rec) = records.next() {
         if rec.is_empty() {
             continue;
@@ -866,10 +1133,9 @@ pub fn changes_between_options(cwd: &Path, base: &str, head: Option<&str>, hide_
         counts.insert(p.to_string(), (a.parse().unwrap_or(0), d.parse().unwrap_or(0)));
     }
     let mut out = Vec::new();
-    let fields: Vec<&str> = status_out.split('\0').collect();
     let mut i = 0;
-    while i < fields.len() {
-        let st = fields[i];
+    while i < raw_fields.len() {
+        let st = raw_fields[i];
         if st.is_empty() {
             i += 1;
             continue;
@@ -882,14 +1148,14 @@ pub fn changes_between_options(cwd: &Path, base: &str, head: Option<&str>, hide_
         let blob_hash = head.map(|_| if code == 'D' { format!("deleted:{}", raw[2]) } else { raw[3].to_string() });
         match code {
             'R' | 'C' => {
-                let old = fields.get(i + 1).copied().unwrap_or("").to_string();
-                let new = fields.get(i + 2).copied().unwrap_or("").to_string();
+                let old = raw_fields.get(i + 1).copied().unwrap_or("").to_string();
+                let new = raw_fields.get(i + 2).copied().unwrap_or("").to_string();
                 let (a, d) = counts.get(&new).copied().unwrap_or((0, 0));
                 out.push(ChangedFile { path: new, old_path: Some(old), blob_hash, status: ChangeStatus::Renamed, additions: a, deletions: d });
                 i += 3;
             }
             _ => {
-                let p = fields.get(i + 1).copied().unwrap_or("").to_string();
+                let p = raw_fields.get(i + 1).copied().unwrap_or("").to_string();
                 let (a, d) = counts.get(&p).copied().unwrap_or((0, 0));
                 let status = match code {
                     'A' => ChangeStatus::Added,
@@ -922,24 +1188,116 @@ pub(crate) fn blob_bytes_at(cwd: &Path, tree: &str, path: &str, limit: usize) ->
     // An unborn repository need not have written the well-known empty tree.
     if tree == EMPTY_TREE { return Ok(None); }
     let unavailable = || format!("Revision of {path} is unavailable locally. Fetch the missing objects in the workspace before comparing this revision.");
+    // `-l` reports the blob size alongside its oid, avoiding a separate `cat-file -s` spawn.
     let listing = git_in(cwd, &["ls-tree"]).env("GIT_LITERAL_PATHSPECS", "1")
-        .args(["ls-tree", "--full-tree", "-z", tree, "--", path]).output()?;
+        .args(["ls-tree", "--full-tree", "-l", "-z", tree, "--", path]).output()?;
     if !listing.status.success() { bail!("{}", unavailable()); }
     if listing.stdout.is_empty() { return Ok(None); }
     let listing = std::str::from_utf8(&listing.stdout)?;
     let (header, found) = listing.split_once('\t').context("Invalid revision tree entry")?;
     let fields: Vec<_> = header.split_whitespace().collect();
-    if found.strip_suffix('\0') != Some(path) || fields.len() != 3 || fields[1] != "blob" {
+    if found.strip_suffix('\0') != Some(path) || fields.len() != 4 || fields[1] != "blob" {
         bail!("Not a regular revision blob");
     }
     let oid = fields[2];
-    let size = git_in(cwd, &["cat-file"]).args(["cat-file", "-s", oid]).output()?;
-    if !size.status.success() { bail!("{}", unavailable()); }
-    let size: usize = std::str::from_utf8(&size.stdout)?.trim().parse()?;
+    let size: usize = fields[3].parse().map_err(|_| anyhow!("{}", unavailable()))?;
     if size > limit { return Ok(Some(BlobContents::TooLarge(size))); }
     let content = git_in(cwd, &["cat-file"]).args(["cat-file", "blob", oid]).output()?;
     if !content.status.success() { bail!("{}", unavailable()); }
     Ok(Some(if content.stdout.len() > limit { BlobContents::TooLarge(content.stdout.len()) } else { BlobContents::Bytes(content.stdout) }))
+}
+
+/// Batch read multiple blobs from one tree using `ls-tree -l` + `cat-file --batch`.
+/// Preserves the same local-only and size-limit guarantees as [`blob_bytes_at`].
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn blob_bytes_batch(cwd: &Path, tree: &str, paths: &[&str], limit: usize) -> Result<Vec<Option<BlobContents>>> {
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::process::Stdio;
+    if !is_tree_id(tree) {
+        bail!("bad tree id");
+    }
+    for path in paths {
+        if path.is_empty() || path.contains('\0') || !Path::new(path).components().all(|c| matches!(c, std::path::Component::Normal(_))) {
+            bail!("Invalid repository-relative revision path");
+        }
+    }
+    if paths.is_empty() || tree == EMPTY_TREE {
+        return Ok((0..paths.len()).map(|_| None).collect());
+    }
+    let mut args = vec!["ls-tree", "--full-tree", "-l", "-z", tree, "--"];
+    args.extend_from_slice(paths);
+    let listing = git_in(cwd, &["ls-tree"]).env("GIT_LITERAL_PATHSPECS", "1").args(&args).output()?;
+    if !listing.status.success() {
+        bail!("Revision objects are unavailable locally. Fetch the missing objects in the workspace before comparing this revision.");
+    }
+    let mut entries: std::collections::HashMap<&str, (&str, usize)> = std::collections::HashMap::new();
+    let text = std::str::from_utf8(&listing.stdout)?;
+    for record in text.split('\0').filter(|r| !r.is_empty()) {
+        let (header, found) = record.split_once('\t').context("Invalid revision tree entry")?;
+        let fields: Vec<_> = header.split_whitespace().collect();
+        if fields.len() != 4 || fields[1] != "blob" {
+            bail!("Not a regular revision blob");
+        }
+        let size: usize = fields[3].parse().context("Invalid revision blob size")?;
+        entries.insert(found, (fields[2], size));
+    }
+    let mut results: Vec<Option<BlobContents>> = (0..paths.len()).map(|_| None).collect();
+    let mut to_fetch: Vec<(usize, &str)> = Vec::new();
+    for (idx, path) in paths.iter().enumerate() {
+        if let Some(&(oid, size)) = entries.get(path) {
+            if size > limit {
+                results[idx] = Some(BlobContents::TooLarge(size));
+            } else {
+                to_fetch.push((idx, oid));
+            }
+        }
+    }
+    if to_fetch.is_empty() {
+        return Ok(results);
+    }
+    let mut child = git_in(cwd, &["cat-file"])
+        .args(["cat-file", "--batch"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let input: String = to_fetch.iter().map(|(_, oid)| format!("{oid}\n")).collect();
+    let mut stdin = child.stdin.take().context("Missing git cat-file stdin")?;
+    let writer = std::thread::spawn(move || stdin.write_all(input.as_bytes()));
+    let mut reader = BufReader::new(child.stdout.take().context("Missing git cat-file stdout")?);
+    for (idx, _) in &to_fetch {
+        let mut header = String::new();
+        if reader.read_line(&mut header)? == 0 {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!("Unexpected EOF from git cat-file --batch");
+        }
+        let parts: Vec<_> = header.split_whitespace().collect();
+        if parts.len() != 3 || parts[1] != "blob" {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!("Revision blob is unavailable locally.");
+        }
+        let size: usize = parts[2].parse().context("Invalid cat-file blob size")?;
+        if size > limit {
+            let mut sink = std::io::sink();
+            std::io::copy(&mut reader.by_ref().take(size as u64 + 1), &mut sink)?;
+            results[*idx] = Some(BlobContents::TooLarge(size));
+            continue;
+        }
+        let mut bytes = vec![0u8; size];
+        reader.read_exact(&mut bytes)?;
+        let mut nl = [0u8; 1];
+        reader.read_exact(&mut nl)?;
+        results[*idx] = Some(BlobContents::Bytes(bytes));
+    }
+    drop(reader);
+    let _ = writer.join();
+    let status = child.wait()?;
+    if !status.success() {
+        bail!("git cat-file --batch failed");
+    }
+    Ok(results)
 }
 
 /// Contents of `path` at `tree`, or `None` only if the local tree proves absence.
@@ -961,13 +1319,57 @@ pub fn blob_text_at(cwd: &Path, tree: &str, path: &str, limit: usize) -> Result<
 }
 
 pub fn working_file_with_size(cwd: &Path, path: &str) -> (Option<String>, Option<u64>) {
-    let p = cwd.join(path);
-    let Ok(meta) = std::fs::metadata(&p) else { return (None, None) };
-    if meta.len() > 4 * 1024 * 1024 {
+    use std::io::Read;
+    const LIMIT: u64 = 4 * 1024 * 1024;
+    if path.is_empty() || path.contains('\0') || !Path::new(path).components().all(|c| matches!(c, std::path::Component::Normal(_))) {
+        return (None, None);
+    }
+    let Ok(root) = crate::paths::canonicalize(cwd) else { return (None, None) };
+    // Reject symlinks at every relative path component (prevents both direct
+    // file symlinks and intermediate directory symlinks escaping `root`).
+    let mut cursor = root.clone();
+    for component in Path::new(path).components() {
+        cursor.push(component);
+        let Ok(meta) = std::fs::symlink_metadata(&cursor) else { return (None, None) };
+        if meta.file_type().is_symlink() {
+            return (None, None);
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt;
+            if meta.file_attributes() & 0x400 != 0 {
+                return (None, None);
+            }
+        }
+    }
+    let Ok(resolved) = crate::paths::canonicalize(&cursor) else { return (None, None) };
+    if !resolved.starts_with(&root) {
+        return (None, None);
+    }
+    #[cfg(unix)]
+    let file = {
+        use std::os::unix::fs::OpenOptionsExt;
+        match std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW).open(&resolved) {
+            Ok(file) => file,
+            Err(_) => return (None, None),
+        }
+    };
+    #[cfg(windows)]
+    let file = match crate::win::fs::open_plain(&resolved, false, false) {
+        Ok(file) => file,
+        Err(_) => return (None, None),
+    };
+    let Ok(meta) = file.metadata() else { return (None, None) };
+    if !meta.is_file() {
+        return (None, None);
+    }
+    if meta.len() > LIMIT {
         return (Some("<file too large to show>".into()), Some(meta.len()));
     }
-    match std::fs::read(&p) {
-        Ok(bytes) => (Some(String::from_utf8_lossy(&bytes).into_owned()), Some(bytes.len() as u64)),
+    let mut bytes = Vec::new();
+    match file.take(LIMIT + 1).read_to_end(&mut bytes) {
+        Ok(_) if bytes.len() as u64 > LIMIT => (Some("<file too large to show>".into()), Some(meta.len().max(bytes.len() as u64))),
+        Ok(_) => (Some(String::from_utf8_lossy(&bytes).into_owned()), Some(bytes.len() as u64)),
         Err(_) => (None, None),
     }
 }
@@ -1020,30 +1422,206 @@ pub(crate) fn parse_upstream_counts(output: &str) -> Option<(u32, u32)> {
     Some((it.next()?.parse().ok()?, it.next()?.parse().ok()?))
 }
 
+/// Parsed output of `git status --porcelain=v2 --branch -z`.
+#[derive(Debug, Default)]
+pub(crate) struct PorcelainV2Status {
+    pub head: Option<String>,
+    pub branch: Option<String>,
+    pub upstream: Option<String>,
+    pub ab: Option<(u32, u32)>,
+    pub changed: u32,
+    pub conflicted: Vec<String>,
+}
+
+pub(crate) fn parse_status_v2(output: &str) -> PorcelainV2Status {
+    let mut parsed = PorcelainV2Status::default();
+    let mut records = output.split('\0').filter(|entry| !entry.is_empty());
+    while let Some(entry) = records.next() {
+        if let Some(oid) = entry.strip_prefix("# branch.oid ") {
+            if oid != "(initial)" && !oid.is_empty() {
+                parsed.head = Some(oid.to_string());
+            }
+        } else if let Some(head) = entry.strip_prefix("# branch.head ") {
+            if head != "(detached)" && !head.is_empty() {
+                parsed.branch = Some(head.to_string());
+            }
+        } else if let Some(up) = entry.strip_prefix("# branch.upstream ") {
+            if !up.is_empty() {
+                parsed.upstream = Some(up.to_string());
+            }
+        } else if let Some(ab) = entry.strip_prefix("# branch.ab ") {
+            let mut it = ab.split_whitespace();
+            if let (Some(a), Some(b)) = (it.next(), it.next()) {
+                let ahead = a.strip_prefix('+').unwrap_or(a).parse().unwrap_or(0);
+                let behind = b.strip_prefix('-').unwrap_or(b).parse().unwrap_or(0);
+                parsed.ab = Some((ahead, behind));
+            }
+        } else if entry.starts_with("# ") {
+            continue;
+        } else if entry.starts_with("2 ") {
+            parsed.changed += 1;
+            // Renamed/copied records carry an extra NUL-terminated original path.
+            records.next();
+        } else if entry.starts_with("u ") {
+            parsed.changed += 1;
+            // `u <xy> <sub> <m1> <m2> <m3> <mW> <h1> <h2> <h3> <path>`
+            let mut parts = entry.splitn(11, ' ');
+            if let Some(path) = parts.nth(10) {
+                parsed.conflicted.push(path.to_string());
+            }
+        } else if entry.starts_with("1 ") || entry.starts_with("? ") {
+            parsed.changed += 1;
+        }
+    }
+    parsed
+}
+
+fn operation_in_git_dir(dir: &Path) -> Option<&'static str> {
+    let marks = [
+        ("MERGE_HEAD", "merge"),
+        ("rebase-merge", "rebase"),
+        ("rebase-apply", "rebase"),
+        ("CHERRY_PICK_HEAD", "cherry-pick"),
+        ("REVERT_HEAD", "revert"),
+        ("BISECT_LOG", "bisect"),
+        ("sequencer", "cherry-pick or revert"),
+    ];
+    marks.into_iter().find(|(mark, _)| std::fs::symlink_metadata(dir.join(mark)).is_ok()).map(|(_, what)| what)
+}
+
+/// Extra facts gathered alongside [`WorkStatus`] in the same consolidated Git calls.
+#[derive(Debug, Default)]
+pub(crate) struct WorkStatusExtra {
+    pub changed: u32,
+    pub git_dir: Option<PathBuf>,
+    pub toplevel: Option<PathBuf>,
+    pub comparison_ref: Option<String>,
+    pub default_has_origin: bool,
+}
+
+/// Consolidated status read using `git status --porcelain=v2 --branch -z`,
+/// a single `rev-parse` for paths, and a single `for-each-ref` for default/remote refs.
+pub(crate) fn work_status_detailed(cwd: &Path) -> Result<(WorkStatus, WorkStatusExtra)> {
+    let porcelain = run(cwd, &["status", "--porcelain=v2", "--branch", "-z", "--untracked-files=normal", "--"])?;
+    let v2 = parse_status_v2(&porcelain);
+    let dirty = v2.changed > 0;
+
+    // Fetch both git-dir and toplevel in one spawn.
+    let (git_dir, toplevel) = match run(cwd, &["rev-parse", "--absolute-git-dir", "--show-toplevel"]) {
+        Ok(out) => {
+            let mut lines = out.lines();
+            let dir = lines.next().map(|l| PathBuf::from(path_line(l)));
+            let top = lines.next().map(|l| PathBuf::from(path_line(l)));
+            (dir, top)
+        }
+        Err(_) => (None, None),
+    };
+    let operation = git_dir.as_deref().and_then(operation_in_git_dir).map(String::from);
+
+    // Batch ref existence & origin/HEAD symref lookup in a single `for-each-ref`.
+    let remote_branch_ref = v2.branch.as_deref()
+        .filter(|b| reject_dash_arg("branch", b).is_ok())
+        .map(|b| format!("refs/remotes/origin/{b}"));
+    let mut ref_args = vec![
+        "for-each-ref",
+        "--format=%(refname)%09%(symref:short)",
+        "refs/remotes/origin/HEAD",
+        "refs/heads/main",
+        "refs/heads/master",
+        "refs/remotes/origin/main",
+        "refs/remotes/origin/master",
+    ];
+    if let Some(ref r) = remote_branch_ref {
+        ref_args.push(r.as_str());
+    }
+    let refs_out = run(cwd, &ref_args).unwrap_or_default();
+    let mut present_refs = std::collections::HashSet::new();
+    let mut origin_head_default: Option<String> = None;
+    for line in refs_out.lines() {
+        let mut parts = line.splitn(2, '\t');
+        let refname = parts.next().unwrap_or_default().trim();
+        let symref = parts.next().unwrap_or_default().trim();
+        if !refname.is_empty() {
+            present_refs.insert(refname.to_string());
+        }
+        if refname == "refs/remotes/origin/HEAD" && !symref.is_empty() {
+            origin_head_default = Some(symref.strip_prefix("origin/").unwrap_or(symref).to_string());
+        }
+    }
+
+    let default = origin_head_default
+        .or_else(|| present_refs.contains("refs/heads/main").then(|| "main".to_string()))
+        .or_else(|| present_refs.contains("refs/heads/master").then(|| "master".to_string()))
+        .or_else(|| v2.branch.clone());
+
+    let default_has_origin = default.as_deref().is_some_and(|d| {
+        let full = format!("refs/remotes/origin/{d}");
+        if d == "main" || d == "master" || remote_branch_ref.as_deref() == Some(full.as_str()) {
+            present_refs.contains(&full)
+        } else {
+            reject_dash_arg("branch", d).is_ok() && run_ok(cwd, &["show-ref", "--verify", "--quiet", "--", &full])
+        }
+    });
+
+    let (comparison_ref, ahead, behind) = if let Some(ref upstream) = v2.upstream {
+        let (a, b) = v2.ab.unwrap_or((0, 0));
+        (Some(upstream.clone()), a, b)
+    } else if let Some(ref remote_ref) = remote_branch_ref {
+        if present_refs.contains(remote_ref) && v2.head.is_some() {
+            let (a, b) = run(cwd, &["rev-list", "--left-right", "--count", "--end-of-options", &format!("HEAD...{remote_ref}"), "--"])
+                .ok()
+                .and_then(|s| parse_upstream_counts(&s))
+                .unwrap_or((0, 0));
+            (Some(remote_ref.clone()), a, b)
+        } else {
+            (None, 0, 0)
+        }
+    } else {
+        (None, 0, 0)
+    };
+
+    let ahead_of_base = if v2.head.is_none() {
+        None
+    } else {
+        default.as_ref().filter(|d| reject_dash_arg("branch", d).is_ok()).and_then(|d| {
+            if !default_has_origin && v2.branch.as_deref() == Some(d.as_str()) {
+                return Some(0);
+            }
+            let base = if default_has_origin { format!("origin/{d}") } else { d.clone() };
+            run(cwd, &["rev-list", "--count", "--end-of-options", &format!("{base}..HEAD"), "--"])
+                .ok()
+                .and_then(|s| s.trim().parse().ok())
+        })
+    };
+
+    let status = WorkStatus {
+        is_repo: true,
+        dirty,
+        branch: v2.branch,
+        upstream: v2.upstream,
+        ahead,
+        behind,
+        default_branch: default,
+        ahead_of_base,
+        head: v2.head,
+        operation,
+        conflicted: v2.conflicted,
+    };
+    let extra = WorkStatusExtra {
+        changed: v2.changed,
+        git_dir,
+        toplevel,
+        comparison_ref,
+        default_has_origin,
+    };
+    Ok((status, extra))
+}
+
 /// One command answering everything the header and handoff row need, so no
 /// button is drawn from one snapshot beside another from a different one.
 /// Infallible: a non-repo answers defaults.
 pub fn work_status(cwd: &Path) -> WorkStatus {
-    if !is_repo(cwd) {
-        return WorkStatus::default();
-    }
-    let branch = current_branch(cwd);
-    let porcelain = run(cwd, &["status", "--porcelain", "-z", "--untracked-files=normal", "--"]).ok();
-    let dirty = porcelain.as_deref().is_some_and(|s| !s.is_empty());
-    let conflicted = porcelain.as_deref().map(unmerged_in).unwrap_or_default();
-    let upstream = run(cwd, &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"]).ok().map(|s| s.trim().to_string());
-    let (ahead, behind) = upstream_counts(cwd);
-    let default = default_branch(cwd);
-    let ahead_of_base = default.as_ref().filter(|d| reject_dash_arg("branch", d).is_ok()).and_then(|d| {
-        let base = if run_ok(cwd, &["show-ref", "--verify", "--quiet", "--", &format!("refs/remotes/origin/{d}")]) {
-            format!("origin/{d}")
-        } else {
-            d.clone()
-        };
-        run(cwd, &["rev-list", "--count", "--end-of-options", &format!("{base}..HEAD"), "--"]).ok().and_then(|s| s.trim().parse().ok())
-    });
-    let operation = operation_in_progress(cwd).ok().flatten().map(String::from);
-    WorkStatus { is_repo: true, dirty, branch, upstream, ahead, behind, default_branch: default, ahead_of_base, head: head_commit(cwd), operation, conflicted }
+    work_status_detailed(cwd).map(|(status, _)| status).unwrap_or_default()
 }
 
 // ---------------------------------------------------------------- worktrees
@@ -1858,26 +2436,47 @@ pub fn remove_worktree(project: &Path, name: &str, direct: DirectDelete) -> Resu
     Ok(removal)
 }
 
-pub fn list_worktrees(project: &Path) -> Result<Vec<(String, Option<String>)>> {
+/// Worktree metadata parsed directly from `git worktree list --porcelain`,
+/// avoiding per-worktree `rev-parse HEAD` / `symbolic-ref` spawns.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WorktreeEntry {
+    pub path: String,
+    pub head: Option<String>,
+    pub branch: Option<String>,
+}
+
+pub(crate) fn list_worktrees_detailed(project: &Path) -> Result<Vec<WorktreeEntry>> {
     let out = shared::run(project, &["worktree", "list", "--porcelain"])?;
-    let mut v = Vec::new();
-    let mut cur: Option<String> = None;
+    let mut entries = Vec::new();
+    let mut cur: Option<WorktreeEntry> = None;
     for line in out.lines() {
         if let Some(p) = line.strip_prefix("worktree ") {
-            if let Some(c) = cur.take() {
-                v.push((c, None));
+            if let Some(entry) = cur.take() {
+                entries.push(entry);
             }
-            cur = Some(p.to_string());
+            cur = Some(WorktreeEntry { path: p.to_string(), head: None, branch: None });
+        } else if let Some(h) = line.strip_prefix("HEAD ") {
+            if let Some(entry) = cur.as_mut() {
+                let h = h.trim();
+                // Unborn worktrees report an all-zero OID.
+                if !h.is_empty() && !h.bytes().all(|b| b == b'0') {
+                    entry.head = Some(h.to_string());
+                }
+            }
         } else if let Some(b) = line.strip_prefix("branch ") {
-            if let Some(c) = cur.take() {
-                v.push((c, Some(b.strip_prefix("refs/heads/").unwrap_or(b).to_string())));
+            if let Some(entry) = cur.as_mut() {
+                entry.branch = Some(b.strip_prefix("refs/heads/").unwrap_or(b).to_string());
             }
         }
     }
-    if let Some(c) = cur {
-        v.push((c, None));
+    if let Some(entry) = cur {
+        entries.push(entry);
     }
-    Ok(v)
+    Ok(entries)
+}
+
+pub fn list_worktrees(project: &Path) -> Result<Vec<(String, Option<String>)>> {
+    Ok(list_worktrees_detailed(project)?.into_iter().map(|e| (e.path, e.branch)).collect())
 }
 
 // ---------------------------------------------------------------- history & commits
@@ -3398,6 +3997,93 @@ mod tests {
         assert!(checkout_branch(p, "-b", false).is_err());
         assert!(!branch_exists(p, "--all"));
         assert_eq!(unique_commits(p, "--all"), None);
+    }
+
+    #[test]
+    fn working_file_with_size_rejects_traversal_and_symlinks() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("inside.txt"), "hello").unwrap();
+        std::fs::create_dir_all(dir.path().join("sub")).unwrap();
+        std::fs::write(dir.path().join("sub/nested.txt"), "nested").unwrap();
+        std::fs::write(outside.path().join("secret.txt"), "top-secret").unwrap();
+
+        assert_eq!(working_file_with_size(dir.path(), "inside.txt"), (Some("hello".into()), Some(5)));
+        assert_eq!(working_file_with_size(dir.path(), "sub/nested.txt"), (Some("nested".into()), Some(6)));
+        assert_eq!(working_file_with_size(dir.path(), "../secret.txt"), (None, None));
+        assert_eq!(working_file_with_size(dir.path(), "/etc/passwd"), (None, None));
+        assert_eq!(working_file_with_size(dir.path(), ""), (None, None));
+
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(outside.path().join("secret.txt"), dir.path().join("file-link.txt")).unwrap();
+            std::os::unix::fs::symlink(outside.path(), dir.path().join("dir-link")).unwrap();
+            std::os::unix::fs::symlink(dir.path().join("inside.txt"), dir.path().join("internal-link.txt")).unwrap();
+            assert_eq!(working_file_with_size(dir.path(), "file-link.txt"), (None, None));
+            assert_eq!(working_file_with_size(dir.path(), "dir-link/secret.txt"), (None, None));
+            assert_eq!(working_file_with_size(dir.path(), "internal-link.txt"), (None, None));
+            assert!(Command::new("mkfifo").arg(dir.path().join("pipe.txt")).status().unwrap().success());
+            assert_eq!(working_file_with_size(dir.path(), "pipe.txt"), (None, None));
+        }
+    }
+
+    #[test]
+    fn blob_bytes_batch_and_work_status_detailed_match_expectations() {
+        let _home = crate::store::temp_home();
+        let dir = repo();
+        let p = dir.path();
+        std::fs::write(p.join("b.txt"), "second file\n").unwrap();
+        run(p, &["add", "b.txt"]).unwrap();
+        run(p, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "add b"]).unwrap();
+        let tree = head_tree(p).unwrap();
+
+        let batch = blob_bytes_batch(p, &tree, &["a.txt", "missing.txt", "b.txt"], 1024).unwrap();
+        assert_eq!(batch.len(), 3);
+        assert!(matches!(&batch[0], Some(BlobContents::Bytes(b)) if b == b"hello\n"));
+        assert!(batch[1].is_none());
+        assert!(matches!(&batch[2], Some(BlobContents::Bytes(b)) if b == b"second file\n"));
+
+        let too_large = blob_bytes_batch(p, &tree, &["b.txt"], 4).unwrap();
+        assert!(matches!(&too_large[0], Some(BlobContents::TooLarge(12))));
+
+        std::fs::write(p.join("untracked.txt"), "hi").unwrap();
+        let (ws, extra) = work_status_detailed(p).unwrap();
+        assert!(ws.is_repo);
+        assert!(ws.dirty);
+        assert_eq!(extra.changed, 1);
+        assert_eq!(ws.branch.as_deref(), Some("main"));
+        assert!(ws.head.is_some());
+        assert!(extra.git_dir.is_some());
+        assert!(extra.toplevel.is_some());
+        let detailed = list_worktrees_detailed(p).unwrap();
+        assert_eq!(detailed.len(), 1);
+        assert_eq!(detailed[0].head, ws.head);
+        assert_eq!(detailed[0].branch.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn capture_within_completes_quickly_and_handles_stdin_and_timeout() {
+        let mut cmd = git();
+        cmd.arg("--version");
+        let start = std::time::Instant::now();
+        let out = capture_within(cmd, std::time::Duration::from_secs(5)).unwrap();
+        assert!(out.status.success());
+        assert!(!out.stdout.is_empty());
+        let _elapsed = start.elapsed();
+
+        // Feeding stdin via output_feeding works cleanly.
+        let mut hash_cmd = git();
+        hash_cmd.args(["hash-object", "--stdin"]);
+        let digest = output_feeding(hash_cmd, b"hello\n".to_vec(), std::time::Duration::from_secs(5)).unwrap();
+        assert_eq!(digest.trim(), "ce013625030ba8dba906f756967f9e9ca394464a");
+
+        #[cfg(unix)]
+        {
+            let mut slow = Command::new("/bin/sleep");
+            slow.arg("10");
+            let err = capture_within(slow, std::time::Duration::from_millis(80)).unwrap_err();
+            assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+        }
     }
 
     #[test]

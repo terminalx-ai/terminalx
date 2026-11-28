@@ -10,6 +10,15 @@ import { startPrefetch } from "./prefetch";
 
 const storage = vi.hoisted(() => new Map<string, string>());
 vi.mock("expo-crypto", () => ({ randomUUID: () => "client" }));
+vi.mock("expo-secure-store", () => {
+  const store = new Map<string, string>();
+  return {
+    WHEN_UNLOCKED_THIS_DEVICE_ONLY: 5,
+    getItemAsync: async (key: string) => store.get(key) ?? null,
+    setItemAsync: async (key: string, value: string) => { store.set(key, value); },
+    deleteItemAsync: async (key: string) => { store.delete(key); },
+  };
+});
 vi.mock("@react-native-async-storage/async-storage", () => ({ default: {
   getItem: async (key: string) => storage.get(key) ?? null,
   setItem: async (key: string, value: string) => { storage.set(key, value); },
@@ -195,7 +204,9 @@ describe("incremental transcript sync", () => {
     expect((await readCache("other", "session", "tab")).events).toEqual([]);
     expect((await readCache("host", "session", "other")).events).toEqual([]);
     const key = [...storage.keys()][0];
-    storage.set(key, storage.get(key)!.replace('synthetic', 'corrupted'));
+    const raw = storage.get(key)!;
+    expect(raw).not.toContain("synthetic");
+    storage.set(key, `${raw.slice(0, -2)}X}`);
     expect((await readCache("host", "session", "tab")).cursor).toBeUndefined();
     h.start(); await settle();
     expect(h.updates.at(-1)!.state.events).toHaveLength(20);

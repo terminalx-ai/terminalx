@@ -82,6 +82,8 @@ export function unquotableMessage(style: QuoteStyle): string {
 /** More dragged text than this is refused, not typed. */
 export const MAX_DROPPED_TEXT = 1024 * 1024;
 
+const UNSAFE_TERMINAL_CONTROLS = /[\x00-\x08\x0b-\x1f\x7f-\x9f\u200b-\u200f\u2028-\u202e\u2066-\u2069\ufeff]/g;
+
 /**
  * Dragged text as it may be typed. It is somebody else's text, so it carries
  * no control characters: an escape could end a bracketed paste early and have
@@ -93,10 +95,43 @@ export const MAX_DROPPED_TEXT = 1024 * 1024;
 export function droppedText(text: string, bracketed: boolean): string {
   const clean = text
     .replace(/\r\n?/g, "\n")
-    .replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f\u200b-\u200f\u2028-\u202e\u2066-\u2069\ufeff]/g, "");
+    .replace(UNSAFE_TERMINAL_CONTROLS, "");
   // Not a regex: /\n+$/ retries from every newline of a long run that is not at the end.
   let end = clean.length;
   while (end > 0 && clean.charCodeAt(end - 1) === 0x0a) end--;
   const trimmed = clean.slice(0, end);
   return bracketed ? trimmed : trimmed.replace(/[\n\t]+/g, " ");
+}
+
+export interface SanitizedTerminalPaste {
+  /** Sanitized text safe to pass to `term.paste()`. */
+  text: string;
+  /** Number of non-trailing lines in the sanitized text. */
+  lines: number;
+  /** True when the paste spans multiple lines and should be confirmed. */
+  multiLine: boolean;
+  /** True when control or invisible/bidi characters (e.g. ESC, CSI) were stripped. */
+  strippedControls: boolean;
+}
+
+/**
+ * Sanitize clipboard text before it reaches xterm: strips ESC (`\x1b`), C0/C1
+ * controls (preventing `ESC [201~` / `CSI 201~` bracketed-paste breakout),
+ * invisible/bidi characters, and trailing newlines.
+ */
+export function sanitizeTerminalPaste(raw: string, bracketed: boolean): SanitizedTerminalPaste {
+  const normalized = raw.replace(/\r\n?/g, "\n");
+  const clean = normalized.replace(UNSAFE_TERMINAL_CONTROLS, "");
+  const strippedControls = clean.length !== normalized.length;
+  let end = clean.length;
+  while (end > 0 && clean.charCodeAt(end - 1) === 0x0a) end--;
+  const trimmed = clean.slice(0, end);
+  const lines = trimmed ? trimmed.split("\n").length : 0;
+  const text = bracketed ? trimmed : trimmed.replace(/[\n\t]+/g, " ");
+  return { text, lines, multiLine: lines > 1, strippedControls };
+}
+
+/** Compact preview of sanitized paste text for the multi-line confirmation dialog. */
+export function formatTerminalPastePreview(text: string, maxChars = 400): string {
+  return text.length > maxChars ? `${text.slice(0, maxChars)}…` : text;
 }

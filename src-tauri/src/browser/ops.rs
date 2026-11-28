@@ -49,6 +49,10 @@ fn validated_url(raw: &str) -> BrowserResult<String> {
     reject_leading_dash("--url", raw)?;
     let url = normalize_url(raw);
     reject_leading_dash("--url", &url)?;
+    let parsed = url::Url::parse(&url).map_err(|_| BrowserError::new("invalid_arguments", "URL is not a valid http:// or https:// address."))?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host().is_none() {
+        return Err(BrowserError::new("invalid_arguments", "Only http:// and https:// URLs are allowed."));
+    }
     Ok(url)
 }
 
@@ -590,6 +594,14 @@ pub fn tab_create(rt: &BrowserRuntime, workspace: &str, url: Option<&str>, profi
         .iter()
         .find(|t| listing.len() == 1 && is_blank(&t.url) && !known.iter().any(|p| p.tab_id == t.tab_id && p.workspace_path.as_deref() != Some(workspace)))
         .cloned();
+    // Snapshot open CDP targets before tab creation so the new page can be
+    // bound directly to its immutable CDP `targetId` with zero JS evaluation.
+    let cdp_port = rt
+        .bridge
+        .with_session(&session, |ctx| ctx.run(&["get", "cdp-url"], ExecOptions::default()))
+        .ok()
+        .and_then(|v| v.get("cdpUrl").and_then(Value::as_str).and_then(super::cdp::parse_port));
+    let before_targets = cdp_port.and_then(super::cdp::snapshot_target_ids);
     let (tab_id, opened) = rt.bridge.with_session(&session, |ctx| {
         match &launch_tab {
             Some(tab) => {
@@ -606,12 +618,24 @@ pub fn tab_create(rt: &BrowserRuntime, workspace: &str, url: Option<&str>, profi
             }
         }
     })?;
+    let cdp_target_id = cdp_port.and_then(|port| {
+        let after = super::cdp::list_page_targets(port).ok()?;
+        if let Some(before) = before_targets.as_ref() {
+            if let Some(added) = super::cdp::diff_new_target_id(before, &after) {
+                return Some(added);
+            }
+        }
+        (after.len() == 1).then(|| after[0].id.clone())
+    });
     // The launch tab may already be in the store (adopted by reconcile).
     let existing = rt.pages.in_profile(profile_id).into_iter().find(|p| p.tab_id == tab_id);
     let page = match existing {
         Some(mut page) => {
             let _ = rt.pages.remove(&page.id);
             page.workspace_path = Some(workspace.to_string());
+            if cdp_target_id.is_some() {
+                page.cdp_target_id = cdp_target_id.clone();
+            }
             page.url = opened.get("url").and_then(Value::as_str).unwrap_or(&url).to_string();
             page.title = opened.get("title").and_then(Value::as_str).unwrap_or("").to_string();
             page
@@ -620,12 +644,16 @@ pub fn tab_create(rt: &BrowserRuntime, workspace: &str, url: Option<&str>, profi
             id: new_page_id(),
             profile_id: profile_id.to_string(),
             tab_id: tab_id.clone(),
+            cdp_target_id: cdp_target_id.clone(),
             url: opened.get("url").and_then(Value::as_str).unwrap_or(&url).to_string(),
             title: opened.get("title").and_then(Value::as_str).unwrap_or("").to_string(),
             workspace_path: Some(workspace.to_string()),
             created: crate::store::index::now(),
         },
     };
+    if let Some(tid) = page.cdp_target_id.as_deref() {
+        super::cdp::bind_target_id(&page.id, tid);
+    }
     rt.pages.insert(page.clone())?;
     let _ = rt.reconcile_session(&session, Some(workspace));
     // `open` waited for the load, so its title beats the listing's
@@ -657,6 +685,7 @@ pub fn tab_close(rt: &BrowserRuntime, target: &Target) -> BrowserResult<Value> {
         }
     })?;
     rt.pages.remove(&target.page.id)?;
+    super::cdp::unbind_target_id(&target.page.id);
     rt.announce_pages();
     Ok(json!({"closed": target.page.id, "browserPageId": target.page.id, "closedBrowser": closed_browser}))
 }
@@ -703,6 +732,17 @@ pub fn exec(rt: &BrowserRuntime, target: &Target, params: &Value) -> BrowserResu
 
 // ------------------------------------------------------------------- cookies
 
+/// RFC 6265 dot-boundary cookie domain match: `example.com` matches
+/// `example.com` and `sub.example.com`, never `evil-example.com`.
+fn cookie_domain_matches_host(cookie_domain: &str, host: &str) -> bool {
+    let domain = cookie_domain.trim().trim_start_matches('.').to_ascii_lowercase();
+    let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
+    if domain.is_empty() || host.is_empty() {
+        return false;
+    }
+    host == domain || host.ends_with(&format!(".{domain}"))
+}
+
 pub fn cookie_get(rt: &BrowserRuntime, target: &Target, params: &Value) -> BrowserResult<Value> {
     let value = on_page(rt, target, |ctx| ctx.run(&["cookies", "get"], ExecOptions::default()))?;
     let filter = opt_nonempty(params, "url").and_then(|u| url::Url::parse(&u).ok()).and_then(|u| u.host_str().map(|h| h.to_string()));
@@ -713,7 +753,10 @@ pub fn cookie_get(rt: &BrowserRuntime, target: &Target, params: &Value) -> Brows
         .unwrap_or_default()
         .into_iter()
         .filter(|c| match &filter {
-            Some(host) => c.get("domain").and_then(Value::as_str).map(|d| host.ends_with(d.trim_start_matches('.'))).unwrap_or(true),
+            Some(host) => c
+                .get("domain")
+                .and_then(Value::as_str)
+                .is_some_and(|d| cookie_domain_matches_host(d, host)),
             None => true,
         })
         .collect();
@@ -1033,6 +1076,7 @@ pub fn profile_delete(rt: &BrowserRuntime, params: &Value) -> BrowserResult<Valu
     rt.profiles.get(&id)?;
     for page in rt.pages.in_profile(&id) {
         rt.screencasts.stop(&page.id);
+        super::cdp::unbind_target_id(&page.id);
     }
     if let Some(session) = rt.bridge.existing_session(&id) {
         let _ = rt.bridge.close_session(&session);
@@ -1054,7 +1098,7 @@ pub fn profile_clone(rt: &BrowserRuntime, target: &Target, profile_id: &str, kee
     let profile = rt.profiles.get(profile_id)?;
     let workspace = target.page.workspace_path.clone().ok_or_else(|| BrowserError::new("invalid_arguments", "The page is not attached to a workspace."))?;
     let url = rt.pages.get(&target.page.id).map(|p| p.url).unwrap_or_else(|| target.page.url.clone());
-    let created = tab_create(rt, &workspace, Some(&url), &profile.id)?;
+    let created = tab_create(rt, &workspace, (!is_blank(&url)).then_some(url.as_str()), &profile.id)?;
     if !keep_source {
         tab_close(rt, target)?;
     }
@@ -1081,12 +1125,17 @@ fn is_blank(url: &str) -> bool {
     url.is_empty() || url == "about:blank" || url.starts_with("chrome://newtab") || url.starts_with("chrome://new-tab-page")
 }
 
-/// A bare host becomes https; anything with a scheme is left alone.
+/// A bare host becomes https (or http for localhost/127.0.0.1); explicit
+/// schemes are preserved verbatim for `validated_url` to enforce `http:`/`https:`.
 pub fn normalize_url(input: &str) -> String {
     let trimmed = input.trim();
-    if trimmed.contains("://") || trimmed.starts_with("about:") || trimmed.starts_with("data:") || trimmed.starts_with("chrome:") || trimmed.starts_with("file:") {
+    if trimmed.contains("://")
+        || trimmed
+            .split_once(':')
+            .is_some_and(|(scheme, _)| !scheme.is_empty() && scheme.chars().all(|c| c.is_ascii_alphabetic()) && !scheme.eq_ignore_ascii_case("localhost"))
+    {
         trimmed.to_string()
-    } else if trimmed.starts_with("localhost") || trimmed.starts_with("127.0.0.1") {
+    } else if trimmed.starts_with("localhost") || trimmed.starts_with("127.0.0.1") || trimmed.starts_with("[::1]") {
         format!("http://{trimmed}")
     } else {
         format!("https://{trimmed}")
@@ -1172,12 +1221,35 @@ mod tests {
     }
 
     #[test]
-    fn validated_url_rejects_option_injection_even_with_scheme_marker() {
+    fn validated_url_rejects_option_injection_and_non_http_schemes() {
         assert_eq!(validated_url("example.com").unwrap(), "https://example.com");
         assert_eq!(validated_url("https://example.com").unwrap(), "https://example.com");
+        assert_eq!(validated_url("http://localhost:3000/x").unwrap(), "http://localhost:3000/x");
         assert_eq!(validated_url("--executable-path=/tmp/pwn").unwrap_err().code, "invalid_arguments");
         assert_eq!(validated_url("--init-script=http://evil/x.js").unwrap_err().code, "invalid_arguments");
         assert_eq!(validated_url("  --allow-file-access").unwrap_err().code, "invalid_arguments");
+        for bad in [
+            "file:///etc/passwd",
+            "chrome://settings",
+            "javascript:alert(1)",
+            "data:text/html,<script>alert(1)</script>",
+            "about:blank",
+            "ftp://example.com/a",
+        ] {
+            assert_eq!(validated_url(bad).unwrap_err().code, "invalid_arguments", "{bad}");
+        }
+    }
+
+    #[test]
+    fn cookie_domain_matching_enforces_dot_boundaries() {
+        assert!(cookie_domain_matches_host("example.com", "example.com"));
+        assert!(cookie_domain_matches_host(".example.com", "example.com"));
+        assert!(cookie_domain_matches_host(".example.com", "app.example.com"));
+        assert!(cookie_domain_matches_host("example.com", "a.b.example.com"));
+        assert!(!cookie_domain_matches_host("example.com", "evil-example.com"));
+        assert!(!cookie_domain_matches_host(".example.com", "notexample.com"));
+        assert!(!cookie_domain_matches_host("", "example.com"));
+        assert!(!cookie_domain_matches_host("example.com", ""));
     }
 
     #[test]
@@ -1189,6 +1261,7 @@ mod tests {
             id: "bp-test".into(),
             profile_id: "default".into(),
             tab_id: "t0".into(),
+            cdp_target_id: None,
             url: "https://example.com".into(),
             title: "Example".into(),
             workspace_path: None,

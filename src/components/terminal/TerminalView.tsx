@@ -18,6 +18,8 @@ import { acknowledgeTerminalResize, coordinateTerminalResize, isOutputResize, re
 import { TerminalBufferCleanup } from "@/lib/terminalBufferCleanup";
 import { terminalColorHex } from "@/lib/terminalColor";
 import { createTerminalLinkHandler } from "@/lib/terminalLinks";
+import { confirmInApp } from "@/lib/confirm";
+import { formatTerminalPastePreview, sanitizeTerminalPaste } from "@/lib/terminalDrop";
 import { hideWebgl, recoverWebgl, showWebgl } from "@/lib/terminalWebgl";
 import { onAppResume } from "@/lib/appResume";
 import { useTheme } from "@/lib/theme";
@@ -138,6 +140,39 @@ export function createTerminal(mode: "dark" | "light"): TerminalInstance {
   term.loadAddon(new TerminalBufferCleanup());
   term.loadAddon(fit);
   term.open(el);
+  let disposed = false;
+  const onPaste = (event: ClipboardEvent) => {
+    const raw = event.clipboardData?.getData("text/plain");
+    if (!raw) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    const prepared = sanitizeTerminalPaste(raw, term.modes.bracketedPasteMode);
+    if (!prepared.text) return;
+    if (prepared.multiLine) {
+      const note = prepared.strippedControls
+        ? "Control characters were removed for safety.\n\n"
+        : "";
+      void confirmInApp({
+        title: `Paste ${prepared.lines} lines into terminal?`,
+        body: `${note}${formatTerminalPastePreview(prepared.text)}`,
+        action: "Paste",
+        cancel: "Cancel",
+      }).then((confirmed) => {
+        if (!confirmed || disposed) return;
+        term.paste(prepared.text);
+        term.focus();
+      });
+      return;
+    }
+    term.paste(prepared.text);
+  };
+  el.addEventListener("paste", onPaste, true);
+  const origDispose = term.dispose.bind(term);
+  term.dispose = () => {
+    disposed = true;
+    el.removeEventListener("paste", onPaste, true);
+    origDispose();
+  };
   return { el, term, fit };
 }
 

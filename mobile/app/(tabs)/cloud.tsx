@@ -97,9 +97,10 @@ function CloudScreen() {
   }, [catalog, readSetups]));
 
   // `-openWorkspace <id>` at launch (with `-openRoute /cloud`) opens that workspace
-  // once the list has it, as a tap on its row does: for simulator screenshots.
-  const launchWorkspace = useRef(Platform.OS === "ios" ? Settings.get("openWorkspace") : undefined);
+  // once the list has it, as a tap on its row does: for simulator screenshots (dev builds only, S-57).
+  const launchWorkspace = useRef(typeof __DEV__ !== "undefined" && __DEV__ && Platform.OS === "ios" ? Settings.get("openWorkspace") : undefined);
   useEffect(() => {
+    if (typeof __DEV__ === "undefined" || !__DEV__) return;
     const id = launchWorkspace.current;
     if (typeof id !== "string" || !snapshot.refreshedAt) return;
     const item = sections.flatMap((section) => section.data).find((entry) => entry.workspace.id === id);

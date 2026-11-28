@@ -4,7 +4,7 @@ import { archiveWithUndo } from "@/lib/archiveNotices";
 import { StatusBadge, SessionStatus } from "@/components/ui/SessionStatus";
 import { useEffect, useRef, type ReactNode } from "react";
 import { Archive, CircleDot, Cloud, FolderGit2, FolderOpen, GitBranch, MessageCircle, MessageSquare, PanelsTopLeft, Square } from "@/icons";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openExternalWebUrl } from "@/lib/externalUrl";
 import { AgentMark, agentName as agentDisplayName } from "@/components/AgentMark";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/menu";
@@ -148,7 +148,7 @@ export function AgentCard({
               type="button"
               onClick={(e) => {
                 e.stopPropagation();
-                void openUrl(session.issue!.url);
+                void openExternalWebUrl(session.issue!.url);
               }}
               title={session.issue.title}
               className="relative z-10 flex shrink-0 items-center gap-1 rounded-sm bg-veil-raised px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"

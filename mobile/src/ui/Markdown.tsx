@@ -66,7 +66,7 @@ function inline(tokens: Token[] | undefined, palette: Palette, linkify = true): 
       case "br": return "\n";
       case "link": {
         if (/^(javascript|data|vbscript|blob):/i.test(token.href)) return <Text key={index}>{token.text}</Text>;
-        return <ChatLink key={index} href={token.href}>{inline(token.tokens, palette, false)}</ChatLink>;
+        return <ChatLink key={index} href={token.href} label={token.text}>{inline(token.tokens, palette, false)}</ChatLink>;
       }
       case "image": return <Text key={index} style={{ color: palette.muted }}>{token.text || "Image"}</Text>;
       case "codexFileCitation": {

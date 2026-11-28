@@ -79,7 +79,7 @@ vi.mock("../transport/connection", () => ({
 vi.mock("../data/host-api", () => ({ HostApi: class { resetConnection() {} describeHost = async () => null; summaries = async () => []; listVersion = () => null; rememberList() {} } }));
 
 const { AppProvider, useApp } = await import("./AppProvider");
-const { readSession, refreshStoredSession } = await import("../auth/native");
+const { readSession, refreshStoredSession, resetSessionCacheForTests } = await import("../auth/native");
 
 const SESSION_KEY = "secure:terminalx.cloud.session.v1";
 const seen: { current: ReturnType<typeof useApp> | null } = { current: null };
@@ -95,6 +95,7 @@ const minutes = (count: number) => { fake.now += count * 60_000; };
 
 beforeEach(async () => {
   (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
+  resetSessionCacheForTests();
   vi.spyOn(Date, "now").mockImplementation(() => fake.now);
   fake.storage.clear();
   fake.listeners = [];
@@ -140,6 +141,10 @@ it("refreshes the stored session, not the app's copy, when coming back finds it 
 });
 
 it("still signs out when the server refuses the stored session's own refresh token", async () => {
+  fake.storage.set("terminalx:connection-log:v1", JSON.stringify([{ id: "1", at: 1, level: "info", message: "test" }]));
+  fake.storage.set("terminalx:draft:host-1:s-1:t-1", "sealed-draft");
+  fake.storage.set("terminalx:draft-id:host-1:s-1:t-1", "{}");
+  fake.storage.set("secure:terminalx.local.storage.key.v1", "key-material");
   minutes(31);
   fake.server.revoked = true;
   await appState("active");
@@ -147,4 +152,9 @@ it("still signs out when the server refuses the stored session's own refresh tok
   // Signing out clears what the phone keeps before the session goes: it takes a few turns.
   await vi.waitFor(async () => { await settle(); expect([seen.current!.error, seen.current!.session]).toEqual([null, null]); });
   expect(fake.storage.has(SESSION_KEY)).toBe(false);
+  // S-48: connection log, drafts, draft-ids, and local storage encryption key are purged on sign-out/rejection.
+  expect(fake.storage.has("terminalx:connection-log:v1")).toBe(false);
+  expect(fake.storage.has("terminalx:draft:host-1:s-1:t-1")).toBe(false);
+  expect(fake.storage.has("terminalx:draft-id:host-1:s-1:t-1")).toBe(false);
+  expect(fake.storage.has("secure:terminalx.local.storage.key.v1")).toBe(false);
 });

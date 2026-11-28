@@ -22,7 +22,8 @@
 //! an incident nothing more is known of is `unresolved` at the end of the log.
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{mpsc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -657,6 +658,158 @@ struct Writer {
     enabled: Option<(Option<std::time::SystemTime>, PathBuf, bool)>,
 }
 
+const WRITER_CHANNEL_CAP: usize = 4096;
+
+static DROPPED_LINES: AtomicU64 = AtomicU64::new(0);
+
+enum WriterMsg {
+    Write { root: PathBuf, line: Value },
+    Flush(mpsc::SyncSender<()>),
+    Clear { root: PathBuf, ack: mpsc::SyncSender<Result<()>> },
+}
+
+struct OpenLog {
+    root: PathBuf,
+    file: std::fs::File,
+    len: u64,
+}
+
+struct BackgroundWriter {
+    seq: u64,
+    lost: u64,
+    open: Option<OpenLog>,
+}
+
+impl BackgroundWriter {
+    fn new() -> Self {
+        Self { seq: 0, lost: 0, open: None }
+    }
+
+    fn write_entry(&mut self, root: PathBuf, mut line: Value) {
+        use std::io::Write;
+        let dropped = DROPPED_LINES.swap(0, Ordering::AcqRel);
+        self.lost += dropped;
+        let next_seq = self.seq + 1;
+        line["seq"] = json!(next_seq);
+        if self.lost > 0 {
+            line["lost_before"] = json!(self.lost);
+        }
+        let encoded = format!("{line}\n");
+        let bytes = encoded.as_bytes();
+        let result = (|| -> Result<()> {
+            let need_open = self.open.as_ref().is_none_or(|o| o.root != root);
+            if need_open {
+                self.open = None;
+                let diag = crate::store::ensure_dir(root.join("diagnostics"))?;
+                let path = diag.join(FILE);
+                let len = std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
+                let file = open_append(&path)?;
+                self.open = Some(OpenLog { root: root.clone(), file, len });
+            }
+            if let Some(open) = &self.open {
+                if open.len > 0 && open.len + bytes.len() as u64 > MAX_BYTES {
+                    let diag = root.join("diagnostics");
+                    let path = diag.join(FILE);
+                    self.open = None;
+                    std::fs::rename(&path, diag.join(OLDER)).context("move the full incident file aside")?;
+                    let file = open_append(&path)?;
+                    self.open = Some(OpenLog { root: root.clone(), file, len: 0 });
+                }
+            }
+            let open = self.open.as_mut().expect("log file opened");
+            open.file.write_all(bytes).context("append an incident line")?;
+            open.len += bytes.len() as u64;
+            Ok(())
+        })();
+        match result {
+            Ok(()) => {
+                self.seq = next_seq;
+                self.lost = 0;
+            }
+            Err(error) => {
+                self.open = None;
+                self.lost += 1;
+                if self.lost == 1 {
+                    log::warn!("record a recovery incident: {error:#}");
+                }
+            }
+        }
+    }
+
+    fn clear(&mut self, root: &Path) -> Result<()> {
+        if self.open.as_ref().is_some_and(|o| o.root == root) {
+            self.open = None;
+        }
+        let diag = crate::store::ensure_dir(root.join("diagnostics"))?;
+        for file in [OLDER, FILE] {
+            match std::fs::remove_file(diag.join(file)) {
+                Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                    return Err(error).context("remove an incident file");
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+}
+
+fn open_append(path: &Path) -> Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path).with_context(|| format!("open {}", path.display()))
+}
+
+fn writer_tx() -> &'static mpsc::SyncSender<WriterMsg> {
+    static TX: OnceLock<mpsc::SyncSender<WriterMsg>> = OnceLock::new();
+    TX.get_or_init(|| {
+        let (tx, rx) = mpsc::sync_channel::<WriterMsg>(WRITER_CHANNEL_CAP);
+        let _ = std::thread::Builder::new()
+            .name("recovery-log-writer".into())
+            .spawn(move || {
+                let mut state = BackgroundWriter::new();
+                for msg in rx {
+                    match msg {
+                        WriterMsg::Write { root, line } => state.write_entry(root, line),
+                        WriterMsg::Flush(ack) => {
+                            #[cfg(test)]
+                            {
+                                state.open = None;
+                            }
+                            let _ = ack.send(());
+                        }
+                        WriterMsg::Clear { root, ack } => {
+                            let _ = ack.send(state.clear(&root));
+                        }
+                    }
+                }
+            });
+        tx
+    })
+}
+
+/// Wait until all previously queued recovery-log entries have been written.
+pub(crate) fn flush() {
+    let (ack_tx, ack_rx) = mpsc::sync_channel(1);
+    if writer_tx().send(WriterMsg::Flush(ack_tx)).is_ok() {
+        let _ = ack_rx.recv();
+    }
+}
+
+#[cfg(test)]
+fn append(line: &str) -> Result<()> {
+    use std::io::Write;
+    flush();
+    let dir = dir()?;
+    let path = dir.join(FILE);
+    let mut file = open_append(&path)?;
+    writeln!(file, "{line}").context("append a test recovery line")
+}
+
 static WRITER: Mutex<Writer> = Mutex::new(Writer { seq: 0, lost: 0, enabled: None });
 
 /// Whether the reader lets incidents be recorded (on unless turned off).
@@ -676,15 +829,21 @@ fn write(kind: &str, ctx: &Ctx, tracker: &Tracker, fields: Value) {
     // reader's own.
     #[cfg(test)]
     if crate::store::state_home_env().is_none() { return; }
-    let mut writer = WRITER.lock().unwrap_or_else(|error| error.into_inner());
-    if !enabled(&mut writer) { return; }
-    writer.seq += 1;
+    let root = {
+        let mut writer = WRITER.lock().unwrap_or_else(|error| error.into_inner());
+        if !enabled(&mut writer) { return; }
+        let _ = (writer.seq, writer.lost);
+        match crate::store::root() {
+            Ok(root) => root,
+            Err(_) => return,
+        }
+    };
     let (boot_id, started) = boot();
     let progress = tracker.last_progress();
     let mut line = json!({
         "v": VERSION,
         "id": uuid::Uuid::now_v7().to_string(),
-        "seq": writer.seq,
+        "seq": 0u64,
         "boot": boot_id,
         "ts": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
         "mono_ms": millis(started.elapsed()),
@@ -698,41 +857,22 @@ fn write(kind: &str, ctx: &Ctx, tracker: &Tracker, fields: Value) {
         "last_progress": progress.map(|(age, kind)| json!({ "kind": kind, "age_ms": millis(age) })),
         "turn_age_ms": tracker.turn_opened.map(|at| millis(at.elapsed())),
     });
-    if writer.lost > 0 { line["lost_before"] = json!(writer.lost); }
     if let (Value::Object(line), Value::Object(fields)) = (&mut line, fields) { line.extend(fields); }
-    match append(&line.to_string()) {
-        Ok(()) => writer.lost = 0,
-        Err(error) => {
-            writer.lost += 1;
-            // Said once per run of failures, not once per line.
-            if writer.lost == 1 { log::warn!("record a recovery incident: {error:#}"); }
+    // Enqueue asynchronously off TabRuntime/WRITER locks so disk I/O never
+    // serializes sends or turn transitions across tabs (P-59).
+    if writer_tx().try_send(WriterMsg::Write { root, line }).is_err() {
+        let dropped = DROPPED_LINES.fetch_add(1, Ordering::AcqRel);
+        if dropped == 0 {
+            log::warn!("recovery incident log queue full; dropping entries until writer catches up");
         }
     }
-}
-
-fn append(line: &str) -> Result<()> {
-    use std::io::Write;
-    let dir = dir()?;
-    let path = dir.join(FILE);
-    let len = std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
-    if len > 0 && len + line.len() as u64 + 1 > MAX_BYTES {
-        std::fs::rename(&path, dir.join(OLDER)).context("move the full incident file aside")?;
-    }
-    let mut options = std::fs::OpenOptions::new();
-    options.create(true).append(true);
-    #[cfg(unix)] {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options.open(&path).with_context(|| format!("open {}", path.display()))?;
-    writeln!(file, "{line}").context("append an incident line")?;
-    Ok(())
 }
 
 /// Every line kept, oldest first: the older file, then the current one.
 /// A line that is not JSON, or of an unknown version, is left out.
 #[cfg_attr(not(feature = "desktop"), allow(dead_code))] // Read by the app's commands; the headless runtime only writes.
 pub fn read_all() -> Result<Vec<Value>> {
+    flush();
     let dir = dir()?;
     let mut lines = Vec::new();
     for file in [OLDER, FILE] {
@@ -745,14 +885,14 @@ pub fn read_all() -> Result<Vec<Value>> {
 /// Remove every line kept.
 #[cfg_attr(not(feature = "desktop"), allow(dead_code))] // Read by the app's commands; the headless runtime only writes.
 pub fn clear() -> Result<()> {
-    let dir = dir()?;
-    for file in [OLDER, FILE] {
-        match std::fs::remove_file(dir.join(file)) {
-            Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error).context("remove an incident file"),
-            _ => {}
-        }
-    }
-    Ok(())
+    let root = crate::store::root()?;
+    let (ack_tx, ack_rx) = mpsc::sync_channel(1);
+    writer_tx()
+        .send(WriterMsg::Clear { root, ack: ack_tx })
+        .map_err(|_| anyhow::anyhow!("recovery log writer unavailable"))?;
+    ack_rx
+        .recv()
+        .map_err(|_| anyhow::anyhow!("recovery log writer stopped"))?
 }
 
 /// What the log says, for a report: lines with sessions and tabs named by

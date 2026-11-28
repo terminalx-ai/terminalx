@@ -311,6 +311,60 @@ fn cut(s: &str, max: usize) -> String {
     s[..end].to_owned()
 }
 
+fn is_non_public_ipv4(ip: std::net::Ipv4Addr) -> bool {
+    let o = ip.octets();
+    let cgnat = o[0] == 100 && (o[1] & 0b1100_0000) == 64;
+    ip.is_loopback()
+        || ip.is_private()
+        || ip.is_link_local()
+        || ip.is_unspecified()
+        || ip.is_broadcast()
+        || ip.is_multicast()
+        || ip.is_documentation()
+        || o[0] == 0
+        || cgnat
+}
+
+fn is_non_public_ipv6(ip: std::net::Ipv6Addr) -> bool {
+    if let Some(mapped) = ip.to_ipv4_mapped() {
+        return is_non_public_ipv4(mapped);
+    }
+    let seg0 = ip.segments()[0];
+    let unique_local = (seg0 & 0xfe00) == 0xfc00;
+    let link_local = (seg0 & 0xffc0) == 0xfe80;
+    ip.is_loopback() || ip.is_unspecified() || ip.is_multicast() || unique_local || link_local
+}
+
+/// Whether `url` points to a loopback, link-local, or private-network host
+/// that an external `terminalx://browser` deep link must never navigate to.
+fn is_private_or_loopback_host(url: &Url) -> bool {
+    match url.host() {
+        Some(url::Host::Ipv4(ip)) => is_non_public_ipv4(ip),
+        Some(url::Host::Ipv6(ip)) => is_non_public_ipv6(ip),
+        Some(url::Host::Domain(domain)) => {
+            let host = domain.trim_end_matches('.').to_ascii_lowercase();
+            if host.is_empty()
+                || host == "localhost"
+                || host.ends_with(".localhost")
+                || host.ends_with(".local")
+                || host.ends_with(".internal")
+                || host.ends_with(".localdomain")
+                || !host.contains('.')
+            {
+                return true;
+            }
+            if let Ok(ip) = host.parse::<std::net::Ipv4Addr>() {
+                return is_non_public_ipv4(ip);
+            }
+            if let Ok(ip) = host.parse::<std::net::Ipv6Addr>() {
+                return is_non_public_ipv6(ip);
+            }
+            false
+        }
+        None => true,
+    }
+}
+
 /// The query's pairs, decoded, when no name comes twice; None otherwise.
 fn single_pairs(url: &Url) -> Option<Vec<(String, String)>> {
     let pairs: Vec<(String, String)> = url.query_pairs().map(|(name, value)| (name.into_owned(), value.into_owned())).collect();
@@ -383,6 +437,10 @@ impl DesktopLinks {
                 }
                 // A page behind a name and password in the address reads as one site and is another.
                 if !page.username().is_empty() || page.password().is_some() || page.host_str().is_none() {
+                    return malformed();
+                }
+                // External deep links must never reach loopback, link-local, or private-network endpoints.
+                if is_private_or_loopback_host(&page) {
                     return malformed();
                 }
                 Some(DesktopLink::Browser { url: page.into() })
@@ -755,11 +813,7 @@ mod tests {
     }
 
     #[test]
-    fn a_browser_link_opens_only_web_pages() {
-        assert_eq!(
-            route("terminalx://browser?url=http%3A%2F%2Flocalhost%3A61431%2Fo%2Fbilling"),
-            Some(DesktopLink::Browser { url: "http://localhost:61431/o/billing".into() })
-        );
+    fn a_browser_link_opens_only_public_web_pages() {
         assert_eq!(route("terminalx://browser?url=https://example.com/a?b=c"), Some(DesktopLink::Browser { url: "https://example.com/a?b=c".into() }));
         assert_eq!(problem("terminalx://browser?url=file:///Users/me/report.html"), LinkProblem::NotWeb { scheme: "file".into() });
         assert_eq!(problem("terminalx://browser?url=javascript:alert(1)"), LinkProblem::NotWeb { scheme: "javascript".into() });
@@ -774,6 +828,15 @@ mod tests {
             "terminalx://browser/extra?url=https://a.example",
             "terminalx://browser?url=https://user:pw@a.example",
             "terminalx://browser?url=https://a.example#x",
+            // Loopback and private-network targets must be refused from external deep links (S-40).
+            "terminalx://browser?url=http%3A%2F%2Flocalhost%3A61431%2Fo%2Fbilling",
+            "terminalx://browser?url=http://127.0.0.1:8080/admin",
+            "terminalx://browser?url=http://[::1]:3000/",
+            "terminalx://browser?url=http://10.0.0.1/secret",
+            "terminalx://browser?url=http://192.168.1.1/",
+            "terminalx://browser?url=http://169.254.169.254/latest/meta-data/",
+            "terminalx://browser?url=http://printer.local/",
+            "terminalx://browser?url=http://host.docker.internal:3000/",
         ] {
             assert_eq!(problem(link), LinkProblem::Malformed { route: "browser".into() }, "{link}");
         }

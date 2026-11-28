@@ -37,12 +37,32 @@ export function changeRange(events: AgentEvent[], fallbackBase?: string | null):
   return { base, head };
 }
 
+const MAX_CHANGES_CACHE = 100;
 const cache = new Map<string, ChangedFile[]>();
+
+function cacheGet(key: string): ChangedFile[] | undefined {
+  const hit = cache.get(key);
+  if (hit !== undefined) {
+    cache.delete(key);
+    cache.set(key, hit);
+  }
+  return hit;
+}
+
+function cacheSet(key: string, value: ChangedFile[]): void {
+  if (cache.has(key)) cache.delete(key);
+  cache.set(key, value);
+  while (cache.size > MAX_CHANGES_CACHE) {
+    const oldest = cache.keys().next().value;
+    if (oldest === undefined) break;
+    cache.delete(oldest);
+  }
+}
 
 /**
  * What a turn changed in a local checkout or a cloud repository: the
  * source's diff over the turn's range. A closed range (both ends are
- * snapshots) is cached forever under the source's key.
+ * snapshots) is cached (LRU-bounded) under the source's key.
  */
 export function useChanges(source: GitSource | undefined, range: ChangeRange | null, active: boolean, tick = 0) {
   const [files, setFiles] = useState<ChangedFile[]>([]);
@@ -51,9 +71,12 @@ export function useChanges(source: GitSource | undefined, range: ChangeRange | n
   useEffect(() => {
     if (!source || !range || !active) return;
     const key = `${source.key}|${range.base}|${range.head ?? "live"}`;
-    if (range.head && cache.has(key)) {
-      setFiles(cache.get(key)!);
-      return;
+    if (range.head) {
+      const hit = cacheGet(key);
+      if (hit) {
+        setFiles(hit);
+        return;
+      }
     }
     let cancelled = false;
     setLoading(true);
@@ -61,7 +84,7 @@ export function useChanges(source: GitSource | undefined, range: ChangeRange | n
       .changesBetween(range.base, range.head)
       .then((f) => {
         if (cancelled) return;
-        if (range.head) cache.set(key, f);
+        if (range.head) cacheSet(key, f);
         setFiles(f);
         setError(null);
       })

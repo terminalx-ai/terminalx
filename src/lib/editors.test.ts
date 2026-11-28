@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { confirmInApp as ask } from "@/lib/confirm";
 import { getTerminalState, selectSessionTab } from "@/lib/terminal";
-import { conflictTabName, openConflict, setConflictCount, pruneReviewTabs, closeAllEditors, closeEditor, editorLinkContext, fileKind, getEditors, openDiff, openPr, openReviewStack, setDiffMode, serializeReviewTabs, restoreReviewTabs, openAttachment, openFile, setEditorDirty, setPaneCollapsed, setViewMode, toggleViewMode, isFileTab, isTabEditor } from "./editors";
+import { conflictTabName, openConflict, setConflictCount, pruneReviewTabs, closeAllEditors, closeEditor, editorLinkContext, fileKind, flushReviewTabsPersistence, getEditors, openDiff, openPr, openReviewStack, setDiffMode, serializeReviewTabs, restoreReviewTabs, openAttachment, openFile, setEditorDirty, setPaneCollapsed, setViewMode, toggleViewMode, isFileTab, isTabEditor } from "./editors";
 // Unsaved changes are asked about in the app's own dialog (PRO-400), not a system alert.
 vi.mock("@/lib/confirm", () => ({ confirmInApp: vi.fn() }));
 
@@ -112,6 +112,7 @@ describe("review tabs", () => {
     await setDiffMode(id, "edit");
     setEditorDirty(id, true);
     setPaneCollapsed("s", true);
+    flushReviewTabsPersistence();
     const saved = serializeReviewTabs(getEditors());
     expect(localStorage.getItem("terminalx:review-tabs:v1")).toBe(saved);
     const restored = restoreReviewTabs(saved);
@@ -187,6 +188,7 @@ describe("file tabs (PRO-402)", () => {
 it("prunes restored review tabs for deleted sessions and removed worktrees after sessions load", () => {
   for (const session of ["kept", "deleted", "removed"]) openDiff(session, "/repo", "a.ts", { scope: "all", range: { base: "base", head: null } });
   pruneReviewTabs([{ id: "kept" }, { id: "removed", worktreeRemoved: true }]);
+  flushReviewTabsPersistence();
   expect(getEditors().editors.map((e) => e.sessionId)).toEqual(["kept"]);
   expect(restoreReviewTabs(localStorage.getItem("terminalx:review-tabs:v1")).editors.map((e) => e.sessionId)).toEqual(["kept"]);
 });

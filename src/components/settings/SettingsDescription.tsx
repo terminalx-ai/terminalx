@@ -1,4 +1,4 @@
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openExternalWebUrl } from "@/lib/externalUrl";
 import { ExternalLink } from "@/icons";
 import { repoFile } from "@/lib/repo";
 import { SETTINGS_SECTIONS, type SettingsSection } from "./settingsRegistry";
@@ -11,7 +11,7 @@ export function MachinesGuideLink() {
   return (
     <button
       type="button"
-      onClick={() => void openUrl(MACHINES_GUIDE_URL)}
+      onClick={() => void openExternalWebUrl(MACHINES_GUIDE_URL)}
       className="inline-flex items-center gap-1 whitespace-nowrap rounded-sm text-[12.5px] text-muted-foreground underline decoration-hairline-strong underline-offset-2 outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40"
     >
       Machines guide <ExternalLink className="size-3" aria-hidden />

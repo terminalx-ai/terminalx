@@ -32,6 +32,7 @@ describe("persisted tab selection", () => {
     const terminal = await loadTerminalStore();
     terminal.selectSessionTab("s1", { kind, id: "selected-tab" });
     terminal.setSelectedBrowser("s2", "other-tab");
+    terminal.flushTerminalSelectionPersistence();
 
     const restored = await loadTerminalStore();
     expect(restored.getTerminalState().selected).toEqual({
@@ -39,6 +40,7 @@ describe("persisted tab selection", () => {
       s2: { kind: "browser", id: "other-tab" },
     });
     restored.dropSessionTerminals(["s1"]);
+    restored.flushTerminalSelectionPersistence();
 
     const reloaded = await loadTerminalStore();
     expect(reloaded.getTerminalState().selected).toEqual({ s2: { kind: "browser", id: "other-tab" } });

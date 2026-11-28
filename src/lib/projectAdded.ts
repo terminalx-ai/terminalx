@@ -17,6 +17,7 @@ export interface ProjectAdded {
 let added: ProjectAdded | null = null;
 let requests = 0;
 const listeners = new Set<() => void>();
+const __subscribe_listeners = (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; };
 const emit = () => { for (const listener of [...listeners]) listener(); };
 
 export function announceProjectAdded(project: Pick<Project, "path" | "name">) {
@@ -31,7 +32,7 @@ export function dismissProjectAdded() {
 }
 
 export function useProjectAdded(): ProjectAdded | null {
-  return useSyncExternalStore((listener) => { listeners.add(listener); return () => { listeners.delete(listener); }; }, () => added, () => null);
+  return useSyncExternalStore(__subscribe_listeners, () => added, () => null);
 }
 
 const settingsListeners = new Set<(projectPath: string, page: ProjectSettingsPage) => void>();

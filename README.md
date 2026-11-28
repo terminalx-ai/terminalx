@@ -107,7 +107,7 @@ is optional: signed out, TerminalX makes no account, directory or relay request
 and everything that worked locally before accounts still works. Once you choose
 Sign in, the app keeps this Mac discoverable to your own devices with a metadata
 heartbeat and a persistent relay connection. It never uploads how you use the
-app. The outbound connections are these nine:
+app. The outbound connections are listed below (all optional checks and remote connections are blocked while **Data privacy mode** is on):
 
 | To | When | Carrying |
 | --- | --- | --- |
@@ -118,6 +118,10 @@ app. The outbound connections are these nine:
 | GitHub | You open the Issues view or a PR panel, a session you started from an issue reports its work done, or you become eligible for the local star reminder | Uses your existing `gh` credentials. For an issue session it pushes the branch, opens the pull request, posts the review as a comment, reads the checks, and merges only if you turned that on for the issue. The reminder checks only whether you starred `terminalx-ai/raccoon`. It stars only when you press **Star on GitHub**; **Open GitHub** opens that repository in your system browser |
 | Linear | You open the Issues view with a Linear key configured, or a session you started from a Linear issue has its pull request opened | A GraphQL query to `api.linear.app`, authorized with the key you pasted; for the pull request, one update that moves the issue to its team's review state |
 | Anthropic usage | While the status bar shows usage and the window is on screen, at the **Usage auto-refresh interval** in Settings (one minute by default; Off leaves returning to the app, Refresh and window resets), and less often while Anthropic asks the app to wait | A GET to `api.anthropic.com/api/oauth/usage`, authorized with the OAuth token Claude Code already stores; no prompts, transcripts or files |
+| OpenCode catalog & provider check | You open OpenCode provider settings without a local catalog cache (`models.dev`), or connect an API key in Settings | A plain GET to `models.dev/api.json` for the provider/model list, and a key-validation GET (without redirects) to the selected provider's HTTPS endpoint or local server |
+| npm registry | You view installed agent CLI versions in Settings (cached for 6 hours) | A plain GET to `registry.npmjs.org/<package>/latest` to check whether a newer CLI release exists |
+| Local VM bootstrap (GitHub Releases) | You explicitly set up or prepare a Local VM | Downloads pinned release binaries (`trycua/cua` Lume runtime and `openai/codex` CLI) from GitHub Releases over HTTPS |
+| Slack / Telegram APIs | Only when you enable **Bots** and configure a Slack (`slack.com`) or Telegram (`api.telegram.org`) bot token | Bot messaging and update polling requests authorized with the bot token you configured |
 | Hugging Face | You press Download on a transcription model | A plain GET for the weights, at a pinned revision |
 | The update endpoint | 15 seconds after launch, every 4 hours while the app runs, and when you press "Check for updates"; never while **Data privacy mode** is on | The current version and your channel |
 

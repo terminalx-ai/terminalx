@@ -43,10 +43,14 @@ impl Repo {
         running(&self.root).unwrap().lock().unwrap().sync()
     }
     fn crash(&self) {
+        clear_status(&self.root);
         let removed = mirrors().lock().unwrap().remove(&self.root);
         if let Some(handle) = removed {
             let mut mirror = handle.lock().unwrap();
             mirror.stopped = true;
+            if let Some(wake) = mirror.wake.take() {
+                let _ = wake.send(false);
+            }
             mirror.lease.take();
         }
     }
@@ -369,4 +373,18 @@ fn a_main_checkout_whose_name_ends_in_a_space_can_be_mirrored() {
     crate::git::run(dir.path(), &["init", "-q", work.to_str().unwrap()]).unwrap();
     let (root, common) = repository(&work).unwrap();
     assert_eq!((root, common), (crate::paths::canonicalize(&work).unwrap(), crate::paths::canonicalize(work.join(".git")).unwrap()));
+}
+
+#[test]
+fn status_reads_cached_state_without_blocking_on_mirror_mutex() {
+    let r = Repo::new();
+    assert!(r.start().active);
+    let handle = running(&r.root).unwrap();
+    let _held = handle.lock().unwrap();
+    // status() must return immediately even while the mirror mutex is held.
+    let current = status(&r.root).unwrap();
+    assert!(current.active);
+    drop(_held);
+    stop(&r.root).unwrap();
+    r.clean();
 }

@@ -256,6 +256,7 @@ type ConnectionFilter = Arc<Mutex<Option<(String, NotificationFilter)>>>;
 struct MobileClient {
     sender: mpsc::Sender<Value>,
     overflowed: Arc<std::sync::atomic::AtomicBool>,
+    health_wake: Arc<tokio::sync::Notify>,
     filter: ConnectionFilter,
     invalidations: Arc<super::Invalidations>,
 }
@@ -382,8 +383,13 @@ impl MobileRuntime {
         Ok(())
     }
 
+    #[cfg(test)]
     fn register_client(&self, id: &str, outbound: mpsc::Sender<Value>, overflowed: Arc<std::sync::atomic::AtomicBool>, filter: ConnectionFilter, invalidations: Arc<super::Invalidations>) {
-        self.clients.lock().unwrap().insert(id.into(), MobileClient { sender:outbound, overflowed, filter, invalidations });
+        self.register_client_with_wake(id, outbound, overflowed, Arc::new(tokio::sync::Notify::new()), filter, invalidations);
+    }
+
+    fn register_client_with_wake(&self, id: &str, outbound: mpsc::Sender<Value>, overflowed: Arc<std::sync::atomic::AtomicBool>, health_wake: Arc<tokio::sync::Notify>, filter: ConnectionFilter, invalidations: Arc<super::Invalidations>) {
+        self.clients.lock().unwrap().insert(id.into(), MobileClient { sender: outbound, overflowed, health_wake, filter, invalidations });
     }
 
     fn unregister_client(&self, id: &str) {
@@ -396,7 +402,8 @@ impl MobileRuntime {
             .unwrap()
             .retain(|_, client| {
                 if client.sender.try_send(value.clone()).is_ok() { true } else {
-                    client.overflowed.store(true,std::sync::atomic::Ordering::SeqCst);
+                    client.overflowed.store(true, std::sync::atomic::Ordering::SeqCst);
+                    client.health_wake.notify_waiters();
                     false
                 }
             });
@@ -421,6 +428,7 @@ impl MobileRuntime {
                 true
             } else {
                 client.overflowed.store(true, std::sync::atomic::Ordering::SeqCst);
+                client.health_wake.notify_waiters();
                 false
             }
         });
@@ -738,12 +746,16 @@ pub(crate) struct MobileConnection {
     /// What this connection's latest `notifications.subscribe` asked for.
     notification_filter: ConnectionFilter,
     terminal_subscriptions: Mutex<HashMap<String,String>>,
+    /// Parks `"mobile-output"` with zero CPU when no terminal is subscribed and
+    /// wakes it immediately on subscribe or close (P-37).
+    terminal_wake: (Mutex<()>, std::sync::Condvar),
     /// The request being answered and what its stream produced meanwhile:
     /// held until its reply is on the socket, so a subscription's opening
     /// result always comes before its first item (#1333).
     opening: Mutex<Option<(String, Vec<Value>)>>,
     polling: std::sync::atomic::AtomicBool,
     overflowed: Arc<std::sync::atomic::AtomicBool>,
+    health_wake: Arc<tokio::sync::Notify>,
     invalidations: Arc<super::Invalidations>,
     closed: std::sync::atomic::AtomicBool,
     /// The transcript checkpoints this connection's `session.sync` replies ended at (#1283).
@@ -773,16 +785,18 @@ impl MobileConnection {
         };
         owner.mobile(&actor, "register", json!({"connection":id,"deviceId":device.id,"forwardedId":forwarded_id}))?;
         let overflowed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let health_wake = Arc::new(tokio::sync::Notify::new());
         let notification_filter = ConnectionFilter::default();
         let invalidations = Arc::new(super::Invalidations::default());
-        runtime.register_client(&id, outbound.clone(), overflowed.clone(), notification_filter.clone(), invalidations.clone());
+        runtime.register_client_with_wake(&id, outbound.clone(), overflowed.clone(), health_wake.clone(), notification_filter.clone(), invalidations.clone());
         Ok(Self {
-            id, device: device.clone(), owner, actor, overflowed, notification_filter, invalidations,
+            id, device: device.clone(), owner, actor, overflowed, health_wake, notification_filter, invalidations,
             runtime,
             outbound,
             wire: Wire::new(transport),
             subscriptions: Mutex::new(HashMap::new()),
             terminal_subscriptions: Mutex::new(HashMap::new()),
+            terminal_wake: (Mutex::new(()), std::sync::Condvar::new()),
             opening: Mutex::new(None),
             polling: std::sync::atomic::AtomicBool::new(false),
             closed: std::sync::atomic::AtomicBool::new(false),
@@ -799,6 +813,21 @@ impl MobileConnection {
 
     pub(crate) fn invalidations(&self) -> &super::Invalidations {
         &self.invalidations
+    }
+
+    pub(crate) fn health_notified(&self) -> tokio::sync::futures::Notified<'_> {
+        self.health_wake.notified()
+    }
+
+    pub(crate) fn has_authority(&self) -> bool {
+        #[cfg(unix)]
+        {
+            self.authority.is_some()
+        }
+        #[cfg(not(unix))]
+        {
+            false
+        }
     }
 
     pub(crate) fn check_buffer(&self) -> Result<()> {
@@ -873,6 +902,11 @@ impl MobileConnection {
         {
             return;
         }
+        self.health_wake.notify_waiters();
+        {
+            let _guard = self.terminal_wake.0.lock().unwrap_or_else(|e| e.into_inner());
+            self.terminal_wake.1.notify_all();
+        }
         self.prefetch.stop();
         if let Some(sink) = self.runtime.sink.get() {
             for (_, listener) in self.subscriptions.lock().unwrap().drain() {
@@ -899,6 +933,7 @@ impl MobileConnection {
             if held.len() >= self.outbound.max_capacity() {
                 log::debug!("stream {id} filled before its reply was sent");
                 self.overflowed.store(true, std::sync::atomic::Ordering::SeqCst);
+                self.health_wake.notify_waiters();
                 drop(opening);
                 self.finish();
                 return;
@@ -914,6 +949,7 @@ impl MobileConnection {
         if let Err(error) = self.outbound.try_send(message) {
             if matches!(error, mpsc::error::TrySendError::Full(_)) {
                 self.overflowed.store(true, std::sync::atomic::Ordering::SeqCst);
+                self.health_wake.notify_waiters();
             }
             self.finish();
         }
@@ -937,11 +973,12 @@ impl MobileConnection {
         }
     }
 
-    /// A live event, cut down when this connection cannot carry it whole: a
-    /// reply it cannot carry would end the subscription (#669).
-    fn stream_event(&self, request_id: &str, event: &AgentEvent) -> Result<()> {
-        let envelope = serde_json::to_vec(&success_response(request_id, json!({ "event": null })))?.len();
-        let event = fit_event(event, self.wire.message_limit().saturating_sub(envelope))?;
+    /// A live event already serialized as JSON (`payload`) and parsed once into
+    /// `value`, cut down only when `raw_len` exceeds the wire limit (P-37).
+    fn stream_event_value(&self, request_id: &str, value: Value, raw_len: usize) -> Result<()> {
+        let envelope = stream_event_envelope_len(request_id);
+        let budget = self.wire.message_limit().saturating_sub(envelope);
+        let event = fit_event_value(value, raw_len, budget)?;
         self.stream(request_id, json!({ "event": event }));
         Ok(())
     }
@@ -954,6 +991,8 @@ impl MobileConnection {
         if self.terminal_subscriptions.lock().unwrap().contains_key(subscription_id) {
             let result = self.call("unobserve", json!({"subscriptionId":subscription_id}))?;
             self.terminal_subscriptions.lock().unwrap().remove(subscription_id);
+            let _guard = self.terminal_wake.0.lock().unwrap_or_else(|e| e.into_inner());
+            self.terminal_wake.1.notify_all();
             return Ok(result["removed"].as_bool().unwrap_or(false));
         }
         let listener = self.subscriptions.lock().unwrap().remove(subscription_id);
@@ -965,39 +1004,62 @@ impl MobileConnection {
     }
 
     fn start_polling(self: &Arc<Self>) -> Result<()> {
-        if self.polling.swap(true,std::sync::atomic::Ordering::SeqCst) { return Ok(()); }
+        {
+            let _guard = self.terminal_wake.0.lock().unwrap_or_else(|e| e.into_inner());
+            self.terminal_wake.1.notify_all();
+        }
+        if self.polling.swap(true, std::sync::atomic::Ordering::SeqCst) { return Ok(()); }
         let weak = Arc::downgrade(self);
         let spawned = std::thread::Builder::new().name("mobile-output".into()).spawn(move || loop {
             let Some(connection) = weak.upgrade() else { return };
             if connection.closed.load(std::sync::atomic::Ordering::SeqCst) { return; }
-            if !connection.terminal_subscriptions.lock().unwrap().is_empty() {
-                match connection.call("output",json!({})) {
-                    Ok(packets) => {
-                        for packet in packets.as_array().into_iter().flatten() {
-                            let request = connection.terminal_subscriptions.lock().unwrap()
-                                .get(packet["subscriptionId"].as_str().unwrap_or_default()).cloned();
-                            if let Some(request) = request {
-                                if packet.get("cols").is_some() {
-                                    connection.stream(&request,json!({"type":"resized","cols":packet["cols"],"rows":packet["rows"]}));
-                                }
-                                if packet["text"].as_str().is_some_and(|text| !text.is_empty()) {
-                                    connection.stream(&request,json!({"type":"data","chunk":packet["text"]}));
-                                }
+            // Park with zero CPU wakeups whenever no terminal is subscribed (P-37).
+            if connection.terminal_subscriptions.lock().unwrap().is_empty() {
+                let mut guard = connection.terminal_wake.0.lock().unwrap_or_else(|e| e.into_inner());
+                while !connection.closed.load(std::sync::atomic::Ordering::SeqCst)
+                    && connection.terminal_subscriptions.lock().unwrap().is_empty()
+                {
+                    guard = connection.terminal_wake.1.wait(guard).unwrap_or_else(|e| e.into_inner());
+                }
+                continue;
+            }
+            let mut got_output = false;
+            match connection.call("output", json!({})) {
+                Ok(packets) => {
+                    for packet in packets.as_array().into_iter().flatten() {
+                        let request = connection.terminal_subscriptions.lock().unwrap()
+                            .get(packet["subscriptionId"].as_str().unwrap_or_default()).cloned();
+                        if let Some(request) = request {
+                            got_output = true;
+                            if packet.get("cols").is_some() {
+                                connection.stream(&request, json!({"type":"resized","cols":packet["cols"],"rows":packet["rows"]}));
+                            }
+                            if packet["text"].as_str().is_some_and(|text| !text.is_empty()) {
+                                connection.stream(&request, json!({"type":"data","chunk":packet["text"]}));
                             }
                         }
                     }
-                    Err(error) => {
-                        let _ = connection.outbound.try_send(json!({"method":"terminal.closed","params":{"message":error.to_string()}}));
-                        connection.finish();
-                        return;
-                    }
+                }
+                Err(error) => {
+                    let _ = connection.outbound.try_send(json!({"method":"terminal.closed","params":{"message":error.to_string()}}));
+                    connection.finish();
+                    return;
                 }
             }
-            drop(connection);
-            std::thread::sleep(std::time::Duration::from_millis(200));
+            let wait = if got_output {
+                std::time::Duration::from_millis(50)
+            } else {
+                std::time::Duration::from_millis(200)
+            };
+            let guard = connection.terminal_wake.0.lock().unwrap_or_else(|e| e.into_inner());
+            if !connection.closed.load(std::sync::atomic::Ordering::SeqCst)
+                && !connection.terminal_subscriptions.lock().unwrap().is_empty()
+            {
+                let _ = connection.terminal_wake.1.wait_timeout(guard, wait);
+            }
         });
         if let Err(error) = spawned {
-            self.polling.store(false,std::sync::atomic::Ordering::SeqCst);
+            self.polling.store(false, std::sync::atomic::Ordering::SeqCst);
             self.finish();
             return Err(error.into());
         }
@@ -1643,12 +1705,26 @@ fn sync_page_state(events: &[AgentEvent], cursor: Option<&SyncCursor>, session: 
         if turns == 20 { break; }
     }
     let (budget, single) = sync_envelope(request_id, events.len(), limits)?;
-    // A reset is a recent contiguous suffix. It cannot skip an oversized
-    // event: it is sent alone, and cut down to fit if it must be.
-    start = events.len() - sync_event_count(events[start..].iter().rev(), budget)?;
+    // Serialize the candidate reset suffix once and reuse those bytes for
+    // budgeting, hashing, and fitting instead of 3-4x re-serialization (P-37).
+    let suffix_raw: Vec<Vec<u8>> = events[start..]
+        .iter()
+        .map(serde_json::to_vec)
+        .collect::<std::result::Result<_, _>>()?;
+    let keep = sync_raw_count(suffix_raw.iter().rev().map(Vec::len), budget);
+    let keep_offset = suffix_raw.len() - keep;
+    start += keep_offset;
     let mut hash = sync_hash(session, tab)?;
-    hash_events(&mut hash, events, wanted)?;
-    let page = events[start..].iter().map(|event| fit_event(event, single)).collect::<Result<Vec<_>>>()?;
+    hash_events(&mut hash, &events[..start - keep_offset], wanted)?;
+    for (index, raw) in suffix_raw.iter().enumerate() {
+        if index % WANTED_EVERY == 0 { wanted.check()?; }
+        hash.update(raw);
+        hash.update(b"\n");
+    }
+    let page = suffix_raw[keep_offset..]
+        .iter()
+        .map(|raw| fit_event_from_bytes(raw, single))
+        .collect::<Result<Vec<_>>>()?;
     Ok(SyncedPage {
         value: json!({
             "events": page, "reset": true,
@@ -1665,11 +1741,22 @@ fn sync_page_state(events: &[AgentEvent], cursor: Option<&SyncCursor>, session: 
 pub(super) fn forward_page(mut hash: Sha256, start: usize, rest: &[AgentEvent], request_id: &str, limits: ReplyLimits) -> Result<SyncedPage> {
     let total = start + rest.len();
     let (budget, single) = sync_envelope(request_id, total, limits)?;
-    let count = sync_event_count(rest.iter().take(SYNC_PAGE_EVENTS), budget)?;
-    // At most a page of records: not worth a check.
-    hash_events(&mut hash, &rest[..count], Wanted::ALWAYS)?;
-    let page = rest[..count].iter().map(|event| fit_event(event, single)).collect::<Result<Vec<_>>>()?;
-    let end = start + count;
+    // Serialize each page event once and reuse its bytes for budgeting,
+    // hashing, and fitting (P-37).
+    let mut bytes = 0usize;
+    let mut page = Vec::new();
+    for event in rest.iter().take(SYNC_PAGE_EVENTS) {
+        let raw = serde_json::to_vec(event)?;
+        let size = raw.len() + usize::from(!page.is_empty());
+        if !page.is_empty() && bytes + size > budget {
+            break;
+        }
+        bytes += size;
+        hash.update(&raw);
+        hash.update(b"\n");
+        page.push(fit_event_from_bytes(&raw, single)?);
+    }
+    let end = start + page.len();
     Ok(SyncedPage {
         value: json!({
             "events": page, "reset": false,
@@ -1868,20 +1955,27 @@ impl MobileConnection {
     }
 }
 
-/// How many of `events` fill a page. The first is always taken: one larger
-/// than a page on its own is the whole page.
-fn sync_event_count<'a>(events: impl Iterator<Item = &'a AgentEvent>, budget: usize) -> Result<usize> {
+/// Exact serialized byte length of `success_response(request_id, json!({ "event": null }))`
+/// without allocating a JSON DOM or byte vector per streamed event (P-37).
+fn stream_event_envelope_len(request_id: &str) -> usize {
+    // `{"_meta":{"runtimeId":"desktop"},"id":"` (39) + `","ok":true,"result":{"event":null}}` (36)
+    75 + json_escaped_len(request_id)
+}
+
+/// How many pre-measured events fill a page. The first is always taken: one
+/// larger than a page on its own is the whole page.
+fn sync_raw_count(sizes: impl Iterator<Item = usize>, budget: usize) -> usize {
     let mut count = 0;
     let mut bytes = 0;
-    for event in events {
-        let size = serde_json::to_vec(event)?.len() + usize::from(count > 0);
+    for raw_len in sizes {
+        let size = raw_len + usize::from(count > 0);
         if count > 0 && bytes + size > budget {
             break;
         }
         bytes += size;
         count += 1;
     }
-    Ok(count)
+    count
 }
 
 /// The note that ends a string cut short to fit.
@@ -1889,14 +1983,19 @@ fn cut_note(omitted: usize) -> String {
     crate::platform_profile::localize(&format!("\n\n[Too large to show on mobile: {} not shown. Open this conversation on your Mac to see all of it.]", megabytes(omitted)))
 }
 
-/// An event as JSON of at most `budget` bytes (#669). In one that is larger,
-/// the longest strings are cut short, longest first, each ending in a note of
-/// what is missing. Everything else about the event is kept, so the phone
-/// still pairs a tool's result with its call. One made of many small parts
-/// becomes a status line saying it is too large.
+/// An event as JSON of at most `budget` bytes (#669), serialized once to
+/// measure before parsing only when needed (P-37).
 fn fit_event(event: &AgentEvent, budget: usize) -> Result<Value> {
-    let mut value = serde_json::to_value(event)?;
-    let size = serde_json::to_vec(&value)?.len();
+    let raw = serde_json::to_vec(event)?;
+    fit_event_from_bytes(&raw, budget)
+}
+
+fn fit_event_from_bytes(raw: &[u8], budget: usize) -> Result<Value> {
+    let value: Value = serde_json::from_slice(raw)?;
+    fit_event_value(value, raw.len(), budget)
+}
+
+fn fit_event_value(mut value: Value, size: usize, budget: usize) -> Result<Value> {
     if size <= budget {
         return Ok(value);
     }
@@ -2077,10 +2176,18 @@ fn subscribe_session(
     let listener = sink.listen(
         "agent_event",
         Box::new(move |payload| {
-            let Ok(event) = serde_json::from_str::<AgentEvent>(payload) else { return };
-            if event.session_id == session_id && event.tab_id == tab_id {
+            // Cheap pre-filter skips unrelated tabs without parsing JSON, and
+            // matching events reuse the already-serialized payload length
+            // without round-tripping through `AgentEvent -> Value -> Vec<u8>` (P-37).
+            if !payload.contains(&tab_id) || !payload.contains(&session_id) {
+                return;
+            }
+            let Ok(value) = serde_json::from_str::<Value>(payload) else { return };
+            if value.get("sessionId").and_then(Value::as_str) == Some(session_id.as_str())
+                && value.get("tabId").and_then(Value::as_str) == Some(tab_id.as_str())
+            {
                 if let Some(stream) = stream.upgrade() {
-                    let _ = stream.stream_event(&response_id, &event);
+                    let _ = stream.stream_event_value(&response_id, value, payload.len());
                 }
             }
         }),
@@ -4851,6 +4958,16 @@ mod tests {
         assert_eq!(invalidations.take(), vec![json!({ "method": "sync.capabilitiesChanged" })]);
         runtime.invalidate(super::super::Invalidation::Bots);
         assert_eq!(invalidations.take(), vec![json!({ "method": "bots.changed" })]);
+    }
+
+    #[test]
+    fn stream_event_envelope_len_matches_serialized_success_response() {
+        for id in ["", "req-1", "a\"b\\c\n", "uuid-1234-5678"] {
+            let expected = serde_json::to_vec(&success_response(id, json!({ "event": null })))
+                .unwrap()
+                .len();
+            assert_eq!(stream_event_envelope_len(id), expected, "id={id:?}");
+        }
     }
 
     #[test]

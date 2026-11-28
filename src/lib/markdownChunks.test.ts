@@ -13,6 +13,12 @@ describe("chunkStream", () => {
     expect(chunks.join("")).toBe(text);
     for (const c of chunks.slice(0, -1)) expect(c.endsWith("\n\n")).toBe(true);
   });
+  it("splits completed paragraphs once text crosses ~1,500 chars (P-72)", () => {
+    const p1 = "a".repeat(1600) + "\n\n";
+    const p2 = "streaming tail";
+    const chunks = chunkStream(p1 + p2);
+    expect(chunks).toEqual([p1, p2]);
+  });
   it("never splits inside a code fence", () => {
     const code = "```ts\n" + "const x = 1;\n".repeat(600) + "```\n\n";
     const text = "intro\n\n" + code + "after\n\n".repeat(400);

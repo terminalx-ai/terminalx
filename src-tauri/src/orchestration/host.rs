@@ -101,31 +101,176 @@ fn millis(ts: &str) -> Option<i64> {
 }
 
 /// What a worker did in its open turn, from its transcript's events.
+#[cfg(test)]
 pub(crate) fn activity_of(events: &[crate::events::AgentEvent]) -> Activity {
-    use crate::events::Payload;
-    let from = events.iter().rposition(|event| matches!(event.payload, Payload::TurnStarted { .. })).unwrap_or(0);
-    let mut activity = Activity::default();
-    let mut open = std::collections::HashSet::new();
-    let mut background = false;
+    let from = events.iter().rposition(|event| matches!(event.payload, crate::events::Payload::TurnStarted { .. })).unwrap_or(0);
+    let mut state = TranscriptActivityState::default();
     for event in &events[from..] {
+        state.apply(event);
+    }
+    state.to_activity()
+}
+
+/// Incremental per-worker transcript activity state so `mark_stalls` reads
+/// only newly appended JSONL lines instead of re-parsing the full transcript
+/// on every watch tick (P-69).
+#[derive(Default)]
+struct TranscriptActivityState {
+    path: PathBuf,
+    byte_offset: u64,
+    last_ms: Option<i64>,
+    open_tools: std::collections::HashSet<String>,
+    background: bool,
+}
+
+impl TranscriptActivityState {
+    fn reset_turn(&mut self, ts_ms: Option<i64>) {
+        self.last_ms = ts_ms;
+        self.open_tools.clear();
+        self.background = false;
+    }
+
+    fn apply(&mut self, event: &crate::events::AgentEvent) {
+        use crate::events::Payload;
         let at = || millis(&event.ts);
         match &event.payload {
-            Payload::TurnStarted { .. } => activity.last_ms = at(),
+            Payload::TurnStarted { .. } => self.reset_turn(at()),
             Payload::ToolCallStarted { call_id, .. } => {
-                open.insert(call_id.clone());
-                activity.last_ms = at().or(activity.last_ms);
+                self.open_tools.insert(call_id.clone());
+                self.last_ms = at().or(self.last_ms);
             }
             Payload::ToolCallCompleted { call_id, .. } => {
-                open.remove(call_id);
-                activity.last_ms = at().or(activity.last_ms);
+                self.open_tools.remove(call_id);
+                self.last_ms = at().or(self.last_ms);
             }
-            Payload::FileEdits { .. } => activity.last_ms = at().or(activity.last_ms),
-            Payload::BackgroundTasksChanged { tasks } => background = !tasks.is_empty(),
+            Payload::FileEdits { .. } => self.last_ms = at().or(self.last_ms),
+            Payload::BackgroundTasksChanged { tasks } => self.background = !tasks.is_empty(),
             _ => {}
         }
     }
-    activity.command_running = !open.is_empty() || background;
-    activity
+
+    fn to_activity(&self) -> Activity {
+        Activity {
+            last_ms: self.last_ms,
+            command_running: !self.open_tools.is_empty() || self.background,
+            busy: false,
+        }
+    }
+}
+
+const MAX_ACTIVITY_CURSORS: usize = 256;
+
+static ACTIVITY_CURSORS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<(String, String), TranscriptActivityState>>,
+> = std::sync::LazyLock::new(Default::default);
+
+/// Read a worker's open-turn activity incrementally from its JSONL transcript
+/// file starting at the cached byte offset. Falls back to `None` if the log
+/// cannot be read (callers treat unread as not idle).
+fn incremental_transcript_activity(session_id: &str, tab_id: &str, path: &Path) -> Option<Activity> {
+    use std::io::{BufRead, BufReader, Seek, SeekFrom};
+    let meta = match std::fs::metadata(path) {
+        Ok(meta) => meta,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Some(Activity::default()),
+        Err(_) => return None,
+    };
+    let len = meta.len();
+    let key = (session_id.to_owned(), tab_id.to_owned());
+
+    let mut state = {
+        let mut map = ACTIVITY_CURSORS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        map.remove(&key)
+            .filter(|cursor| cursor.path == path && len >= cursor.byte_offset)
+            .unwrap_or_else(|| TranscriptActivityState {
+                path: path.to_path_buf(),
+                ..Default::default()
+            })
+    };
+
+    if len > state.byte_offset {
+        let mut file = std::fs::File::open(path).ok()?;
+        if state.byte_offset > 0 {
+            file.seek(SeekFrom::Start(state.byte_offset)).ok()?;
+        }
+        let mut reader = BufReader::new(file);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            let n = reader.read_line(&mut line).ok()?;
+            if n == 0 {
+                break;
+            }
+            let ended_with_newline = line.ends_with('\n');
+            let trimmed = line.trim();
+            if !trimmed.is_empty() {
+                if let Ok(event) = serde_json::from_str::<crate::events::AgentEvent>(trimmed) {
+                    state.apply(&event);
+                }
+            }
+            if ended_with_newline {
+                state.byte_offset = state.byte_offset.saturating_add(n as u64);
+            }
+        }
+    }
+
+    let activity = state.to_activity();
+    let mut map = ACTIVITY_CURSORS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if map.len() >= MAX_ACTIVITY_CURSORS {
+        map.clear();
+    }
+    map.insert(key, state);
+    Some(activity)
+}
+
+/// Optional thread-local resource snapshot shared across all runs checked in
+/// one `watch()` tick so `resource_sample()` runs at most once per tick (P-69).
+struct WatchResourceCache {
+    sample: Option<Option<crate::status::resources::ResourceSnapshot>>,
+}
+
+thread_local! {
+    static WATCH_RESOURCE_SAMPLE: std::cell::RefCell<Option<WatchResourceCache>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+struct WatchResourceScope;
+
+impl WatchResourceScope {
+    fn enter() -> Self {
+        WATCH_RESOURCE_SAMPLE.with(|cell| {
+            *cell.borrow_mut() = Some(WatchResourceCache { sample: None });
+        });
+        Self
+    }
+}
+
+impl Drop for WatchResourceScope {
+    fn drop(&mut self) {
+        WATCH_RESOURCE_SAMPLE.with(|cell| {
+            *cell.borrow_mut() = None;
+        });
+    }
+}
+
+fn worker_busy_from_sample(
+    sample: Option<&crate::status::resources::ResourceSnapshot>,
+    session_id: &str,
+    tab_id: &str,
+) -> bool {
+    match sample {
+        Some(sample) => sample.processes.iter().any(|process| {
+            process.session_id.as_deref() == Some(session_id)
+                && process.tab_id.as_deref() == Some(tab_id)
+                && process
+                    .cpu_percent
+                    .is_some_and(|cpu| cpu >= BUSY_CPU_PERCENT)
+        }),
+        None => true,
+    }
 }
 
 /// The projects whose base checkout a check or a prune is using, and the signal that one
@@ -595,17 +740,62 @@ impl Host for ManagerHost {
     }
 
     fn activity(&self, worker: &SessionRef) -> Activity {
-        let Some(tab) = worker.tab_id.as_deref() else { return Activity::default() };
-        let mut activity = match self.manager.load_events(&worker.session_id, tab) {
-            Ok(events) => activity_of(&events),
-            // Unread is not idle: no stall is called on no evidence.
-            Err(_) => return Activity { command_running: true, ..Activity::default() },
+        self.activities(std::slice::from_ref(worker))
+            .into_iter()
+            .next()
+            .unwrap_or_default()
+    }
+
+    fn activities(&self, workers: &[SessionRef]) -> Vec<Activity> {
+        if workers.is_empty() {
+            return Vec::new();
+        }
+        // Capture `resource_sample()` at most once per watch tick (or per
+        // batch call outside the watcher) rather than once per worker (P-69).
+        let local_sample;
+        let sample_ref = WATCH_RESOURCE_SAMPLE.with(|cell| {
+            let mut slot = cell.borrow_mut();
+            if let Some(cache) = slot.as_mut() {
+                if cache.sample.is_none() {
+                    cache.sample = Some(self.manager.resource_sample().ok());
+                }
+                Some(cache.sample.as_ref().and_then(|opt| opt.clone()))
+            } else {
+                None
+            }
+        });
+        let sample = match sample_ref {
+            Some(cached) => cached,
+            None => {
+                local_sample = self.manager.resource_sample().ok();
+                local_sample
+            }
         };
-        activity.busy = match self.manager.resource_sample() {
-            Ok(sample) => sample.processes.iter().any(|process| process.session_id.as_deref() == Some(worker.session_id.as_str()) && process.tab_id.as_deref() == Some(tab) && process.cpu_percent.is_some_and(|cpu| cpu >= BUSY_CPU_PERCENT)),
-            Err(_) => true,
-        };
-        activity
+
+        workers
+            .iter()
+            .map(|worker| {
+                let Some(tab) = worker.tab_id.as_deref() else {
+                    return Activity::default();
+                };
+                let activity = crate::store::log_path(&worker.session_id, tab)
+                    .ok()
+                    .and_then(|path| incremental_transcript_activity(&worker.session_id, tab, &path));
+                let mut activity = match activity {
+                    Some(activity) => activity,
+                    // Unread is not idle: no stall is called on no evidence.
+                    None => {
+                        return Activity {
+                            command_running: true,
+                            ..Activity::default()
+                        };
+                    }
+                };
+                activity.busy =
+                    worker_busy_from_sample(sample.as_ref(), &worker.session_id, tab);
+                activity
+            })
+            .collect()
     }
 
     fn fill_later(&self) {
@@ -624,7 +814,10 @@ impl Host for ManagerHost {
         std::thread::spawn(move || loop {
             std::thread::sleep(WATCH_EVERY);
             let asked = WATCHER.lock().unwrap_or_else(|error| error.into_inner()).1;
-            let more = engine::watch(&host);
+            let more = {
+                let _resource_scope = WatchResourceScope::enter();
+                engine::watch(&host)
+            };
             let mut watcher = WATCHER.lock().unwrap_or_else(|error| error.into_inner());
             if !more && watcher.1 == asked {
                 watcher.0 = false;
@@ -1045,5 +1238,59 @@ mod tests {
         drop(first);
         waiting.join().unwrap();
         assert!(got.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn incremental_transcript_activity_reads_only_appended_events_and_matches_full_scan() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("worker-transcript.jsonl");
+        let turn_start = event(1, "2026-11-28T01:00:00Z", json!({"type": "turn_started"}));
+        let tool_start = event(
+            2,
+            "2026-11-28T01:01:00Z",
+            json!({"type": "tool_call_started", "callId": "c1", "name": "Bash", "toolType": "shell", "input": {"command": "cargo test"}}),
+        );
+        std::fs::write(
+            &path,
+            format!(
+                "{}\n{}\n",
+                serde_json::to_string(&turn_start).unwrap(),
+                serde_json::to_string(&tool_start).unwrap()
+            ),
+        )
+        .unwrap();
+
+        let first = super::incremental_transcript_activity("s-inc-p69", "t-inc-p69", &path).unwrap();
+        assert!(first.command_running);
+        assert_eq!(first.last_ms, super::millis("2026-11-28T01:01:00Z"));
+
+        // Re-reading unchanged file uses cached cursor without losing state.
+        let cached = super::incremental_transcript_activity("s-inc-p69", "t-inc-p69", &path).unwrap();
+        assert_eq!(cached.command_running, first.command_running);
+        assert_eq!(cached.last_ms, first.last_ms);
+
+        // Appending tool_call_completed updates activity incrementally.
+        let tool_done = event(
+            3,
+            "2026-11-28T01:02:00Z",
+            json!({"type": "tool_call_completed", "callId": "c1", "result": {"text": "ok"}}),
+        );
+        let mut f = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        writeln!(f, "{}", serde_json::to_string(&tool_done).unwrap()).unwrap();
+        drop(f);
+
+        let updated = super::incremental_transcript_activity("s-inc-p69", "t-inc-p69", &path).unwrap();
+        assert!(!updated.command_running);
+        assert_eq!(updated.last_ms, super::millis("2026-11-28T01:02:00Z"));
+
+        // Matches full `activity_of` parse.
+        let all: Vec<AgentEvent> = std::fs::read_to_string(&path)
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        let full = activity_of(&all);
+        assert_eq!((updated.command_running, updated.last_ms), (full.command_running, full.last_ms));
     }
 }

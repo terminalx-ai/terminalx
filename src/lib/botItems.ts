@@ -62,6 +62,7 @@ interface State {
 const EMPTY: State = { needs: null, lists: {}, items: {}, itemErrors: {}, itemLoaded: {}, itemLoading: {}, error: null, opening: null, needsError: null };
 let state: State = EMPTY;
 const listeners = new Set<() => void>();
+const __subscribe_listeners = (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; };
 
 function set(patch: Partial<State>) {
   state = { ...state, ...patch };
@@ -246,10 +247,7 @@ export function noteBotSessions(sessions: readonly SessionEntry[]) {
 
 function useStore(): State {
   return useSyncExternalStore(
-    (listener) => {
-      listeners.add(listener);
-      return () => listeners.delete(listener);
-    },
+    __subscribe_listeners,
     () => state,
     () => state,
   );

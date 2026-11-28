@@ -479,6 +479,7 @@ export function daysText(days: number): string {
 /** `organization:workspace` ids deleted in this run of the app: by a delete from here, or a tombstone in a list. */
 const deletedHere = new Set<string>();
 const deletedListeners = new Set<() => void>();
+const __subscribe_deletedListeners = (listener: () => void) => { deletedListeners.add(listener); return () => { deletedListeners.delete(listener); }; };
 
 /** Remember that a workspace was deleted, so a view still open on it says so instead of waiting for it. */
 export function noteCloudWorkspaceDeleted(orgId: string, workspaceId: string): void {
@@ -502,10 +503,7 @@ export function cloudWorkspaceDeleted(orgId: string, workspaceId: string): boole
 
 export function useCloudWorkspaceDeleted(orgId: string, workspaceId: string): boolean {
   return useSyncExternalStore(
-    (listener) => {
-      deletedListeners.add(listener);
-      return () => deletedListeners.delete(listener);
-    },
+    __subscribe_deletedListeners,
     () => cloudWorkspaceDeleted(orgId, workspaceId),
   );
 }

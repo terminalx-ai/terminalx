@@ -380,6 +380,12 @@ try {
         Set-Item Function:\Get-TerminalXTopLevelWindowAtPoint $origHitTest.ScriptBlock
     }
 
+    # P-77: analytical screenshot scaling helper & pre-downscale before first PNG encode
+    $nextScale = Get-TerminalXNextScreenshotScale 0.5 2048000 900000 0.25
+    Assert-TestEqual ($nextScale -gt 0.25 -and $nextScale -lt 0.35) $true "analytical next scale jumps straight toward budget"
+    Assert-TestEqual (Get-TerminalXNextScreenshotScale 0.25 2048000 900000 0.25) $null "analytical next scale stops at minScale floor"
+    Assert-TestEqual (Get-TerminalXNextScreenshotScale 0.5 800000 900000 0.25) $null "analytical next scale returns null when within budget"
+
     Write-Output "windows-snapshot-render-tests-ok"
 } finally {
     Remove-Item -LiteralPath $operationPath -Force -ErrorAction SilentlyContinue

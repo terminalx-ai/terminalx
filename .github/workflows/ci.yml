@@ -909,12 +909,14 @@ jobs:
           restore-keys: |
             ci-v5-machine-compat-main-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.rustc }}-${{ hashFiles('src-tauri/Cargo.lock') }}
             ci-v5-machine-compat-main-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.rustc }}-
-      # The two newest v* releases before this build's version, each
-      # archive checked against its SHA256SUMS before the runtime comes out.
+      # The two newest v* releases before this build's version, each archive
+      # checked against both its detached offline updater signature (against
+      # the committed public key in src-tauri/tauri.conf.json) and SHA256SUMS
+      # before the runtime comes out.
       - name: Fetch and verify the previous two released runtimes
         env:
           GH_TOKEN: ${{ github.token }}
-        run: python3 -I scripts/machine-compat/fetch_releases.py --out "$RUNNER_TEMP/machine-compat"
+        run: python3 -I scripts/machine-compat/fetch_releases.py --out "$RUNNER_TEMP/machine-compat" --pubkey-config src-tauri/tauri.conf.json
       - name: Build the compatibility matrix
         id: build
         working-directory: src-tauri/serve

@@ -87,7 +87,9 @@ export function useChatFind({ root, scroller, transcript, footerHeight }: {
     const readerKey = (event: KeyboardEvent) => {
       if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(event.key)) stopFollowing();
     };
+    let disposed = false;
     const paint = () => {
+      if (disposed) return;
       const all: Range[] = [];
       let chosen: Range | undefined;
       for (const field of chat.querySelectorAll<HTMLElement>("[data-chat-search]")) {
@@ -96,7 +98,7 @@ export function useChatFind({ root, scroller, transcript, footerHeight }: {
         all.push(...ranges);
         if (field.id === activeId) chosen = ranges[occurrence ?? 0];
       }
-      if (native) {
+      if (native && typeof Highlight !== "undefined" && typeof CSS !== "undefined" && CSS.highlights) {
         CSS.highlights.set(name, new Highlight(...all));
         const highlight = new Highlight(...(chosen ? [chosen] : []));
         highlight.priority = 1;
@@ -111,28 +113,39 @@ export function useChatFind({ root, scroller, transcript, footerHeight }: {
       if (!native) setRects(all.flatMap((range) => searchRangeRects(range, chat, footerHeight).map((rect) => ({ ...rect, active: range === chosen }))));
     };
     paint();
+    let rafId: number | null = null;
+    const schedulePaint = () => {
+      if (rafId !== null) return;
+      rafId = requestAnimationFrame(() => {
+        rafId = null;
+        paint();
+      });
+    };
     // Markdown syntax highlighting and virtual rows can finish after the find bar's commit.
-    const observer = new MutationObserver(paint);
+    // Coalesce burst mutations during streaming to at most one DOM re-scan per animation frame.
+    const observer = new MutationObserver(schedulePaint);
     observer.observe(chat, { childList: true, characterData: true, subtree: true });
     chat.addEventListener("wheel", stopFollowing, { passive: true });
     chat.addEventListener("touchstart", stopFollowing, { passive: true });
     chat.addEventListener("pointerdown", stopFollowing);
     chat.addEventListener("keydown", readerKey);
-    const resize = new ResizeObserver(paint);
+    const resize = new ResizeObserver(schedulePaint);
     if (!native) {
       resize.observe(chat);
-      chat.addEventListener("scroll", paint, true);
-      window.addEventListener("resize", paint);
+      chat.addEventListener("scroll", schedulePaint, true);
+      window.addEventListener("resize", schedulePaint);
     }
     return () => {
+      disposed = true;
+      if (rafId !== null) cancelAnimationFrame(rafId);
       observer.disconnect();
       chat.removeEventListener("wheel", stopFollowing);
       chat.removeEventListener("touchstart", stopFollowing);
       chat.removeEventListener("pointerdown", stopFollowing);
       chat.removeEventListener("keydown", readerKey);
       resize.disconnect();
-      chat.removeEventListener("scroll", paint, true);
-      window.removeEventListener("resize", paint);
+      chat.removeEventListener("scroll", schedulePaint, true);
+      window.removeEventListener("resize", schedulePaint);
       if (typeof CSS !== "undefined" && CSS.highlights) {
         CSS.highlights.delete(name);
         CSS.highlights.delete(`${name}-active`);

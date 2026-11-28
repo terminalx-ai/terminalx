@@ -700,25 +700,30 @@ impl OpenCode {
             "text" | "reasoning" => {
                 let reasoning = part["type"] == "reasoning";
                 let key = if reasoning { format!("r:{id}") } else { id.clone() };
-                let full = part["text"].as_str().unwrap_or("").to_string();
-                let prev = self.seen.get(&key).cloned().unwrap_or_default();
+                let full = part["text"].as_str().unwrap_or("");
                 let mut out = Vec::new();
-                if full.len() > prev.len() && full.starts_with(&prev) {
-                    let delta = full[prev.len()..].to_string();
-                    out.push(Action::Emit(if reasoning {
-                        Payload::Delta(Delta::ThinkingDelta { block: block(&key), text: delta })
-                    } else {
-                        Payload::Delta(Delta::TextDelta { block: block(&key), text: delta })
-                    }));
+                let entry = self.seen.entry(key.clone()).or_default();
+                if let Some(delta) = full.strip_prefix(entry.as_str()) {
+                    if !delta.is_empty() {
+                        out.push(Action::Emit(if reasoning {
+                            Payload::Delta(Delta::ThinkingDelta { block: block(&key), text: delta.to_owned() })
+                        } else {
+                            Payload::Delta(Delta::TextDelta { block: block(&key), text: delta.to_owned() })
+                        }));
+                        entry.push_str(delta);
+                    }
+                } else if entry.as_str() != full {
+                    entry.clear();
+                    entry.push_str(full);
                 }
-                self.seen.insert(key.clone(), full.clone());
                 let finished = !part["time"]["end"].is_null();
                 if finished && !self.committed.get(&key).copied().unwrap_or(false) && !full.is_empty() {
                     self.committed.insert(key.clone(), true);
+                    let text = full.to_owned();
                     out.push(Action::Emit(if reasoning {
-                        Payload::Reasoning { block: Some(block(&key)), text: full }
+                        Payload::Reasoning { block: Some(block(&key)), text }
                     } else {
-                        Payload::AssistantText { block: Some(block(&key)), text: full }
+                        Payload::AssistantText { block: Some(block(&key)), text }
                     }));
                 }
                 out
@@ -1005,17 +1010,32 @@ fn bounded_http_with_limits(
     }
     // Reading is not another mutation. No policy/session/runtime guard spans
     // response waits. Original callback admission is still required afterward.
+    // Switch back to blocking reads with bounded timeout slices instead of
+    // busy-polling nonblocking WouldBlock every 5ms.
+    if stream.set_nonblocking(false).is_err() {
+        return PhysicalOutcome::Unknown;
+    }
+    const READ_SLICE: Duration = Duration::from_millis(200);
     let mut response = Vec::new();
     let mut buffer = [0; CHUNK];
     loop {
-        if !current() || Instant::now() >= deadline { return PhysicalOutcome::Unknown; }
+        if !current() {
+            return PhysicalOutcome::Unknown;
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return PhysicalOutcome::Unknown;
+        }
+        if stream.set_read_timeout(Some(remaining.min(READ_SLICE))).is_err() {
+            return PhysicalOutcome::Unknown;
+        }
         match stream.read(&mut buffer) {
             Ok(0) => return (limits.parse)(&response).unwrap_or(PhysicalOutcome::Unknown),
             Ok(n) => {
                 if response.len() + n > MAX { return PhysicalOutcome::Unknown; }
                 response.extend_from_slice(&buffer[..n]);
             }
-            Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted) => pause(),
+            Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut | std::io::ErrorKind::Interrupted) => continue,
             Err(_) => return PhysicalOutcome::Unknown,
         }
     }

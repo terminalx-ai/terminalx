@@ -55,6 +55,7 @@ export interface TabRequest {
 
 let state: State = { agentHandoff: null, workspaceRestore: null, workspaceRemove: null, bypass: null, renameSession: null, moveToProject: null, linkIssue: null, linkPr: null, worktreeCleanup: false, renameTab: null, closeTabs: null };
 const listeners = new Set<() => void>();
+const __subscribe_listeners = (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; };
 function set(patch: Partial<State>) {
   state = { ...state, ...patch };
   for (const l of listeners) l();
@@ -62,10 +63,7 @@ function set(patch: Partial<State>) {
 
 export function useDialogs(): State {
   return useSyncExternalStore(
-    (cb) => {
-      listeners.add(cb);
-      return () => listeners.delete(cb);
-    },
+    __subscribe_listeners,
     () => state,
     () => state,
   );

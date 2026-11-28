@@ -28,6 +28,94 @@ const HOTKEY_MODIFIERS: &[&str] = &[
     "win",
 ];
 
+const ALLOWED_NAMED_KEYS: &[&str] = &[
+    "return",
+    "enter",
+    "tab",
+    "escape",
+    "esc",
+    "backspace",
+    "delete",
+    "forwarddelete",
+    "insert",
+    "space",
+    "left",
+    "right",
+    "up",
+    "down",
+    "home",
+    "end",
+    "pageup",
+    "page_up",
+    "pagedown",
+    "page_down",
+    "f1",
+    "f2",
+    "f3",
+    "f4",
+    "f5",
+    "f6",
+    "f7",
+    "f8",
+    "f9",
+    "f10",
+    "f11",
+    "f12",
+    "f13",
+    "f14",
+    "f15",
+    "f16",
+    "f17",
+    "f18",
+    "f19",
+    "f20",
+    "f21",
+    "f22",
+    "f23",
+    "f24",
+    "plus",
+    "minus",
+    "equal",
+    "comma",
+    "period",
+    "slash",
+    "backslash",
+    "bracketleft",
+    "bracketright",
+    "semicolon",
+    "apostrophe",
+    "grave",
+    "quoteleft",
+    "underscore",
+    "bar",
+    "colon",
+    "less",
+    "greater",
+    "question",
+    "exclam",
+    "at",
+    "numbersign",
+    "dollar",
+    "percent",
+    "asciicircum",
+    "ampersand",
+    "asterisk",
+    "parenleft",
+    "parenright",
+    "braceleft",
+    "braceright",
+    "asciitilde",
+    "quotedbl",
+    "kp_enter",
+    "iso_left_tab",
+    "print",
+    "pause",
+    "menu",
+    "caps_lock",
+    "num_lock",
+    "scroll_lock",
+];
+
 pub const HOTKEY_HINT: &str =
     "Hotkey requires a modifier and one key, e.g. CmdOrCtrl+A. Use press-key for a single key.";
 pub const PRESS_KEY_HINT: &str =
@@ -42,16 +130,58 @@ fn normalize_hotkey_part(part: &str) -> String {
         .collect()
 }
 
+fn is_hotkey_modifier(part: &str) -> bool {
+    // Leading hyphens must never be normalized away into a modifier name (e.g. `--ctrl`).
+    if part.starts_with('-') || part.starts_with('_') {
+        return false;
+    }
+    HOTKEY_MODIFIERS.contains(&normalize_hotkey_part(part).as_str())
+}
+
+fn is_valid_hotkey_key_token(token: &str) -> bool {
+    if token.is_empty() || is_hotkey_modifier(token) {
+        return false;
+    }
+    let mut chars = token.chars();
+    if let (Some(ch), None) = (chars.next(), chars.next()) {
+        return ch.is_ascii_alphanumeric()
+            || matches!(
+                ch,
+                '=' | '-' | '[' | ']' | '\'' | ';' | '\\' | ',' | '.' | '/' | '`'
+            );
+    }
+    if token.starts_with('-') {
+        return false;
+    }
+    ALLOWED_NAMED_KEYS.contains(&token.to_ascii_lowercase().as_str())
+}
+
+fn is_valid_press_key_token(token: &str) -> bool {
+    let mut chars = token.chars();
+    if let (Some(ch), None) = (chars.next(), chars.next()) {
+        return ch.is_ascii() && !ch.is_ascii_control();
+    }
+    is_valid_hotkey_key_token(token)
+}
+
 pub fn hotkey_validation_message(key: &str) -> Option<&'static str> {
     let parts: Vec<&str> = key.split('+').map(str::trim).collect();
     if parts.len() < 2 || parts.iter().any(|part| part.is_empty()) {
         return Some(HOTKEY_HINT);
     }
-    let key_parts = parts
-        .iter()
-        .filter(|part| !HOTKEY_MODIFIERS.contains(&normalize_hotkey_part(part).as_str()))
-        .count();
-    (key_parts != 1).then_some(HOTKEY_HINT)
+    let (key_part, modifier_parts) = match parts.split_last() {
+        Some((last, rest)) if !rest.is_empty() => (*last, rest),
+        _ => return Some(HOTKEY_HINT),
+    };
+    // Enforce modifier-first ordering and reject unknown/flag-like tokens
+    // so crafted inputs like `--window+ctrl` or `a+ctrl` never reach helpers.
+    if !modifier_parts.iter().all(|part| is_hotkey_modifier(part)) {
+        return Some(HOTKEY_HINT);
+    }
+    if !is_valid_hotkey_key_token(key_part) {
+        return Some(HOTKEY_HINT);
+    }
+    None
 }
 
 pub fn press_key_validation_message(key: &str) -> Option<&'static str> {
@@ -59,7 +189,13 @@ pub fn press_key_validation_message(key: &str) -> Option<&'static str> {
     if trimmed.is_empty() {
         return Some(PRESS_KEY_HINT);
     }
-    (trimmed != "+" && trimmed.contains('+')).then_some(PRESS_KEY_HINT)
+    if trimmed != "+" && trimmed.contains('+') {
+        return Some(PRESS_KEY_HINT);
+    }
+    if !is_valid_press_key_token(trimmed) {
+        return Some(PRESS_KEY_HINT);
+    }
+    None
 }
 
 pub fn click_modifiers_validation_message(modifiers: &str) -> Option<&'static str> {
@@ -376,6 +512,51 @@ mod tests {
         assert_eq!(click_modifiers_validation_message("CmdOrCtrl+Shift"), None);
         assert_eq!(click_modifiers_validation_message("CmdOrCtrl+A"), Some(CLICK_MODIFIERS_HINT));
         assert_eq!(click_modifiers_validation_message(""), Some(CLICK_MODIFIERS_HINT));
+    }
+
+    #[test]
+    fn s49_hotkey_enforces_modifier_first_order_and_keysym_allowlist() {
+        // Valid hotkeys across letters, digits, function keys, navigation, and punctuation
+        for valid in [
+            "CmdOrCtrl+A",
+            "Cmd Or Ctrl+Shift+P",
+            "Ctrl+Alt+Delete",
+            "Alt+F4",
+            "Ctrl+-",
+            "Ctrl+=",
+            "Ctrl+plus",
+            "Super+Return",
+            "Shift+Page_Down",
+        ] {
+            assert_eq!(hotkey_validation_message(valid), None, "expected {valid} to be valid");
+        }
+
+        // Option-injection attempts, inverted modifier ordering, and unknown keysyms rejected
+        for invalid in [
+            "--window+ctrl",
+            "--repeat+ctrl",
+            "--clearmodifiers+ctrl",
+            "--ctrl+a",
+            "ctrl+--window",
+            "a+ctrl",
+            "ctrl+a+shift",
+            "ctrl+a+b",
+            "ctrl+unknown_key",
+            "ctrl+a;id",
+            "ctrl+foo bar",
+        ] {
+            assert_eq!(
+                hotkey_validation_message(invalid),
+                Some(HOTKEY_HINT),
+                "expected {invalid} to be rejected"
+            );
+        }
+
+        // Press-key also rejects option-injection flags and unknown multi-char tokens
+        assert_eq!(press_key_validation_message("F12"), None);
+        assert_eq!(press_key_validation_message("-"), None);
+        assert_eq!(press_key_validation_message("--window"), Some(PRESS_KEY_HINT));
+        assert_eq!(press_key_validation_message("not_a_real_keysym"), Some(PRESS_KEY_HINT));
     }
 
     #[test]

@@ -33,6 +33,8 @@ it("finishes a callback that arrives twice once, giving both the same outcome", 
 it("still finishes a new sign-in's own callback", async () => {
   await finishSignIn("terminalx://auth/callback?code=two&state=s");
   mocks.store.set("terminalx.cloud.pkce.verifier", "v2");
-  await finishSignIn("terminalx://auth/callback?code=three&state=s");
+  mocks.store.set("terminalx.cloud.pkce.state", "s2");
+  mocks.store.set("terminalx.cloud.pkce.nonce", "n2");
+  await finishSignIn("terminalx://auth/callback?code=three&state=s2");
   expect(mocks.exchange).toHaveBeenCalledTimes(2);
 });

@@ -76,6 +76,7 @@ export async function registerCloudPushToken(params: {
         pushToken: params.pushToken,
         ...(params.platform === "ios" && params.apnsEnvironment ? { apnsEnvironment: params.apnsEnvironment } : {}),
       }),
+      redirect: "error",
       signal: controller.signal,
     });
     return response.ok;
@@ -108,6 +109,7 @@ export async function unregisterCloudPushToken(params: {
         relayDeviceId: params.relayDeviceId,
         ...(params.platform ? { platform: params.platform } : {}),
       }),
+      redirect: "error",
       signal: controller.signal,
     });
     return response.ok;

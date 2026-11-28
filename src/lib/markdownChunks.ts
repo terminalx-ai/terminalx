@@ -1,12 +1,13 @@
-const CHUNK = 3000;
+const CHUNK = 1500;
 
 /**
  * A long stream is cut into settled chunks at paragraph breaks outside code
  * fences, so every delta re-parses only the tail instead of the whole text.
- * Chunks are keyed by content, which keeps their rendered output memoised.
+ * Chunks are keyed by index while settled prefixes stay immutable, keeping
+ * their rendered output memoised.
  */
 export function chunkStream(text: string): string[] {
-  if (text.length < CHUNK * 2) return [text];
+  if (text.length < CHUNK) return [text];
   const out: string[] = [];
   let start = 0;
   let fences = 0;

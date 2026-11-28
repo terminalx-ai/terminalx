@@ -3,7 +3,7 @@ import { isMac, thisComputer } from "@/lib/platform";
 import { RegisteredSetting } from "./settingsRegistry";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openExternalWebUrl } from "@/lib/externalUrl";
 import { Check, Download, ExternalLink, Trash2, X } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
@@ -189,13 +189,13 @@ export function TranscriptionTab() {
               live={m.liveWords}
               meta={
                 <>
-                  <button type="button" className="inline-flex items-center gap-1 underline decoration-hairline-strong underline-offset-2 hover:text-foreground" onClick={() => void openUrl(m.page)}>
+                  <button type="button" className="inline-flex items-center gap-1 underline decoration-hairline-strong underline-offset-2 hover:text-foreground" onClick={() => void openExternalWebUrl(m.page)}>
                     {m.languages}
                     <ExternalLink className="size-3" />
                   </button>
                   <span> · {mb(m.sizeBytes)}</span>
                   <span> · </span>
-                  <button type="button" className="text-faint underline decoration-hairline-strong underline-offset-2 hover:text-foreground" onClick={() => void openUrl(m.licenseUrl)}>
+                  <button type="button" className="text-faint underline decoration-hairline-strong underline-offset-2 hover:text-foreground" onClick={() => void openExternalWebUrl(m.licenseUrl)}>
                     {m.license}
                   </button>
                 </>

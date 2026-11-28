@@ -56,3 +56,37 @@ it("offers copying for host file references without asking the phone to open a l
   expect(mocks.copy).toHaveBeenCalledWith("/workspace/src/main.ts:12");
   expect(mocks.open).not.toHaveBeenCalled();
 });
+
+it("confirms the real destination host before opening a masked Markdown link (S-60)", async () => {
+  const href = "https://evil.example/steal?token=1";
+  await render(<ChatLink href={href} label="https://trusted.example/docs">https://trusted.example/docs</ChatLink>);
+  await act(async () => (container.querySelector('[role="link"]') as HTMLElement).click());
+  expect(mocks.open).not.toHaveBeenCalled();
+  expect(mocks.alert).toHaveBeenCalledTimes(1);
+  const [title, message, buttons] = mocks.alert.mock.calls[0];
+  expect(title).toBe("Open external link?");
+  expect(message).toContain("evil.example");
+  expect(message).toContain(href);
+  await act(async () => buttons.find((b: any) => b.text === "Open").onPress());
+  expect(mocks.open).toHaveBeenCalledWith(href);
+});
+
+it("confirms before dialing a tel: link or opening a mailto: link (S-60)", async () => {
+  await render(<LinkedText>Call tel:+15551234567 or email mailto:sec@example.com now.</LinkedText>);
+  const links = [...container.querySelectorAll('[role="link"]')] as HTMLElement[];
+  expect(links).toHaveLength(2);
+
+  await act(async () => links[0].click());
+  expect(mocks.open).not.toHaveBeenCalled();
+  expect(mocks.alert.mock.calls[0][0]).toBe("Call number?");
+  expect(mocks.alert.mock.calls[0][1]).toContain("+15551234567");
+  await act(async () => mocks.alert.mock.calls[0][2].find((b: any) => b.text === "Call").onPress());
+  expect(mocks.open).toHaveBeenCalledWith("tel:+15551234567");
+
+  mocks.open.mockClear();
+  mocks.alert.mockClear();
+  await act(async () => links[1].click());
+  expect(mocks.open).not.toHaveBeenCalled();
+  expect(mocks.alert.mock.calls[0][0]).toBe("Open email?");
+  expect(mocks.alert.mock.calls[0][1]).toContain("sec@example.com");
+});

@@ -37,6 +37,7 @@ let state: StatusState = {
   ready: false,
 };
 const listeners = new Set<() => void>();
+const __subscribe_listeners = (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; };
 
 /** A refresh of its own, after any already out: that one asked before whatever this follows. */
 async function refreshUsageAfterFlight(): Promise<void> {
@@ -78,10 +79,7 @@ function set(patch: Partial<StatusState>) {
 
 export function useStatus(): StatusState {
   return useSyncExternalStore(
-    (listener) => {
-      listeners.add(listener);
-      return () => listeners.delete(listener);
-    },
+    __subscribe_listeners,
     () => state,
     () => state,
   );
@@ -90,10 +88,7 @@ export function useStatus(): StatusState {
 /** Narrow selector subscription: skips re-renders when unrelated status fields (e.g. 2s resource samples) change. */
 export function useStatusSelector<T>(selector: (status: StatusState) => T): T {
   return useSyncExternalStore(
-    (listener) => {
-      listeners.add(listener);
-      return () => listeners.delete(listener);
-    },
+    __subscribe_listeners,
     () => selector(state),
     () => selector(state),
   );

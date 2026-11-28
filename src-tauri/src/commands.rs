@@ -1954,9 +1954,13 @@ pub struct ProjectsResponse {
 }
 
 #[tauri::command]
-pub fn list_projects() -> CmdResult<ProjectsResponse> {
-    let (projects, last_selected) = projects::list().map_err(err)?;
-    Ok(ProjectsResponse { projects, last_selected })
+pub async fn list_projects() -> CmdResult<ProjectsResponse> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let (projects, last_selected) = projects::list().map_err(err)?;
+        Ok(ProjectsResponse { projects, last_selected })
+    })
+    .await
+    .map_err(err)?
 }
 
 /// Preview effective copy patterns, including unsaved edits. No file contents leave Rust.
@@ -1978,37 +1982,51 @@ pub async fn repository_folders(path: String, measure: bool) -> CmdResult<crate:
 pub(crate) const PROJECTS_CHANGED_EVENT: &str = "projects_changed";
 
 #[tauri::command]
-pub fn add_project(app: AppHandle, window: tauri::WebviewWindow, path: String) -> CmdResult<Project> {
+pub async fn add_project(app: AppHandle, window: tauri::WebviewWindow, path: String) -> CmdResult<Project> {
     require_main_window(&window)?;
-    let project = projects::add(&path).map_err(err)?;
-    let _ = app.emit(PROJECTS_CHANGED_EVENT, &());
-    Ok(project)
+    tauri::async_runtime::spawn_blocking(move || {
+        let project = projects::add(&path).map_err(err)?;
+        let _ = app.emit(PROJECTS_CHANGED_EVENT, &());
+        Ok(project)
+    })
+    .await
+    .map_err(err)?
 }
 
 /// The folder the sidebar's New chat runs in: a plain directory in the store,
 /// so a chat needs no project of the user's and no worktree.
 #[tauri::command]
-pub fn chats_dir() -> CmdResult<String> {
-    let dir = store::ensure_dir(store::root().map_err(err)?.join("Chats")).map_err(err)?;
-    // Its agents are told to start a branch as a worktree, not in the reader's checkout.
-    if let Err(error) = crate::chat_link::ensure_instructions(&dir) {
-        log::warn!("write the chats' agent note: {error:#}");
-    }
-    // Canonical, as a session's project path is, so the sidebar can match them.
-    Ok(crate::paths::canonicalize(&dir).unwrap_or(dir).to_string_lossy().into_owned())
+pub async fn chats_dir() -> CmdResult<String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let dir = store::ensure_dir(store::root().map_err(err)?.join("Chats")).map_err(err)?;
+        // Its agents are told to start a branch as a worktree, not in the reader's checkout.
+        if let Err(error) = crate::chat_link::ensure_instructions(&dir) {
+            log::warn!("write the chats' agent note: {error:#}");
+        }
+        // Canonical, as a session's project path is, so the sidebar can match them.
+        Ok(crate::paths::canonicalize(&dir).unwrap_or(dir).to_string_lossy().into_owned())
+    })
+    .await
+    .map_err(err)?
 }
 
 #[tauri::command]
-pub fn remove_project(app: AppHandle, window: tauri::WebviewWindow, path: String) -> CmdResult<()> {
+pub async fn remove_project(app: AppHandle, window: tauri::WebviewWindow, path: String) -> CmdResult<()> {
     require_main_window(&window)?;
-    projects::remove(&path).map_err(err)?;
-    let _ = app.emit(PROJECTS_CHANGED_EVENT, &());
-    Ok(())
+    tauri::async_runtime::spawn_blocking(move || {
+        projects::remove(&path).map_err(err)?;
+        let _ = app.emit(PROJECTS_CHANGED_EVENT, &());
+        Ok(())
+    })
+    .await
+    .map_err(err)?
 }
 
 #[tauri::command]
-pub fn select_project(path: String) -> CmdResult<()> {
-    projects::set_last_selected(&path).map_err(err)
+pub async fn select_project(path: String) -> CmdResult<()> {
+    tauri::async_runtime::spawn_blocking(move || projects::set_last_selected(&path).map_err(err))
+        .await
+        .map_err(err)?
 }
 
 /// The event a running local clone reports its progress on.
@@ -2042,8 +2060,10 @@ pub fn project_clone_cancel(id: String) {
 }
 
 #[tauri::command]
-pub fn project_start_defaults(parent: Option<String>) -> crate::project_start::StartDefaults {
-    crate::project_start::defaults(parent.as_deref())
+pub async fn project_start_defaults(parent: Option<String>) -> CmdResult<crate::project_start::StartDefaults> {
+    tauri::async_runtime::spawn_blocking(move || crate::project_start::defaults(parent.as_deref()))
+        .await
+        .map_err(err)
 }
 
 /// "Create a project": a new Git repository at `parent/name` holding `template`'s
@@ -2056,8 +2076,10 @@ pub async fn project_create(window: tauri::WebviewWindow, parent: String, name: 
 
 /// The templates a project can start from: the built-in ones, then the reader's own.
 #[tauri::command]
-pub fn project_templates() -> StartResult<Vec<crate::project_templates::TemplateInfo>> {
-    crate::project_templates::list()
+pub async fn project_templates() -> StartResult<Vec<crate::project_templates::TemplateInfo>> {
+    tauri::async_runtime::spawn_blocking(crate::project_templates::list)
+        .await
+        .map_err(start_failure)?
 }
 
 /// Keep the folder at `path` as a template for new projects.
@@ -2069,18 +2091,27 @@ pub async fn project_template_add(window: tauri::WebviewWindow, path: String) ->
 
 /// Forget a template the reader added; its folder is left as it is.
 #[tauri::command]
-pub fn project_template_remove(window: tauri::WebviewWindow, id: String) -> StartResult<()> {
+pub async fn project_template_remove(window: tauri::WebviewWindow, id: String) -> StartResult<()> {
     require_main_window(&window).map_err(start_failure)?;
-    crate::project_templates::remove(&id)
+    tauri::async_runtime::spawn_blocking(move || crate::project_templates::remove(&id))
+        .await
+        .map_err(start_failure)?
 }
 
 // ------------------------------------------------------------------ sessions
 
 #[tauri::command]
-pub fn list_sessions(app: tauri::AppHandle) -> CmdResult<Vec<SessionEntry>> {
-    store::message_activity::backfill(std::sync::Arc::new(app));
-    crate::session_ops::backfill_checkout_identities();
-    store::conversation_titles::backfill().map_err(err)
+pub async fn list_sessions(app: tauri::AppHandle) -> CmdResult<Vec<SessionEntry>> {
+    tauri::async_runtime::spawn_blocking(move || {
+        store::message_activity::backfill(std::sync::Arc::new(app));
+        crate::session_ops::backfill_checkout_identities();
+        let sessions = index::load().map_err(err)?;
+        // Backfill unnamed conversation titles asynchronously off the UI thread (P-17).
+        store::conversation_titles::spawn_backfill_if_needed(&sessions);
+        Ok(sessions)
+    })
+    .await
+    .map_err(err)?
 }
 
 #[tauri::command]
@@ -2230,8 +2261,15 @@ pub async fn create_session(app: AppHandle, state: State<'_, AppState>, req: cra
     let crate::session_ops::OnAccount { mut req, account } = req;
     let account = crate::session_ops::requested_account(account.as_deref())?;
     let privacy = crate::github_process::ticket();
-    if !req.project_path.starts_with("cloud:") && crate::git::is_repo(std::path::Path::new(&req.project_path))
-        && !crate::configuration_commands::review(&app, &req.project_path).await? {
+    let check_path = req.project_path.clone();
+    let is_local_repo = if check_path.starts_with("cloud:") {
+        false
+    } else {
+        tauri::async_runtime::spawn_blocking(move || crate::git::is_repo(std::path::Path::new(&check_path)))
+            .await
+            .map_err(err)?
+    };
+    if is_local_repo && !crate::configuration_commands::review(&app, &req.project_path).await? {
         return Err("Repository configuration was not trusted. No workspace was created.".into());
     }
     let sessions = state.sessions().map_err(err)?;
@@ -2317,26 +2355,36 @@ pub async fn remove_tab(app: AppHandle, session_id: String, tab_id: String) -> C
 
 /// Bring a closed tab back into its session, with its conversation.
 #[tauri::command]
-pub fn reopen_tab(app: AppHandle, session_id: String, tab_id: String) -> CmdResult<TabEntry> {
-    let tab = crate::session_ops::reopen_tab_entry(&session_id, &tab_id)?;
-    announce_session(&app, &session_id);
-    announce_tabs(&app);
-    Ok(tab)
+pub async fn reopen_tab(app: AppHandle, session_id: String, tab_id: String) -> CmdResult<TabEntry> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let tab = crate::session_ops::reopen_tab_entry(&session_id, &tab_id)?;
+        announce_session(&app, &session_id);
+        announce_tabs(&app);
+        Ok(tab)
+    })
+    .await
+    .map_err(err)?
 }
 
 /// Give an agent tab the reader's own title; `None` (or blank) takes it away,
 /// and the tab goes by its first request again.
 #[tauri::command]
-pub fn rename_tab(app: AppHandle, session_id: String, tab_id: String, title: Option<String>) -> CmdResult<()> {
-    crate::session_ops::rename_tab_entry(&session_id, &tab_id, title)?;
-    announce_session(&app, &session_id);
-    Ok(())
+pub async fn rename_tab(app: AppHandle, session_id: String, tab_id: String, title: Option<String>) -> CmdResult<()> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::session_ops::rename_tab_entry(&session_id, &tab_id, title)?;
+        announce_session(&app, &session_id);
+        Ok(())
+    })
+    .await
+    .map_err(err)?
 }
 
 /// How every workspace's tabs are arranged, and the closed tabs that can be reopened.
 #[tauri::command]
-pub fn tab_state() -> CmdResult<index::TabState> {
-    index::tab_state().map_err(err)
+pub async fn tab_state() -> CmdResult<index::TabState> {
+    tauri::async_runtime::spawn_blocking(|| index::tab_state().map_err(err))
+        .await
+        .map_err(err)?
 }
 
 #[tauri::command]
@@ -2385,12 +2433,16 @@ pub async fn edit_cloud_pins(app: AppHandle, edit: CloudPinsEdit) -> CmdResult<s
 
 /// Save one workspace's tab order, pins, mutes and titles, for every window and every device.
 #[tauri::command]
-pub fn set_tab_layout(app: AppHandle, workspace: String, layout: index::TabLayout) -> CmdResult<()> {
-    for session in index::set_tab_layout(&workspace, layout).map_err(err)? {
-        let _ = app.emit("session_updated", &session);
-    }
-    announce_tabs(&app);
-    Ok(())
+pub async fn set_tab_layout(app: AppHandle, workspace: String, layout: index::TabLayout) -> CmdResult<()> {
+    tauri::async_runtime::spawn_blocking(move || {
+        for session in index::set_tab_layout(&workspace, layout).map_err(err)? {
+            let _ = app.emit("session_updated", &session);
+        }
+        announce_tabs(&app);
+        Ok(())
+    })
+    .await
+    .map_err(err)?
 }
 
 fn patch_session(app: &AppHandle, session_id: &str, patch: crate::session_ops::SessionPatch) -> CmdResult<()> {
@@ -2400,14 +2452,18 @@ fn patch_session(app: &AppHandle, session_id: &str, patch: crate::session_ops::S
 }
 
 #[tauri::command]
-pub fn rename_session(app: AppHandle, session_id: String, title: String) -> CmdResult<()> {
-    patch_session(&app, &session_id, crate::session_ops::SessionPatch { title: Some(title), ..Default::default() })
+pub async fn rename_session(app: AppHandle, session_id: String, title: String) -> CmdResult<()> {
+    tauri::async_runtime::spawn_blocking(move || {
+        patch_session(&app, &session_id, crate::session_ops::SessionPatch { title: Some(title), ..Default::default() })
+    })
+    .await
+    .map_err(err)?
 }
 
 /// Put text on the system clipboard. The webview's own clipboard refuses a
 /// write it does not count as the reader's gesture (a choice in a context
 /// menu, say); the system's has no such rule.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn copy_text(text: String) -> CmdResult<()> {
     use std::io::Write;
     #[cfg(target_os = "macos")]
@@ -2442,26 +2498,34 @@ pub async fn project_overview(project_path: String) -> CmdResult<crate::project_
 /// Take the agent's title for a conversation that still has a made-up one,
 /// and give its tabs the names made for them.
 #[tauri::command]
-pub fn adopt_agent_title(app: AppHandle, session_id: String) -> CmdResult<()> {
-    let named = crate::session_ops::adopt_agent_title(&session_id)?;
-    // Then its tabs, so a lone tab takes the session's new name.
-    let tabs = crate::session_ops::adopt_tab_titles(&session_id)?;
-    if let Some(session) = tabs.or(named) {
-        let _ = app.emit("session_updated", &session);
-    }
-    Ok(())
+pub async fn adopt_agent_title(app: AppHandle, session_id: String) -> CmdResult<()> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let named = crate::session_ops::adopt_agent_title(&session_id)?;
+        // Then its tabs, so a lone tab takes the session's new name.
+        let tabs = crate::session_ops::adopt_tab_titles(&session_id)?;
+        if let Some(session) = tabs.or(named) {
+            let _ = app.emit("session_updated", &session);
+        }
+        Ok(())
+    })
+    .await
+    .map_err(err)?
 }
 
 #[tauri::command]
-pub fn set_session_archived(app: AppHandle, session_id: String, archived: bool) -> CmdResult<()> {
-    set_sessions_archived(app, vec![session_id], archived).map(drop)
+pub async fn set_session_archived(app: AppHandle, session_id: String, archived: bool) -> CmdResult<()> {
+    set_sessions_archived(app, vec![session_id], archived).await.map(drop)
 }
 
 /// Archive or bring back several sessions at once (the sidebar's bulk bar):
 /// all of them, or none when one is not a session (#718).
 #[tauri::command]
-pub fn set_sessions_archived(app: AppHandle, session_ids: Vec<String>, archived: bool) -> CmdResult<Vec<SessionEntry>> {
-    crate::session_archive::set_archived(&app, &session_ids, archived, crate::session_archive::By::Person).map_err(err)
+pub async fn set_sessions_archived(app: AppHandle, session_ids: Vec<String>, archived: bool) -> CmdResult<Vec<SessionEntry>> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::session_archive::set_archived(&app, &session_ids, archived, crate::session_archive::By::Person).map_err(err)
+    })
+    .await
+    .map_err(err)?
 }
 
 /// The session each window shows, by the window's label: the idle sweep
@@ -2528,26 +2592,36 @@ pub async fn archive_idle_sessions(app: AppHandle, state: State<'_, AppState>, k
 
 /// When a finished conversation is archived (#718).
 #[tauri::command]
-pub fn conversation_settings() -> crate::store::settings::ConversationSettings {
-    store::settings::load().conversations
+pub async fn conversation_settings() -> CmdResult<crate::store::settings::ConversationSettings> {
+    tauri::async_runtime::spawn_blocking(|| store::settings::load().conversations)
+        .await
+        .map_err(err)
 }
 
 /// The runtime reads the limit again at its next sweep.
 #[tauri::command]
-pub fn set_archive_idle_days(window: tauri::WebviewWindow, days: u32) -> CmdResult<crate::store::settings::ConversationSettings> {
+pub async fn set_archive_idle_days(window: tauri::WebviewWindow, days: u32) -> CmdResult<crate::store::settings::ConversationSettings> {
     require_main_window(&window)?;
     if !crate::store::settings::ARCHIVE_IDLE_DAYS.contains(&days) {
         return Err(format!("{days} days is not one of the idle limits offered."));
     }
-    let mut settings = store::settings::load();
-    settings.conversations.archive_idle_days = days;
-    store::settings::save(&settings).map_err(err)?;
-    Ok(settings.conversations)
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut settings = store::settings::load();
+        settings.conversations.archive_idle_days = days;
+        store::settings::save(&settings).map_err(err)?;
+        Ok(settings.conversations)
+    })
+    .await
+    .map_err(err)?
 }
 
 #[tauri::command]
-pub fn set_session_pinned(app: AppHandle, session_id: String, pinned: bool) -> CmdResult<()> {
-    patch_session(&app, &session_id, crate::session_ops::SessionPatch { pinned: Some(pinned), ..Default::default() })
+pub async fn set_session_pinned(app: AppHandle, session_id: String, pinned: bool) -> CmdResult<()> {
+    tauri::async_runtime::spawn_blocking(move || {
+        patch_session(&app, &session_id, crate::session_ops::SessionPatch { pinned: Some(pinned), ..Default::default() })
+    })
+    .await
+    .map_err(err)?
 }
 
 #[tauri::command]
@@ -2557,16 +2631,20 @@ pub async fn set_session_status(state: State<'_, crate::AppState>, session_id: S
 }
 
 #[tauri::command]
-pub fn set_active_tab(app: AppHandle, session_id: String, tab_id: String) -> CmdResult<()> {
-    let session = index::update_session(&session_id, |s| {
-        if s.tab(&tab_id).is_some() {
-            s.active_tab = Some(tab_id);
-        }
-        Ok(s.clone())
+pub async fn set_active_tab(app: AppHandle, session_id: String, tab_id: String) -> CmdResult<()> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let session = index::update_session(&session_id, |s| {
+            if s.tab(&tab_id).is_some() {
+                s.active_tab = Some(tab_id);
+            }
+            Ok(s.clone())
+        })
+        .map_err(err)?;
+        let _ = app.emit("session_updated", &session);
+        Ok(())
     })
-    .map_err(err)?;
-    let _ = app.emit("session_updated", &session);
-    Ok(())
+    .await
+    .map_err(err)?
 }
 
 // ---------------------------------------------------------------- quick chats
@@ -2894,6 +2972,32 @@ pub async fn diff_media_content(cwd: String, path: String, tree: Option<String>)
     tauri::async_runtime::spawn_blocking(move || crate::git_media::read(Path::new(&cwd), &path, tree.as_deref(), 16 * 1024 * 1024).map_err(err)).await.map_err(err)?
 }
 
+/// Defense-in-depth containment check for working-tree diff reads (S-29):
+/// refuses relative escapes (`..`), absolute paths, and leaf/parent symlinks
+/// resolving outside the repository root.
+fn working_tree_path_contained(root: &Path, rel: &str) -> bool {
+    use std::path::Component;
+    let rel_path = Path::new(rel);
+    if rel_path.is_absolute()
+        || rel_path
+            .components()
+            .any(|c| matches!(c, Component::ParentDir | Component::RootDir | Component::Prefix(_)))
+    {
+        return false;
+    }
+    let full = root.join(rel_path);
+    match std::fs::symlink_metadata(&full) {
+        Ok(meta) if meta.file_type().is_symlink() => return false,
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return true,
+        Err(_) => return false,
+    }
+    match (crate::paths::canonicalize(root), crate::paths::canonicalize(&full)) {
+        (Ok(real_root), Ok(real_full)) => real_full.starts_with(&real_root),
+        _ => false,
+    }
+}
+
 #[tauri::command]
 pub async fn file_contents_at(cwd: String, path: String, base: String, head: Option<String>) -> CmdResult<FilePair> {
     tauri::async_runtime::spawn_blocking(move || {
@@ -2901,7 +3005,12 @@ pub async fn file_contents_at(cwd: String, path: String, base: String, head: Opt
         let (before, before_size) = git::blob_text_at(p, &base, &path, 4 * 1024 * 1024).map_err(err)?;
         let (after, after_size) = match head {
             Some(h) => git::blob_text_at(p, &h, &path, 4 * 1024 * 1024).map_err(err)?,
-            None => git::working_file_with_size(p, &path),
+            None => {
+                if !working_tree_path_contained(p, &path) {
+                    return Err("Refusing to read working-tree path outside repository root.".into());
+                }
+                git::working_file_with_size(p, &path)
+            }
         };
         Ok(FilePair { before, after, before_size, after_size })
     })
@@ -3260,39 +3369,47 @@ pub struct StatusBarPatch {
 }
 
 #[tauri::command]
-pub fn status_bar_settings() -> crate::store::settings::StatusBarSettings {
-    store::settings::load().status_bar
+pub async fn status_bar_settings() -> CmdResult<crate::store::settings::StatusBarSettings> {
+    tauri::async_runtime::spawn_blocking(|| store::settings::load().status_bar)
+        .await
+        .map_err(err)
 }
 
 #[tauri::command]
-pub fn set_status_bar_settings(app: AppHandle, window: tauri::WebviewWindow, patch: StatusBarPatch) -> CmdResult<crate::store::settings::StatusBarSettings> {
+pub async fn set_status_bar_settings(app: AppHandle, window: tauri::WebviewWindow, patch: StatusBarPatch) -> CmdResult<crate::store::settings::StatusBarSettings> {
     require_main_window(&window)?;
-    let mut settings = store::settings::load();
-    if let Some(value) = patch.visible {
-        settings.status_bar.visible = value;
-    }
-    if let Some(value) = patch.usage {
-        settings.status_bar.usage = value;
-    }
-    if let Some(value) = patch.resources {
-        settings.status_bar.resources = value;
-    }
-    if let Some(value) = patch.percent {
-        settings.status_bar.percent = value;
-    }
-    if let Some(value) = patch.usage_mode {
-        settings.status_bar.usage_mode = value;
-    }
     if let Some(value) = patch.usage_refresh_minutes {
         if !crate::store::settings::USAGE_REFRESH_MINUTES.contains(&value) {
             return Err(format!("Usage cannot refresh every {value} minutes."));
         }
-        settings.status_bar.usage_refresh_minutes = value;
     }
-    store::settings::save(&settings).map_err(err)?;
-    crate::status::set_menu_checked(&app, settings.status_bar.visible);
-    let _ = app.emit(crate::status::SETTINGS_EVENT, &settings.status_bar);
-    Ok(settings.status_bar)
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut settings = store::settings::load();
+        if let Some(value) = patch.visible {
+            settings.status_bar.visible = value;
+        }
+        if let Some(value) = patch.usage {
+            settings.status_bar.usage = value;
+        }
+        if let Some(value) = patch.resources {
+            settings.status_bar.resources = value;
+        }
+        if let Some(value) = patch.percent {
+            settings.status_bar.percent = value;
+        }
+        if let Some(value) = patch.usage_mode {
+            settings.status_bar.usage_mode = value;
+        }
+        if let Some(value) = patch.usage_refresh_minutes {
+            settings.status_bar.usage_refresh_minutes = value;
+        }
+        store::settings::save(&settings).map_err(err)?;
+        crate::status::set_menu_checked(&app, settings.status_bar.visible);
+        let _ = app.emit(crate::status::SETTINGS_EVENT, &settings.status_bar);
+        Ok(settings.status_bar)
+    })
+    .await
+    .map_err(err)?
 }
 
 #[tauri::command]
@@ -3916,8 +4033,10 @@ pub async fn pr_ready(cwd: String, number: u64, url: Option<String>) -> CmdResul
 }
 
 #[tauri::command]
-pub fn gh_available() -> bool {
-    crate::github::available()
+pub async fn gh_available() -> CmdResult<bool> {
+    tauri::async_runtime::spawn_blocking(crate::github::available)
+        .await
+        .map_err(err)
 }
 
 // ------------------------------------------------------------------ terminals
@@ -4099,8 +4218,10 @@ pub fn terminal_perf_reply(id: String, result: serde_json::Value) {
 
 /// Whether the person lets the command line use cloud workspaces (PRO-40).
 #[tauri::command]
-pub fn cloud_control_setting() -> bool {
-    crate::cloud_control::enabled()
+pub async fn cloud_control_setting() -> CmdResult<bool> {
+    tauri::async_runtime::spawn_blocking(crate::cloud_control::enabled)
+        .await
+        .map_err(err)
 }
 
 /// What became of a request to change the switch: what it is now and, when
@@ -4284,8 +4405,10 @@ pub async fn export_file(window: tauri::WebviewWindow, to: String, from: Option<
 }
 
 #[tauri::command]
-pub fn file_mtime(path: String) -> Option<u64> {
-    crate::files::stat_mtime_confined(Path::new(&path))
+pub async fn file_mtime(path: String) -> CmdResult<Option<u64>> {
+    tauri::async_runtime::spawn_blocking(move || crate::files::stat_mtime_confined(Path::new(&path)))
+        .await
+        .map_err(err)
 }
 
 #[tauri::command]
@@ -4388,13 +4511,19 @@ pub async fn dictation_stop(app: AppHandle, state: State<'_, AppState>) -> CmdRe
 // ------------------------------------------------------------------ transcription models
 
 #[tauri::command]
-pub fn transcription_models(state: State<'_, AppState>) -> Vec<crate::transcription::ModelRow> {
-    state.transcription.models()
+pub async fn transcription_models(state: State<'_, AppState>) -> CmdResult<Vec<crate::transcription::ModelRow>> {
+    let transcription = state.transcription.clone();
+    tauri::async_runtime::spawn_blocking(move || transcription.models())
+        .await
+        .map_err(err)
 }
 
 #[tauri::command]
-pub fn transcription_download(app: AppHandle, state: State<'_, AppState>, id: String) -> CmdResult<()> {
-    state.transcription.downloads.start(app, &id).map_err(err)
+pub async fn transcription_download(app: AppHandle, state: State<'_, AppState>, id: String) -> CmdResult<()> {
+    let transcription = state.transcription.clone();
+    tauri::async_runtime::spawn_blocking(move || transcription.downloads.start(app, &id).map_err(err))
+        .await
+        .map_err(err)?
 }
 
 #[tauri::command]
@@ -4403,18 +4532,27 @@ pub fn transcription_cancel_download(state: State<'_, AppState>, id: String) {
 }
 
 #[tauri::command]
-pub fn transcription_delete(state: State<'_, AppState>, id: String) -> CmdResult<()> {
-    state.transcription.delete(&id).map_err(err)
+pub async fn transcription_delete(state: State<'_, AppState>, id: String) -> CmdResult<()> {
+    let transcription = state.transcription.clone();
+    tauri::async_runtime::spawn_blocking(move || transcription.delete(&id).map_err(err))
+        .await
+        .map_err(err)?
 }
 
 #[tauri::command]
-pub fn transcription_set_model(state: State<'_, AppState>, id: String) -> CmdResult<()> {
-    state.transcription.set_model(&id).map_err(err)
+pub async fn transcription_set_model(state: State<'_, AppState>, id: String) -> CmdResult<()> {
+    let transcription = state.transcription.clone();
+    tauri::async_runtime::spawn_blocking(move || transcription.set_model(&id).map_err(err))
+        .await
+        .map_err(err)?
 }
 
 #[tauri::command]
-pub fn transcription_preferences(state: State<'_, AppState>) -> crate::transcription::TranscriptionPreferences {
-    state.transcription.preferences()
+pub async fn transcription_preferences(state: State<'_, AppState>) -> CmdResult<crate::transcription::TranscriptionPreferences> {
+    let transcription = state.transcription.clone();
+    tauri::async_runtime::spawn_blocking(move || transcription.preferences())
+        .await
+        .map_err(err)
 }
 
 /// Enumerates input devices, so it must stay off the IPC thread and must only
@@ -4426,13 +4564,19 @@ pub async fn transcription_inputs(state: State<'_, AppState>) -> CmdResult<Vec<c
 }
 
 #[tauri::command]
-pub fn transcription_set_input(state: State<'_, AppState>, device: Option<String>) -> CmdResult<()> {
-    state.transcription.set_input(device).map_err(err)
+pub async fn transcription_set_input(state: State<'_, AppState>, device: Option<String>) -> CmdResult<()> {
+    let transcription = state.transcription.clone();
+    tauri::async_runtime::spawn_blocking(move || transcription.set_input(device).map_err(err))
+        .await
+        .map_err(err)?
 }
 
 #[tauri::command]
-pub fn transcription_set_mute(state: State<'_, AppState>, mute: bool) -> CmdResult<()> {
-    state.transcription.set_mute(mute).map_err(err)
+pub async fn transcription_set_mute(state: State<'_, AppState>, mute: bool) -> CmdResult<()> {
+    let transcription = state.transcription.clone();
+    tauri::async_runtime::spawn_blocking(move || transcription.set_mute(mute).map_err(err))
+        .await
+        .map_err(err)?
 }
 
 // GitHub work captures privacy authority before entering the blocking queue.
@@ -4575,10 +4719,14 @@ pub async fn issue_templates(project_path: String) -> IssueOpResult<Vec<crate::i
 }
 
 #[tauri::command]
-pub fn linear_status() -> LinearStatus {
-    let s = store::settings::load();
-    let connected = s.linear_api_key.as_deref().map(|k| !k.trim().is_empty()).unwrap_or(false);
-    LinearStatus { connected, viewer: if connected { s.linear_viewer } else { None } }
+pub async fn linear_status() -> CmdResult<LinearStatus> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let s = store::settings::load();
+        let connected = s.linear_api_key.as_deref().map(|k| !k.trim().is_empty()).unwrap_or(false);
+        LinearStatus { connected, viewer: if connected { s.linear_viewer } else { None } }
+    })
+    .await
+    .map_err(err)
 }
 
 /// Store a key after checking it answers; an empty key disconnects.
@@ -4610,8 +4758,10 @@ pub async fn linear_teams() -> CmdResult<Vec<crate::issues::IssueTeam>> {
 }
 
 #[tauri::command]
-pub fn github_repo(project_path: String) -> Option<String> {
-    crate::issues::github_repo(Path::new(&project_path))
+pub async fn github_repo(project_path: String) -> CmdResult<Option<String>> {
+    tauri::async_runtime::spawn_blocking(move || crate::issues::github_repo(Path::new(&project_path)))
+        .await
+        .map_err(err)
 }
 
 /// The GitHub account a project is connected to: the one its pushes land as.
@@ -4634,8 +4784,10 @@ pub struct StartedIssuePipeline {
 }
 
 #[tauri::command]
-pub fn issue_pipelines_list() -> CmdResult<Vec<crate::issue_pipeline::Pipeline>> {
-    crate::issue_pipeline::store::list().map_err(err)
+pub async fn issue_pipelines_list() -> CmdResult<Vec<crate::issue_pipeline::Pipeline>> {
+    tauri::async_runtime::spawn_blocking(|| crate::issue_pipeline::store::list().map_err(err))
+        .await
+        .map_err(err)?
 }
 
 /// Carry a session that was started from an issue on to a pull request, a
@@ -5649,9 +5801,9 @@ mod command_tests {
             assert!(session.worktree_name.is_none() && session.branch.is_none() && session.base_ref.is_none());
             assert_eq!(crate::store::index::get(&session.id).unwrap().cwd, project.path);
         }
-        assert_eq!(super::list_projects().unwrap().projects, vec![project.clone()]);
+        assert_eq!(tauri::async_runtime::block_on(super::list_projects()).unwrap().projects, vec![project.clone()]);
         assert_eq!(crate::store::projects::add(&format!("{}/", project.path)).unwrap().path, project.path);
-        assert_eq!(super::list_projects().unwrap().projects.len(), 1);
+        assert_eq!(tauri::async_runtime::block_on(super::list_projects()).unwrap().projects.len(), 1);
         assert!(!dir.path().join(".git").exists());
         assert!(!dir.path().join(".raccoon").exists());
         assert!(!crate::git::work_status(dir.path()).is_repo);
@@ -6079,54 +6231,62 @@ mod command_tests {
 // ------------------------------------------------------------------ projects & workspaces
 
 #[tauri::command]
-pub fn update_project(app: AppHandle, window: tauri::WebviewWindow, path: String, patch: projects::ProjectPatch) -> CmdResult<Project> {
+pub async fn update_project(app: AppHandle, window: tauri::WebviewWindow, path: String, patch: projects::ProjectPatch) -> CmdResult<Project> {
     require_main_window(&window)?;
-    if patch.scripts.is_some() {
-        app.state::<crate::AppState>().sessions().map_err(err)?.require_archive_support().map_err(err)?;
-    }
-    let project = projects::update(&path, patch).map_err(err)?;
-    let _ = app.emit(PROJECTS_CHANGED_EVENT, &());
-    Ok(project)
+    tauri::async_runtime::spawn_blocking(move || {
+        if patch.scripts.is_some() {
+            app.state::<crate::AppState>().sessions().map_err(err)?.require_archive_support().map_err(err)?;
+        }
+        let project = projects::update(&path, patch).map_err(err)?;
+        let _ = app.emit(PROJECTS_CHANGED_EVENT, &());
+        Ok(project)
+    })
+    .await
+    .map_err(err)?
 }
 
 /// Copy a chosen image into the store so the project keeps it even if the
 /// original moves, and record it as the logo.
 #[tauri::command]
-pub fn set_project_logo(window: tauri::WebviewWindow, path: String, source: Option<String>) -> CmdResult<Project> {
+pub async fn set_project_logo(window: tauri::WebviewWindow, path: String, source: Option<String>) -> CmdResult<Project> {
     require_main_window(&window)?;
-    let logo = match source {
-        Some(src) => {
-            use std::io::Read;
-            const MAX_LOGO_BYTES: u64 = 5 * 1024 * 1024;
-            let src_path = Path::new(&src);
-            let ext = src_path
-                .extension()
-                .and_then(|e| e.to_str())
-                .map(|e| e.to_ascii_lowercase())
-                .filter(|e| matches!(e.as_str(), "png" | "jpg" | "jpeg" | "webp" | "gif" | "ico"))
-                .ok_or_else(|| "Project logo must be a PNG, JPEG, WebP, GIF, or ICO image.".to_string())?;
-            let canonical = crate::paths::canonicalize(src_path).map_err(err)?;
-            let parent = canonical.parent().ok_or_else(|| "Logo source has no parent directory.".to_string())?;
-            let mut file = crate::workspace_file::open(parent, &canonical).map_err(err)?;
-            let meta = file.metadata().map_err(err)?;
-            if !meta.is_file() || meta.len() > MAX_LOGO_BYTES {
-                return Err("Project logo must be a regular image file under 5 MB.".into());
+    tauri::async_runtime::spawn_blocking(move || {
+        let logo = match source {
+            Some(src) => {
+                use std::io::Read;
+                const MAX_LOGO_BYTES: u64 = 5 * 1024 * 1024;
+                let src_path = Path::new(&src);
+                let ext = src_path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .map(|e| e.to_ascii_lowercase())
+                    .filter(|e| matches!(e.as_str(), "png" | "jpg" | "jpeg" | "webp" | "gif" | "ico"))
+                    .ok_or_else(|| "Project logo must be a PNG, JPEG, WebP, GIF, or ICO image.".to_string())?;
+                let canonical = crate::paths::canonicalize(src_path).map_err(err)?;
+                let parent = canonical.parent().ok_or_else(|| "Logo source has no parent directory.".to_string())?;
+                let mut file = crate::workspace_file::open(parent, &canonical).map_err(err)?;
+                let meta = file.metadata().map_err(err)?;
+                if !meta.is_file() || meta.len() > MAX_LOGO_BYTES {
+                    return Err("Project logo must be a regular image file under 5 MB.".into());
+                }
+                let mut bytes = Vec::with_capacity(meta.len() as usize);
+                file.by_ref().take(MAX_LOGO_BYTES + 1).read_to_end(&mut bytes).map_err(err)?;
+                if bytes.len() as u64 > MAX_LOGO_BYTES {
+                    return Err("Project logo must be under 5 MB.".into());
+                }
+                let dir = store::root().map_err(err)?.join("logos");
+                std::fs::create_dir_all(&dir).map_err(err)?;
+                let name = format!("{:x}.{ext}", md5_like(&path));
+                let dest = dir.join(name);
+                std::fs::write(&dest, bytes).map_err(err)?;
+                Some(dest.to_string_lossy().into_owned())
             }
-            let mut bytes = Vec::with_capacity(meta.len() as usize);
-            file.by_ref().take(MAX_LOGO_BYTES + 1).read_to_end(&mut bytes).map_err(err)?;
-            if bytes.len() as u64 > MAX_LOGO_BYTES {
-                return Err("Project logo must be under 5 MB.".into());
-            }
-            let dir = store::root().map_err(err)?.join("logos");
-            std::fs::create_dir_all(&dir).map_err(err)?;
-            let name = format!("{:x}.{ext}", md5_like(&path));
-            let dest = dir.join(name);
-            std::fs::write(&dest, bytes).map_err(err)?;
-            Some(dest.to_string_lossy().into_owned())
-        }
-        None => None,
-    };
-    projects::update(&path, projects::ProjectPatch { logo: Some(logo), ..Default::default() }).map_err(err)
+            None => None,
+        };
+        projects::update(&path, projects::ProjectPatch { logo: Some(logo), ..Default::default() }).map_err(err)
+    })
+    .await
+    .map_err(err)?
 }
 
 fn md5_like(s: &str) -> u64 {
@@ -6258,36 +6418,44 @@ pub struct MergedCleanupPatch {
 }
 
 #[tauri::command]
-pub fn merged_cleanup_settings() -> crate::store::settings::MergedCleanupSettings {
-    store::settings::load().merged_cleanup
+pub async fn merged_cleanup_settings() -> CmdResult<crate::store::settings::MergedCleanupSettings> {
+    tauri::async_runtime::spawn_blocking(|| store::settings::load().merged_cleanup)
+        .await
+        .map_err(err)
 }
 
 #[tauri::command]
-pub fn set_merged_cleanup_settings(app: AppHandle, window: tauri::WebviewWindow, patch: MergedCleanupPatch) -> CmdResult<crate::store::settings::MergedCleanupSettings> {
+pub async fn set_merged_cleanup_settings(app: AppHandle, window: tauri::WebviewWindow, patch: MergedCleanupPatch) -> CmdResult<crate::store::settings::MergedCleanupSettings> {
     require_main_window(&window)?;
-    let mut settings = store::settings::load();
-    let cleanup = &mut settings.merged_cleanup;
-    if let Some(value) = patch.enabled {
-        cleanup.enabled = value;
-    }
-    if let Some(value) = patch.delete_conversations {
-        cleanup.delete_conversations = value;
-    }
     if let Some(value) = patch.grace_minutes {
         if !crate::store::settings::GRACE_MINUTES.contains(&value) {
             return Err(format!("The grace period cannot be {value} minutes."));
         }
-        cleanup.grace_minutes = value;
     }
-    if let Some(project) = patch.project {
-        match project.enabled {
-            Some(enabled) => cleanup.projects.insert(project.key, enabled),
-            None => cleanup.projects.remove(&project.key),
-        };
-    }
-    store::settings::save(&settings).map_err(err)?;
-    let _ = app.emit(MERGED_CLEANUP_SETTINGS_EVENT, &settings.merged_cleanup);
-    Ok(settings.merged_cleanup)
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut settings = store::settings::load();
+        let cleanup = &mut settings.merged_cleanup;
+        if let Some(value) = patch.enabled {
+            cleanup.enabled = value;
+        }
+        if let Some(value) = patch.delete_conversations {
+            cleanup.delete_conversations = value;
+        }
+        if let Some(value) = patch.grace_minutes {
+            cleanup.grace_minutes = value;
+        }
+        if let Some(project) = patch.project {
+            match project.enabled {
+                Some(enabled) => cleanup.projects.insert(project.key, enabled),
+                None => cleanup.projects.remove(&project.key),
+            };
+        }
+        store::settings::save(&settings).map_err(err)?;
+        let _ = app.emit(MERGED_CLEANUP_SETTINGS_EVENT, &settings.merged_cleanup);
+        Ok(settings.merged_cleanup)
+    })
+    .await
+    .map_err(err)?
 }
 
 // ---------------------------------------------------------------- work status (#441)
@@ -6307,51 +6475,70 @@ pub fn work_claims_set_cloud(sessions: Vec<crate::work_claims::claims::CloudSess
 }
 
 #[tauri::command]
-pub fn work_status_settings() -> crate::store::settings::WorkStatusSettings {
-    store::settings::load().work_status
+pub async fn work_status_settings() -> CmdResult<crate::store::settings::WorkStatusSettings> {
+    tauri::async_runtime::spawn_blocking(|| store::settings::load().work_status)
+        .await
+        .map_err(err)
 }
 
 #[tauri::command]
-pub fn set_work_status_settings(window: tauri::WebviewWindow, share_with_team: bool, state: tauri::State<'_, crate::AppState>) -> CmdResult<crate::store::settings::WorkStatusSettings> {
+pub async fn set_work_status_settings(window: tauri::WebviewWindow, share_with_team: bool, state: tauri::State<'_, crate::AppState>) -> CmdResult<crate::store::settings::WorkStatusSettings> {
     require_main_window(&window)?;
-    let mut settings = store::settings::load();
-    settings.work_status.share_with_team = share_with_team;
-    store::settings::save(&settings).map_err(err)?;
-    state.work_claims.nudge();
-    Ok(settings.work_status)
+    let work_claims = state.work_claims.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut settings = store::settings::load();
+        settings.work_status.share_with_team = share_with_team;
+        store::settings::save(&settings).map_err(err)?;
+        work_claims.nudge();
+        Ok(settings.work_status)
+    })
+    .await
+    .map_err(err)?
 }
 
 /// When an agent nobody is using is stopped (#696).
 #[tauri::command]
-pub fn agent_settings() -> crate::store::settings::AgentSettings {
-    store::settings::load().agents
+pub async fn agent_settings() -> CmdResult<crate::store::settings::AgentSettings> {
+    tauri::async_runtime::spawn_blocking(|| store::settings::load().agents)
+        .await
+        .map_err(err)
 }
 
 /// Applied by the owner at the next permission hook, including running tabs.
 #[tauri::command]
-pub fn set_read_only_commands(window: tauri::WebviewWindow, enabled: bool) -> CmdResult<crate::store::settings::AgentSettings> {
+pub async fn set_read_only_commands(window: tauri::WebviewWindow, enabled: bool) -> CmdResult<crate::store::settings::AgentSettings> {
     require_main_window(&window)?;
-    let mut settings = store::settings::load();
-    settings.agents.read_only_commands = enabled;
-    store::settings::save(&settings).map_err(err)?;
-    Ok(settings.agents)
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut settings = store::settings::load();
+        settings.agents.read_only_commands = enabled;
+        store::settings::save(&settings).map_err(err)?;
+        Ok(settings.agents)
+    })
+    .await
+    .map_err(err)?
 }
 
 /// Settings → About: whether recovery incidents are recorded (#815).
 #[tauri::command]
-pub fn diagnostics_settings() -> crate::store::settings::DiagnosticsSettings {
-    store::settings::load().diagnostics
+pub async fn diagnostics_settings() -> CmdResult<crate::store::settings::DiagnosticsSettings> {
+    tauri::async_runtime::spawn_blocking(|| store::settings::load().diagnostics)
+        .await
+        .map_err(err)
 }
 
 /// The runtime follows the change at its next line: it reads the file again
 /// whenever the file has changed.
 #[tauri::command]
-pub fn set_recovery_incidents(window: tauri::WebviewWindow, enabled: bool) -> CmdResult<crate::store::settings::DiagnosticsSettings> {
+pub async fn set_recovery_incidents(window: tauri::WebviewWindow, enabled: bool) -> CmdResult<crate::store::settings::DiagnosticsSettings> {
     require_main_window(&window)?;
-    let mut settings = store::settings::load();
-    settings.diagnostics.recovery_incidents = enabled;
-    store::settings::save(&settings).map_err(err)?;
-    Ok(settings.diagnostics)
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut settings = store::settings::load();
+        settings.diagnostics.recovery_incidents = enabled;
+        store::settings::save(&settings).map_err(err)?;
+        Ok(settings.diagnostics)
+    })
+    .await
+    .map_err(err)?
 }
 
 /// The recorded incidents, summed up by reason, build and transport.
@@ -6375,30 +6562,38 @@ pub async fn recovery_incidents_export(window: tauri::WebviewWindow, path: Strin
 
 /// Remove every recorded incident.
 #[tauri::command]
-pub fn clear_recovery_incidents(window: tauri::WebviewWindow) -> CmdResult<()> {
+pub async fn clear_recovery_incidents(window: tauri::WebviewWindow) -> CmdResult<()> {
     require_main_window(&window)?;
-    crate::recovery_log::clear().map_err(err)
+    tauri::async_runtime::spawn_blocking(|| crate::recovery_log::clear().map_err(err))
+        .await
+        .map_err(err)?
 }
 
 /// The runtime that owns the agents reads the limit again at its next look,
 /// within a minute.
 #[tauri::command]
-pub fn set_agent_idle_stop_minutes(window: tauri::WebviewWindow, minutes: u32) -> CmdResult<crate::store::settings::AgentSettings> {
+pub async fn set_agent_idle_stop_minutes(window: tauri::WebviewWindow, minutes: u32) -> CmdResult<crate::store::settings::AgentSettings> {
     require_main_window(&window)?;
     if !crate::store::settings::IDLE_STOP_MINUTES.contains(&minutes) {
         return Err(format!("{minutes} minutes is not one of the idle limits offered."));
     }
-    let mut settings = store::settings::load();
-    settings.agents.idle_stop_minutes = minutes;
-    store::settings::save(&settings).map_err(err)?;
-    Ok(settings.agents)
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut settings = store::settings::load();
+        settings.agents.idle_stop_minutes = minutes;
+        store::settings::save(&settings).map_err(err)?;
+        Ok(settings.agents)
+    })
+    .await
+    .map_err(err)?
 }
 
 /// Settings → Experimental. Read when a tab is made, so a change applies to
 /// the next new session and leaves existing ones as they are.
 #[tauri::command]
-pub fn experimental_settings() -> crate::store::settings::ExperimentalSettings {
-    store::settings::load().experimental.supported_only()
+pub async fn experimental_settings() -> CmdResult<crate::store::settings::ExperimentalSettings> {
+    tauri::async_runtime::spawn_blocking(|| store::settings::load().experimental.supported_only())
+        .await
+        .map_err(err)
 }
 
 /// Why a switch in Settings → Experimental cannot be on here, by switch: a
@@ -6854,8 +7049,10 @@ pub async fn bot_quiet_hours(state: State<'_, AppState>, id: String, quiet_hours
 
 /// Settings → Orchestrator: the app-wide values and each project's own.
 #[tauri::command]
-pub fn orchestrator_settings() -> crate::store::settings::OrchestratorSettings {
-    store::settings::load().orchestrator
+pub async fn orchestrator_settings() -> CmdResult<crate::store::settings::OrchestratorSettings> {
+    tauri::async_runtime::spawn_blocking(|| store::settings::load().orchestrator)
+        .await
+        .map_err(err)
 }
 
 /// One change to the orchestrator settings. `project` names the project
@@ -6924,8 +7121,14 @@ fn given<'de, T: Deserialize<'de>, D: serde::Deserializer<'de>>(deserializer: D)
 }
 
 #[tauri::command]
-pub fn set_orchestrator_settings(window: tauri::WebviewWindow, patch: OrchestratorPatch) -> CmdResult<crate::store::settings::OrchestratorSettings> {
+pub async fn set_orchestrator_settings(window: tauri::WebviewWindow, patch: OrchestratorPatch) -> CmdResult<crate::store::settings::OrchestratorSettings> {
     require_main_window(&window)?;
+    tauri::async_runtime::spawn_blocking(move || set_orchestrator_settings_inner(patch))
+        .await
+        .map_err(err)?
+}
+
+fn set_orchestrator_settings_inner(patch: OrchestratorPatch) -> CmdResult<crate::store::settings::OrchestratorSettings> {
     use crate::store::settings::{valid_dollars, valid_percent, valid_stall_minutes, valid_workers, MAX_BUDGET_DOLLARS, MAX_PIECE_LIMIT, MAX_REVIEW_DIFF_LINES, MAX_STALL_MINUTES, MAX_WORKERS, WORKER_MODES};
     if let Some(Some(lines)) = patch.review_diff_lines {
         if !(1..=MAX_REVIEW_DIFF_LINES).contains(&lines) {
@@ -7072,8 +7275,10 @@ pub async fn orchestration_create(app: AppHandle, session_id: String, plan: serd
 
 /// What holds for runs in one project: its own answers where it gave them, the app's otherwise.
 #[tauri::command]
-pub fn orchestrator_limits(project_path: String) -> crate::store::settings::OrchestratorLimits {
-    store::settings::load().orchestrator.for_project(&project_path)
+pub async fn orchestrator_limits(project_path: String) -> CmdResult<crate::store::settings::OrchestratorLimits> {
+    tauri::async_runtime::spawn_blocking(move || store::settings::load().orchestrator.for_project(&project_path))
+        .await
+        .map_err(err)
 }
 
 /// A person approves a run's plan: its first workers start. Here and not in
@@ -7218,33 +7423,46 @@ pub async fn set_organization_work_status(org_id: String, patch: crate::work_cla
         .map_err(|_| crate::work_claims::client::WorkClaimsError::local("work_claims_unavailable"))?
 }
 
-fn work_link_changed(app: &AppHandle, state: &crate::AppState, session: &SessionEntry) {
-    let _ = app.emit("session_updated", session);
-    state.work_claims.nudge();
-}
-
 /// "Link to issue…" on a session.
 #[tauri::command]
-pub fn session_link_issue(app: AppHandle, session_id: String, issue: index::IssueRef, state: tauri::State<'_, crate::AppState>) -> CmdResult<SessionEntry> {
-    let session = crate::work_claims::link_issue(&session_id, issue).map_err(err)?;
-    work_link_changed(&app, &state, &session);
-    Ok(session)
+pub async fn session_link_issue(app: AppHandle, session_id: String, issue: index::IssueRef, state: tauri::State<'_, crate::AppState>) -> CmdResult<SessionEntry> {
+    let work_claims = state.work_claims.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let session = crate::work_claims::link_issue(&session_id, issue).map_err(err)?;
+        let _ = app.emit("session_updated", &session);
+        work_claims.nudge();
+        Ok(session)
+    })
+    .await
+    .map_err(err)?
 }
 
 /// "Unlink" on a session: its issue, and never that one again by itself.
 #[tauri::command]
-pub fn session_unlink_issue(app: AppHandle, session_id: String, state: tauri::State<'_, crate::AppState>) -> CmdResult<SessionEntry> {
-    let session = crate::work_claims::unlink_issue(&session_id).map_err(err)?;
-    work_link_changed(&app, &state, &session);
-    Ok(session)
+pub async fn session_unlink_issue(app: AppHandle, session_id: String, state: tauri::State<'_, crate::AppState>) -> CmdResult<SessionEntry> {
+    let work_claims = state.work_claims.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let session = crate::work_claims::unlink_issue(&session_id).map_err(err)?;
+        let _ = app.emit("session_updated", &session);
+        work_claims.nudge();
+        Ok(session)
+    })
+    .await
+    .map_err(err)?
 }
 
 /// "Don't share this session".
 #[tauri::command]
-pub fn session_set_work_private(app: AppHandle, session_id: String, private: bool, state: tauri::State<'_, crate::AppState>) -> CmdResult<SessionEntry> {
-    let session = crate::work_claims::set_private(&session_id, private).map_err(err)?;
-    work_link_changed(&app, &state, &session);
-    Ok(session)
+pub async fn session_set_work_private(app: AppHandle, session_id: String, private: bool, state: tauri::State<'_, crate::AppState>) -> CmdResult<SessionEntry> {
+    let work_claims = state.work_claims.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let session = crate::work_claims::set_private(&session_id, private).map_err(err)?;
+        let _ = app.emit("session_updated", &session);
+        work_claims.nudge();
+        Ok(session)
+    })
+    .await
+    .map_err(err)?
 }
 
 /// One pass over the projects the setting is on for: what merged, what
@@ -7659,4 +7877,39 @@ pub async fn undo_turn(session_id: String, tab_id: String, seq: u64, confirmed: 
 #[tauri::command]
 pub async fn restore_undo(session_id: String, tab_id: String, seq: u64, confirmed: Option<String>) -> CmdResult<crate::checkpoints::UndoResult> {
     tauri::async_runtime::spawn_blocking(move || crate::checkpoints::restore_undo(&session_id, &tab_id, seq, confirmed.as_deref()).map_err(err)).await.map_err(err)?
+}
+
+#[cfg(test)]
+mod working_tree_containment_tests {
+    use super::working_tree_path_contained;
+
+    #[test]
+    fn rejects_parent_traversal_absolute_and_symlinks_s29() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+
+        let good = repo.join("hello.txt");
+        std::fs::write(&good, "ok").unwrap();
+        let secret = outside.join("secret.txt");
+        std::fs::write(&secret, "secret").unwrap();
+
+        assert!(working_tree_path_contained(&repo, "hello.txt"));
+        assert!(working_tree_path_contained(&repo, "deleted-file.txt"));
+        assert!(!working_tree_path_contained(&repo, "../outside/secret.txt"));
+        assert!(!working_tree_path_contained(&repo, secret.to_str().unwrap()));
+
+        #[cfg(unix)]
+        {
+            let leaf_link = repo.join("leak.txt");
+            std::os::unix::fs::symlink(&secret, &leaf_link).unwrap();
+            assert!(!working_tree_path_contained(&repo, "leak.txt"));
+
+            let dir_link = repo.join("sub");
+            std::os::unix::fs::symlink(&outside, &dir_link).unwrap();
+            assert!(!working_tree_path_contained(&repo, "sub/secret.txt"));
+        }
+    }
 }

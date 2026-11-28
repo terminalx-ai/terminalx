@@ -468,7 +468,6 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
-        .plugin(tauri_plugin_shell::init())
         .plugin(transparency::plugin())
         .plugin(platform_profile::plugin())
         // Size, place and maximized state, but never the frame: that is the build's (none on Windows and Linux,
@@ -603,15 +602,25 @@ pub fn run() {
             store::settings::file::install(app.handle())?;
             let state = app.state::<AppState>();
             state.runtime_supervisor.start(app.handle())?;
-            match local_runtime::supervisor::attach(app.handle()) {
-                Ok(generation) => state.runtime_supervisor.attached(generation),
-                Err(error) => {
-                    *state.runtime_error.lock().unwrap() = format!("{error:#}");
-                    log::error!("attach background runtime: {error:#}");
-                    state.runtime_health.attach_failed(&error);
-                    state.runtime_supervisor.unattached(&error);
+            // Attach to (or spawn) the local runtime asynchronously off `.setup()`
+            // so the desktop window paints immediately in its connecting state (P-21).
+            state.runtime_supervisor.begin_initial_attach();
+            let attaching = app.handle().clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                let state = attaching.state::<AppState>();
+                match local_runtime::supervisor::attach(&attaching) {
+                    Ok(generation) => {
+                        state.runtime_supervisor.attached(generation);
+                        let _ = attaching.emit("local_runtime_reattached", serde_json::json!({"generation": generation}));
+                    }
+                    Err(error) => {
+                        *state.runtime_error.lock().unwrap() = format!("{error:#}");
+                        log::error!("attach background runtime: {error:#}");
+                        state.runtime_health.attach_failed(&error);
+                        state.runtime_supervisor.unattached(&error);
+                    }
                 }
-            }
+            });
             local_runtime::ui::watch(app.handle());
             local_runtime::replace::watch(app.handle());
             work_claims.start(app.handle().clone());

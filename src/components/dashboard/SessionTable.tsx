@@ -1,6 +1,6 @@
 import { useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type Ref, type RefObject } from "react";
 import { ArrowDown, ArrowUp, Cloud, Laptop } from "@/icons";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openExternalWebUrl } from "@/lib/externalUrl";
 import { cn } from "@/lib/cn";
 import { relativeTime } from "@/lib/time";
 import { tableColumns, type DashboardSort, type DashboardTableRow, type TableColumnId } from "@/lib/dashboard";
@@ -160,7 +160,7 @@ function cell(row: SessionTableRow, column: TableColumnId, tabbable: boolean): R
       onClick={(event) => {
         event.stopPropagation();
         // Only web links are valid PR destinations, including on enterprise hosts.
-        if (/^https?:\/\//i.test(pr.url)) void openUrl(pr.url);
+        if (/^https?:\/\//i.test(pr.url)) void openExternalWebUrl(pr.url);
       }}
     >{index > 0 ? "· " : ""}#{pr.number}</button>
   )) : <span className="text-faint">—</span>;

@@ -27,6 +27,7 @@ const emptyStatus: PairingStatus = {
 
 let state: PairingState = { status: emptyStatus, ready: false, busy: false, relayRetrying: false, relayRetryError: null, generationError: null, dialogOpen: false };
 const listeners = new Set<() => void>();
+const __subscribe_listeners = (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; };
 
 function set(patch: Partial<PairingState>) {
   state = { ...state, ...patch };
@@ -44,10 +45,7 @@ export function getPairing(): PairingState {
 
 export function usePairing(): PairingState {
   return useSyncExternalStore(
-    (listener) => {
-      listeners.add(listener);
-      return () => listeners.delete(listener);
-    },
+    __subscribe_listeners,
     () => state,
     () => state,
   );

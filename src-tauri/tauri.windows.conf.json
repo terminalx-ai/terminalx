@@ -48,7 +48,7 @@
   "plugins": {
     "updater": {
       "endpoints": [
-        "https://github.com/terminalx-ai/raccoon/releases/latest/download/latest-windows.json"
+        "https://github.com/terminalx-ai/terminalx/releases/latest/download/latest-windows.json"
       ]
     }
   }

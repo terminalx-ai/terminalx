@@ -198,19 +198,47 @@ fn merge_enabled_plugins(path: &Path, enabled: &mut HashMap<String, bool>) {
     }
 }
 
-fn plugin_roots(home: &Path, project: Option<&Path>) -> Vec<RootSpec> {
-    let mut enabled = HashMap::new();
+fn managed_settings_path() -> Option<&'static Path> {
     #[cfg(target_os = "macos")]
-    merge_enabled_plugins(
-        Path::new("/Library/Application Support/ClaudeCode/managed-settings.json"),
-        &mut enabled,
-    );
+    {
+        Some(Path::new("/Library/Application Support/ClaudeCode/managed-settings.json"))
+    }
+    #[cfg(target_os = "linux")]
+    {
+        Some(Path::new("/etc/claude-code/managed-settings.json"))
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        None
+    }
+}
+
+fn resolve_enabled_plugins(
+    managed_path: Option<&Path>,
+    home: &Path,
+    project: Option<&Path>,
+) -> HashMap<String, bool> {
+    let mut enabled = HashMap::new();
     merge_enabled_plugins(&home.join(".claude/settings.json"), &mut enabled);
     merge_enabled_plugins(&home.join(".claude/settings.local.json"), &mut enabled);
     if let Some(project) = project {
         merge_enabled_plugins(&project.join(".claude/settings.json"), &mut enabled);
         merge_enabled_plugins(&project.join(".claude/settings.local.json"), &mut enabled);
     }
+    // Managed policy takes highest precedence so untrusted repo or user settings
+    // cannot re-enable plugins disabled by managed configuration (S-41).
+    if let Some(managed) = managed_path {
+        merge_enabled_plugins(managed, &mut enabled);
+    }
+    enabled
+}
+
+fn plugin_roots_with_managed(
+    managed_path: Option<&Path>,
+    home: &Path,
+    project: Option<&Path>,
+) -> Vec<RootSpec> {
+    let enabled = resolve_enabled_plugins(managed_path, home, project);
 
     let manifest = home.join(".claude/plugins/installed_plugins.json");
     let Ok(value) = read_json_limited(&manifest) else {
@@ -244,6 +272,10 @@ fn plugin_roots(home: &Path, project: Option<&Path>) -> Vec<RootSpec> {
     roots
 }
 
+fn plugin_roots(home: &Path, project: Option<&Path>) -> Vec<RootSpec> {
+    plugin_roots_with_managed(managed_settings_path(), home, project)
+}
+
 fn is_executable(metadata: &fs::Metadata) -> bool {
     #[cfg(unix)]
     {
@@ -257,8 +289,23 @@ fn is_executable(metadata: &fs::Metadata) -> bool {
     }
 }
 
-fn folder_has_executables(path: &Path) -> bool {
-    fn walk(path: &Path, seen: &mut usize) -> bool {
+fn canonical_within(candidate: &Path, root: &Path) -> Result<PathBuf> {
+    let canonical_root = crate::paths::canonicalize(root)
+        .with_context(|| format!("resolve {}", root.display()))?;
+    let canonical = crate::paths::canonicalize(candidate)
+        .with_context(|| format!("resolve {}", candidate.display()))?;
+    if !canonical.starts_with(&canonical_root) {
+        return Err(anyhow!(
+            "{} escapes root {}",
+            candidate.display(),
+            root.display()
+        ));
+    }
+    Ok(canonical)
+}
+
+fn folder_has_executables(root: &Path) -> bool {
+    fn walk(root: &Path, path: &Path, seen: &mut usize) -> bool {
         let Ok(entries) = fs::read_dir(path) else {
             return false;
         };
@@ -270,17 +317,24 @@ fn folder_has_executables(path: &Path) -> bool {
             let Ok(kind) = entry.file_type() else {
                 continue;
             };
+            let entry_path = entry.path();
+            if kind.is_symlink() {
+                // Never inspect symlink targets outside the skill directory (S-41).
+                if canonical_within(&entry_path, root).is_err() {
+                    continue;
+                }
+            }
             let metadata = entry.metadata().ok();
             if metadata.as_ref().is_some_and(is_executable) {
                 return true;
             }
-            if kind.is_dir() && !kind.is_symlink() && walk(&entry.path(), seen) {
+            if kind.is_dir() && !kind.is_symlink() && walk(root, &entry_path, seen) {
                 return true;
             }
         }
         false
     }
-    walk(path, &mut 0)
+    walk(root, root, &mut 0)
 }
 
 fn found_skill(
@@ -291,9 +345,19 @@ fn found_skill(
     source_label: String,
     root_path: &Path,
 ) -> Result<FoundSkill> {
-    let canonical_dir =
-        crate::paths::canonicalize(dir).with_context(|| format!("resolve {}", dir.display()))?;
-    let skill_file = canonical_dir.join("SKILL.md");
+    let canonical_dir = if source == SkillSource::Repo {
+        // Untrusted repository skill directories must not symlink outside the repo skill root (S-41).
+        let canonical = canonical_within(dir, root_path)?;
+        let canonical_root = crate::paths::canonicalize(root_path)
+            .with_context(|| format!("resolve {}", root_path.display()))?;
+        if canonical == canonical_root {
+            return Err(anyhow!("{} is not a skill subdirectory", dir.display()));
+        }
+        canonical
+    } else {
+        crate::paths::canonicalize(dir).with_context(|| format!("resolve {}", dir.display()))?
+    };
+    let skill_file = canonical_within(&canonical_dir.join("SKILL.md"), &canonical_dir)?;
     let (frontmatter, _) = parse_frontmatter(&skill_file)?;
     let updated = skill_file
         .metadata()
@@ -502,8 +566,16 @@ fn collect_files(dir: &Path, relative: &Path, out: &mut Vec<SkillFile>) -> Resul
         }
         let name = entry.file_name().to_string_lossy().into_owned();
         let path = relative.join(&name);
-        let kind = entry.file_type()?;
-        let metadata = entry.metadata()?;
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        if kind.is_symlink() && canonical_within(&entry.path(), dir).is_err() {
+            // Skip symlinks pointing outside the skill folder (S-41).
+            continue;
+        }
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
         let is_dir = metadata.is_dir();
         out.push(SkillFile {
             path: path.to_string_lossy().replace('\\', "/"),
@@ -518,9 +590,43 @@ fn collect_files(dir: &Path, relative: &Path, out: &mut Vec<SkillFile>) -> Resul
     Ok(())
 }
 
-pub fn detail(dir: &Path) -> Result<SkillDetail> {
+fn authorized_skill_roots(home: &Path) -> Vec<RootSpec> {
+    let mut roots = fixed_roots(home, None);
+    roots.extend(plugin_roots(home, None));
+    if let Ok((projects, _)) = crate::store::projects::list() {
+        for project in projects {
+            let project_path = Path::new(&project.path);
+            roots.extend(fixed_roots(home, Some(project_path)));
+            roots.extend(plugin_roots(home, Some(project_path)));
+        }
+    }
+    roots
+}
+
+fn is_authorized_skill_dir(canonical_dir: &Path, roots: &[RootSpec], cached_dirs: &[PathBuf]) -> bool {
+    if cached_dirs.iter().any(|dir| dir == canonical_dir) {
+        return true;
+    }
+    for root in roots {
+        if let Ok(canonical_root) = crate::paths::canonicalize(&root.path) {
+            if canonical_dir != canonical_root && canonical_dir.starts_with(&canonical_root) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn detail_authorized(dir: &Path, roots: &[RootSpec], cached_dirs: &[PathBuf]) -> Result<SkillDetail> {
     let dir = crate::paths::canonicalize(dir).with_context(|| format!("resolve {}", dir.display()))?;
-    let (_, markdown) = parse_frontmatter(&dir.join("SKILL.md"))?;
+    if !is_authorized_skill_dir(&dir, roots, cached_dirs) {
+        return Err(anyhow!(
+            "refusing to inspect {}: path is outside authorized skill roots",
+            dir.display()
+        ));
+    }
+    let skill_file = canonical_within(&dir.join("SKILL.md"), &dir)?;
+    let (_, markdown) = parse_frontmatter(&skill_file)?;
     let mut files = Vec::new();
     collect_files(&dir, Path::new(""), &mut files)?;
     let executable_files = files
@@ -533,6 +639,20 @@ pub fn detail(dir: &Path) -> Result<SkillDetail> {
         files,
         executable_files,
     })
+}
+
+pub fn detail(dir: &Path) -> Result<SkillDetail> {
+    let home = dirs::home_dir().context("no home directory")?;
+    let cached_dirs: Vec<PathBuf> = {
+        let guard = cache().lock().unwrap_or_else(|error| error.into_inner());
+        guard
+            .roots
+            .values()
+            .flat_map(|entry| entry.skills.iter().map(|skill| skill.canonical_dir.clone()))
+            .collect()
+    };
+    let roots = authorized_skill_roots(&home);
+    detail_authorized(dir, &roots, &cached_dirs)
 }
 
 #[cfg(test)]
@@ -637,4 +757,113 @@ mod tests {
         );
     }
 
+    #[test]
+    fn detail_rejects_directories_outside_authorized_skill_roots() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let allowed_skill = home.join(".claude/skills/valid");
+        skill(&allowed_skill, "valid", "Inside an authorized skill root.");
+        let outside_dir = temp.path().join("outside");
+        skill(&outside_dir, "outside", "Arbitrary host folder with a SKILL.md.");
+
+        let roots = fixed_roots(&home, None);
+        assert!(detail_authorized(&allowed_skill, &roots, &[]).is_ok());
+        let err = detail_authorized(&outside_dir, &roots, &[]).unwrap_err();
+        assert!(
+            err.to_string().contains("outside authorized skill roots"),
+            "unexpected error: {err:#}"
+        );
+        // The root folder itself cannot be enumerated as a skill.
+        assert!(detail_authorized(&home.join(".claude/skills"), &roots, &[]).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn repo_skill_symlink_escape_and_skill_md_escape_are_rejected() {
+        use std::os::unix::fs::symlink;
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let project = temp.path().join("repo");
+        let outside = temp.path().join("secret");
+        skill(&outside, "secret", "Outside the repo.");
+
+        let repo_skills = project.join(".claude/skills");
+        fs::create_dir_all(&repo_skills).unwrap();
+        symlink(&outside, repo_skills.join("escaped-dir")).unwrap();
+
+        let sneaky = repo_skills.join("sneaky-md");
+        fs::create_dir_all(&sneaky).unwrap();
+        symlink(outside.join("SKILL.md"), sneaky.join("SKILL.md")).unwrap();
+
+        let good = repo_skills.join("legit");
+        skill(&good, "legit", "Contained inside repo skill root.");
+        symlink(outside.join("SKILL.md"), good.join("leaked-link.md")).unwrap();
+
+        let repo_root = RootSpec {
+            path: repo_skills,
+            source: SkillSource::Repo,
+            source_label: ".claude/skills".into(),
+            agents: vec!["claude".into()],
+        };
+        let found = scan_root(&repo_root, &home).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].row.name, "legit");
+
+        // detail_authorized must also omit symlinks pointing outside the skill dir.
+        let detail = detail_authorized(&good, &[repo_root], &[]).unwrap();
+        assert!(detail.files.iter().all(|f| f.name != "leaked-link.md"));
+    }
+
+    #[test]
+    fn managed_disabled_plugin_cannot_be_overridden_by_repo_or_user_settings() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let project = temp.path().join("repo");
+        let managed = temp.path().join("managed-settings.json");
+
+        fs::create_dir_all(home.join(".claude/plugins")).unwrap();
+        fs::create_dir_all(project.join(".claude")).unwrap();
+
+        let blocked_dir = temp.path().join("plugin-blocked");
+        let allowed_dir = temp.path().join("plugin-allowed");
+        fs::create_dir_all(blocked_dir.join("skills")).unwrap();
+        fs::create_dir_all(allowed_dir.join("skills")).unwrap();
+
+        fs::write(
+            home.join(".claude/plugins/installed_plugins.json"),
+            serde_json::json!({
+                "plugins": {
+                    "blocked@org": [{ "installPath": blocked_dir }],
+                    "allowed@org": [{ "installPath": allowed_dir }]
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        fs::write(
+            &managed,
+            r#"{"enabledPlugins": {"blocked@org": false}}"#,
+        )
+        .unwrap();
+        // Both user and untrusted repo try to re-enable the managed-disabled plugin.
+        fs::write(
+            home.join(".claude/settings.json"),
+            r#"{"enabledPlugins": {"blocked@org": true, "allowed@org": true}}"#,
+        )
+        .unwrap();
+        fs::write(
+            project.join(".claude/settings.json"),
+            r#"{"enabledPlugins": {"blocked@org": true}}"#,
+        )
+        .unwrap();
+        fs::write(
+            project.join(".claude/settings.local.json"),
+            r#"{"enabledPlugins": {"blocked@org": true}}"#,
+        )
+        .unwrap();
+
+        let roots = plugin_roots_with_managed(Some(&managed), &home, Some(&project));
+        let labels: Vec<&str> = roots.iter().map(|r| r.source_label.as_str()).collect();
+        assert_eq!(labels, vec!["allowed"]);
+    }
 }

@@ -1,24 +1,73 @@
-import { useEffect, useState } from "react";
+import { memo, useEffect, useState, useSyncExternalStore } from "react";
 import { AccessibilityInfo, Animated, Easing } from "react-native";
 import Svg, { Circle as Ring, Path } from "react-native-svg";
 
+let reduceMotion = false;
+let initialized = false;
+let subscription: { remove(): void } | null = null;
+const listeners = new Set<() => void>();
+
+function emit() {
+  for (const listener of [...listeners]) listener();
+}
+
+/**
+ * Shared module-level subscription for `AccessibilityInfo.isReduceMotionEnabled` (P-86).
+ * Prevents every mounted `<Spinner>` from issuing its own native bridge query and listener.
+ */
+function subscribeReduceMotion(listener: () => void): () => void {
+  listeners.add(listener);
+  if (!initialized) {
+    initialized = true;
+    const query = AccessibilityInfo?.isReduceMotionEnabled;
+    if (typeof query === "function") {
+      void query().then((value) => {
+        if (value !== reduceMotion) {
+          reduceMotion = value;
+          emit();
+        }
+      }).catch(() => undefined);
+    }
+  }
+  if (!subscription && typeof AccessibilityInfo?.addEventListener === "function") {
+    subscription = AccessibilityInfo.addEventListener("reduceMotionChanged", (value) => {
+      if (value !== reduceMotion) {
+        reduceMotion = value;
+        emit();
+      }
+    });
+  }
+  return () => {
+    listeners.delete(listener);
+    if (listeners.size === 0) {
+      subscription?.remove();
+      subscription = null;
+      initialized = false;
+    }
+  };
+}
+
+const getReduceMotion = () => reduceMotion;
+
+/** Resets the shared reduce-motion store (for tests). */
+export function resetReduceMotionStoreForTests(): void {
+  subscription?.remove();
+  subscription = null;
+  initialized = false;
+  reduceMotion = false;
+  listeners.clear();
+}
+
 /** Whether the person asked the system for less motion; a working mark then holds still. */
 function useReduceMotion(): boolean {
-  const [reduce, setReduce] = useState(false);
-  useEffect(() => {
-    let live = true;
-    void AccessibilityInfo.isReduceMotionEnabled().then((value) => { if (live) setReduce(value); });
-    const subscription = AccessibilityInfo.addEventListener("reduceMotionChanged", setReduce);
-    return () => { live = false; subscription.remove(); };
-  }, []);
-  return reduce;
+  return useSyncExternalStore(subscribeReduceMotion, getReduceMotion, getReduceMotion);
 }
 
 /**
  * A ring with a turning arc: the one spinner the boards draw (22.01, 22.04),
  * for an agent at work and for a connection under way.
  */
-export function Spinner({ size, color, testID }: { size: number; color: string; testID?: string }) {
+export const Spinner = memo(function Spinner({ size, color, testID }: { size: number; color: string; testID?: string }) {
   const reduce = useReduceMotion();
   const [turn] = useState(() => new Animated.Value(0));
   useEffect(() => {
@@ -37,4 +86,4 @@ export function Spinner({ size, color, testID }: { size: number; color: string; 
       <Path d={`M ${centre} ${centre - radius} A ${radius} ${radius} 0 0 1 ${centre + radius} ${centre}`} stroke={color} strokeWidth={stroke} strokeLinecap="round" fill="none" />
     </Svg>
   </Animated.View>;
-}
+});

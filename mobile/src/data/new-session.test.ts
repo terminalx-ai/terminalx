@@ -4,6 +4,15 @@ import { HostApi, type NewSessionOptions } from "./host-api";
 import { agentDefaults, blocked, chooseModel, initialChoices, request } from "./new-session";
 
 vi.mock("expo-crypto", () => ({ randomUUID: () => "client-id" }));
+vi.mock("expo-secure-store", () => {
+  const store = new Map<string, string>();
+  return {
+    WHEN_UNLOCKED_THIS_DEVICE_ONLY: 5,
+    getItemAsync: async (key: string) => store.get(key) ?? null,
+    setItemAsync: async (key: string, value: string) => { store.set(key, value); },
+    deleteItemAsync: async (key: string) => { store.delete(key); },
+  };
+});
 
 const options: NewSessionOptions = {
   projects: [{ id: "p-notes", name: "notes", git: false, lastUsed: false }, { id: "p-repo", name: "terminalx", git: true, lastUsed: true, repositorySettings: { filesToCopy: [".env*"] } }],

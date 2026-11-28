@@ -1,4 +1,4 @@
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openExternalWebUrl } from "@/lib/externalUrl";
 import { showError } from "@/lib/errorToasts";
 
 /**
@@ -31,7 +31,7 @@ export function showRerunFailed({ prNumber, error, runUrl }: { prNumber: number;
     key: `checks-rerun:${prNumber}`,
     tone: "error",
     copy: false,
-    actions: runUrl ? [{ label: "Open run on GitHub", icon: "external", keepOpen: true, run: () => openUrl(runUrl) }] : undefined,
+    actions: runUrl ? [{ label: "Open run on GitHub", icon: "external", keepOpen: true, run: () => openExternalWebUrl(runUrl) }] : undefined,
   });
 }
 
@@ -48,7 +48,7 @@ export function showFixFailed({ error, retry, logUrl, key }: { error: string; re
     copy: false,
     actions: [
       ...(retry ? [{ label: "Try again", icon: "retry" as const, primary: true, run: retry }] : []),
-      ...(logUrl ? [{ label: "Open log on GitHub", icon: "external" as const, keepOpen: true, run: () => openUrl(logUrl) }] : []),
+      ...(logUrl ? [{ label: "Open log on GitHub", icon: "external" as const, keepOpen: true, run: () => openExternalWebUrl(logUrl) }] : []),
     ],
   });
 }

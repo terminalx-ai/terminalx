@@ -85,6 +85,7 @@ function pdfAssets(): Plugin {
       server.middlewares.use("/pdfjs/", async (request, response, next) => {
         const match = /^\/(cmaps|standard_fonts|wasm|iccs)\/([\w.-]+)$/.exec((request.url ?? "").split("?")[0]);
         if (!match) return next();
+        if (match[1] === "wasm" && (PDFJS_EXCLUDED_WASM.has(match[2]) || match[2].startsWith("LICENSE"))) return next();
         try {
           const data = await readFile(new URL(`${match[1]}/${match[2]}`, root));
           response.setHeader("Content-Type", match[2].endsWith(".wasm") ? "application/wasm" : match[2].endsWith(".mjs") ? "text/javascript" : "application/octet-stream");

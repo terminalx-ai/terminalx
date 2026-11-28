@@ -8,6 +8,8 @@ import UIKit
 /// image to JavaScript as `onPasteImage`, as JPEG. Text pastes as before.
 public class PasteImageModule: Module {
   fileprivate static weak var current: PasteImageModule?
+  private static let maxEdge: CGFloat = 2048
+  private static let encodeQueue = DispatchQueue.global(qos: .userInitiated)
 
   public func definition() -> ModuleDefinition {
     Name("PasteImage")
@@ -19,13 +21,48 @@ public class PasteImageModule: Module {
     }
   }
 
+  /// Downscales and JPEG-encodes pasted images off the main thread and hands JavaScript
+  /// a temporary file URI instead of raw Base64 over the bridge (P-78).
   fileprivate static func emit(_ image: UIImage) {
-    guard let data = image.jpegData(compressionQuality: 0.8) else { return }
-    current?.sendEvent("onPasteImage", [
-      "data": data.base64EncodedString(),
-      "width": image.size.width * image.scale,
-      "height": image.size.height * image.scale,
-    ])
+    encodeQueue.async {
+      let prepared = downscaleIfNeeded(image, maxEdge: maxEdge)
+      guard let data = prepared.jpegData(compressionQuality: 0.8) else { return }
+      let fileURL = FileManager.default.temporaryDirectory
+        .appendingPathComponent("paste-\(UUID().uuidString).jpg")
+      do {
+        try data.write(to: fileURL, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+      } catch {
+        return
+      }
+      let width = Int((prepared.size.width * prepared.scale).rounded())
+      let height = Int((prepared.size.height * prepared.scale).rounded())
+      DispatchQueue.main.async {
+        current?.sendEvent("onPasteImage", [
+          "uri": fileURL.absoluteString,
+          "width": width,
+          "height": height,
+        ])
+      }
+    }
+  }
+
+  private static func downscaleIfNeeded(_ image: UIImage, maxEdge: CGFloat) -> UIImage {
+    let pixelWidth = image.size.width * image.scale
+    let pixelHeight = image.size.height * image.scale
+    let longest = max(pixelWidth, pixelHeight)
+    guard longest > 0 else { return image }
+    if longest <= maxEdge && image.imageOrientation == .up {
+      return image
+    }
+    let ratio = longest > maxEdge ? maxEdge / longest : 1.0
+    let targetSize = CGSize(width: max(1, (pixelWidth * ratio).rounded()), height: max(1, (pixelHeight * ratio).rounded()))
+    let format = UIGraphicsImageRendererFormat()
+    format.scale = 1.0
+    format.opaque = true
+    let renderer = UIGraphicsImageRenderer(size: targetSize, format: format)
+    return renderer.image { _ in
+      image.draw(in: CGRect(origin: .zero, size: targetSize))
+    }
   }
 }
 
@@ -100,7 +137,7 @@ private enum PasteImageInstaller {
         if !text, let provider = providers.first(where: { $0.canLoadObject(ofClass: UIImage.self) }) {
           provider.loadObject(ofClass: UIImage.self) { object, _ in
             guard let image = object as? UIImage else { return }
-            DispatchQueue.main.async { PasteImageModule.emit(image) }
+            PasteImageModule.emit(image)
           }
           return
         }

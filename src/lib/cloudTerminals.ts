@@ -66,6 +66,7 @@ interface WorkspaceTerminals {
 
 let state: Record<string, WorkspaceTerminals> = {};
 const listeners = new Set<() => void>();
+const __subscribe_listeners = (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; };
 const EMPTY: WorkspaceTerminals = { terminals: [], selected: null };
 
 function publish(next: Record<string, WorkspaceTerminals>) {
@@ -97,10 +98,7 @@ function terminalOf(workspace: string, id: string): CloudTerminal | undefined {
 
 export function useCloudTerminals(workspace: string): WorkspaceTerminals {
   return useSyncExternalStore(
-    (listener) => {
-      listeners.add(listener);
-      return () => listeners.delete(listener);
-    },
+    __subscribe_listeners,
     () => state[workspace] ?? EMPTY,
     () => state[workspace] ?? EMPTY,
   );

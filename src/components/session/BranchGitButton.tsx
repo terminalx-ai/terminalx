@@ -6,7 +6,7 @@ import { isFailingCheck } from "@/lib/checks";
 import { checksMarkOf, noteChecksMark } from "@/lib/panelMarks";
 import { cn } from "@/lib/cn";
 import { showPanelTab } from "@/lib/panelTab";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openExternalWebUrl } from "@/lib/externalUrl";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/menu";
@@ -174,7 +174,7 @@ export function BranchGitButton({ session, tabId }: { session: SessionEntry; tab
             ))}
             <DropdownMenuSeparator />
             {snapshot?.pr && <DropdownMenuItem onSelect={() => showPanelTab("branch")}>Show checks</DropdownMenuItem>}
-            {snapshot?.pr && <DropdownMenuItem onSelect={() => void openUrl(snapshot.pr!.url).catch((reason) => setError(branchError(reason)))}>Open pull request</DropdownMenuItem>}
+            {snapshot?.pr && <DropdownMenuItem onSelect={() => void openExternalWebUrl(snapshot.pr!.url).catch((reason) => setError(branchError(reason)))}>Open pull request</DropdownMenuItem>}
             <DropdownMenuItem disabled={refreshing} onSelect={() => refresh()}>Refresh Git status</DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>

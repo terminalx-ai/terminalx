@@ -1,7 +1,7 @@
 import { prErrorKind, type PrErrorKind } from "@/lib/prErrors";
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openExternalWebUrl } from "@/lib/externalUrl";
 import { GH_INSTALL_URL, ghInstallCommand } from "@/lib/ghInstall";
 import { errorMessage, gh, pty, type GitHubConnectionStatus } from "@/lib/api";
 import type { GitSource } from "@/lib/gitSource";
@@ -82,7 +82,7 @@ export function GitHubSetup({ status, onRefresh, onConnectingChange }: { status:
     {missing && ghInstallCommand() && <p className="mt-2 text-muted-foreground">In a terminal: <code className="font-mono">{ghInstallCommand()}</code></p>}
     <div className="mt-3 flex flex-wrap justify-center gap-2">
       <Button size="sm" variant="accent" onClick={() => {
-        if (missing) void openUrl(GH_INSTALL_URL);
+        if (missing) void openExternalWebUrl(GH_INSTALL_URL);
         else if (unavailable) onRefresh();
         else { setConnecting(true); onConnectingChange?.(true); }
       }}>{missing ? "Install GitHub CLI" : unavailable ? "Try again" : "Connect GitHub"}</Button>

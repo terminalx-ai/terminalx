@@ -249,6 +249,12 @@ pub trait Host: Send + Sync {
     fn windows(&self) -> Vec<UsageWindow>;
     /// What a worker in a turn has been doing.
     fn activity(&self, worker: &SessionRef) -> Activity;
+    /// Batch-read activity for all running/stalled workers in a tick so hosts
+    /// can capture a single OS `resource_sample()` and reuse incremental
+    /// transcript cursors across workers (P-69).
+    fn activities(&self, workers: &[SessionRef]) -> Vec<Activity> {
+        workers.iter().map(|worker| self.activity(worker)).collect()
+    }
     /// Start what waits for a free worker slot ([`fill_slots`]), soon and
     /// outside the caller's locks: a turn ending must not wait on a start.
     fn fill_later(&self);
@@ -3028,11 +3034,21 @@ fn stalled(activity: &Activity, now: i64, stall_ms: i64) -> Option<i64> {
 fn mark_stalls(host: &dyn Host, id: &str, now: i64) -> Result<(), EngineError> {
     let run = stored(id)?;
     let stall_ms = i64::from(host.limits(&run.project_path).stall_minutes) * 60_000;
-    let seen: Vec<(String, SessionRef, Option<i64>)> = run
+    let candidates: Vec<(String, SessionRef)> = run
         .pieces
         .iter()
         .filter(|piece| matches!(piece.state, PieceState::Running | PieceState::Stalled))
-        .filter_map(|piece| piece.worker.clone().map(|worker| (piece.id.clone(), worker.clone(), stalled(&host.activity(&worker), now, stall_ms))))
+        .filter_map(|piece| piece.worker.clone().map(|worker| (piece.id.clone(), worker)))
+        .collect();
+    if candidates.is_empty() {
+        return Ok(());
+    }
+    let workers: Vec<SessionRef> = candidates.iter().map(|(_, worker)| worker.clone()).collect();
+    let activities = host.activities(&workers);
+    let seen: Vec<(String, SessionRef, Option<i64>)> = candidates
+        .into_iter()
+        .zip(activities)
+        .map(|((piece_id, worker), activity)| (piece_id, worker, stalled(&activity, now, stall_ms)))
         .collect();
     let mut newly = Vec::new();
     let (after, ()) = store::update(id, |run| {

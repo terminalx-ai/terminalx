@@ -104,6 +104,7 @@ interface Memory {
  */
 const memory = new Map<string, Memory>();
 const memoryListeners = new Set<() => void>();
+const __subscribe_memoryListeners = (listener: () => void) => { memoryListeners.add(listener); return () => { memoryListeners.delete(listener); }; };
 const NO_EXPIRED: Expired[] = [];
 
 function remember(key: string, next: Memory) {
@@ -113,10 +114,7 @@ function remember(key: string, next: Memory) {
 
 function useExpired(key: string): Expired[] {
   return useSyncExternalStore(
-    (listener) => {
-      memoryListeners.add(listener);
-      return () => memoryListeners.delete(listener);
-    },
+    __subscribe_memoryListeners,
     () => memory.get(key)?.expired ?? NO_EXPIRED,
     () => memory.get(key)?.expired ?? NO_EXPIRED,
   );

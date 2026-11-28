@@ -43,6 +43,13 @@ vi.mock("react-native", () => {
   return {
     useWindowDimensions: () => ({ width: 375, height: 667, scale: 2, fontScale: 1 }),
     View, Text: ({ children }: { children?: ReactNode }) => <span>{children}</span>, ScrollView: View,
+    FlatList: ({ data = [], renderItem, keyExtractor, ListHeaderComponent, ListEmptyComponent, ListFooterComponent }: any) => (
+      <div>
+        {ListHeaderComponent}
+        {data.length ? data.map((item: unknown, index: number) => <div key={keyExtractor ? keyExtractor(item, index) : index}>{renderItem({ item, index })}</div>) : ListEmptyComponent}
+        {ListFooterComponent}
+      </div>
+    ),
     TextInput: ({ accessibilityLabel, value, onChangeText }: any) => <input aria-label={accessibilityLabel} value={value} onChange={(event) => onChangeText(event.currentTarget.value)} />,
     Platform: { OS: "ios" }, Alert: { alert: mocks.alert }, useColorScheme: () => "dark",
     StyleSheet: { create: (styles: unknown) => styles, hairlineWidth: 1, absoluteFill: {} },

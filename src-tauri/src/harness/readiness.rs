@@ -216,6 +216,11 @@ const LATEST_FOR: Duration = Duration::from_secs(6 * 60 * 60);
 
 static LATEST: std::sync::Mutex<Vec<(String, std::time::Instant, Option<String>)>> = std::sync::Mutex::new(Vec::new());
 
+fn npm_agent() -> &'static ureq::Agent {
+    static AGENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
+    AGENT.get_or_init(|| crate::data_privacy::http_agent().timeout(Duration::from_secs(5)).build())
+}
+
 /// The latest published release of an agent's CLI, from the npm registry,
 /// for the "· up to date" beside its version in Settings (PRO-377). `None`
 /// when the agent has no package, data privacy mode is on, or the registry
@@ -225,8 +230,7 @@ pub fn latest_version(harness: &str) -> Option<String> {
     if let Some((_, _, answer)) = LATEST.lock().unwrap().iter().find(|(id, at, _)| id == harness && at.elapsed() < LATEST_FOR) {
         return answer.clone();
     }
-    let agent = crate::data_privacy::http_agent().timeout(Duration::from_secs(5)).build();
-    let answer = agent
+    let answer = npm_agent()
         .get(&format!("https://registry.npmjs.org/{package}/latest"))
         .call()
         .ok()

@@ -1,5 +1,5 @@
 import { PrivacyImage } from "@/components/ui/privacy-image";
-import { cloneElement, isValidElement, memo, useMemo, type AnchorHTMLAttributes, type ReactElement, type ReactNode } from "react";
+import { cloneElement, isValidElement, memo, useMemo, useRef, type AnchorHTMLAttributes, type ReactElement, type ReactNode } from "react";
 import { defaultRehypePlugins, defaultRemarkPlugins, Streamdown, type ExtraProps } from "streamdown";
 import { createCodePlugin, type CodeHighlighterPlugin } from "@streamdown/code";
 import "streamdown/styles.css";
@@ -254,21 +254,24 @@ export const Markdown = memo(function Markdown({
 }) {
   const { resolvedMode } = useTheme();
   const shown = useMemo(() => (streaming ? withoutPartialCodexFileCitation(text) : text), [text, streaming]);
-  const chunks = useMemo(() => (streaming ? chunkStream(shown) : [shown]), [shown, streaming]);
-  if (chunks.length === 1) {
-    return (
-      <div className={className}>
-        <Block text={shown} streaming={!!streaming} mode={resolvedMode} linkContext={linkContext} remoteImages={remoteImages} webLinksOnly={webLinksOnly} />
-      </div>
-    );
+  // Preserve settled chunk boundaries when streaming completes so React never
+  // unmounts and re-parses/re-highlights settled <Block>s on `streaming: true -> false`.
+  const streamedFirstChunk = useRef<string | null>(null);
+  const keepChunked = !!streaming || (streamedFirstChunk.current !== null && shown.startsWith(streamedFirstChunk.current));
+  const chunks = useMemo(() => (keepChunked ? chunkStream(shown) : [shown]), [shown, keepChunked]);
+  if (streaming && chunks.length > 1) {
+    streamedFirstChunk.current = chunks[0];
+  } else if (!keepChunked) {
+    streamedFirstChunk.current = null;
   }
   // Settled chunks never change, so their index is a stable identity and
-  // the memoised Block skips them; only the tail re-parses per delta.
+  // the memoised Block skips them; only the tail re-parses per delta and
+  // flips `streaming` to false on completion.
   const last = chunks.length - 1;
   return (
     <div className={className}>
       {chunks.map((c, i) => (
-        <Block key={i} text={c} streaming={i === last} mode={resolvedMode} linkContext={linkContext} remoteImages={remoteImages} webLinksOnly={webLinksOnly} />
+        <Block key={i} text={c} streaming={!!streaming && i === last} mode={resolvedMode} linkContext={linkContext} remoteImages={remoteImages} webLinksOnly={webLinksOnly} />
       ))}
     </div>
   );

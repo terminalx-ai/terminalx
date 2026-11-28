@@ -953,7 +953,11 @@ impl Tail {
     /// history the app has logged or a conversation it is resuming. `carried`
     /// names records a fork will copy in later, which are history too.
     pub fn opening(path: PathBuf, decode: Decoder, carried: HashSet<String>) -> Self {
-        let len = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        let len = std::fs::symlink_metadata(&path)
+            .ok()
+            .filter(|m| m.file_type().is_file())
+            .map(|m| m.len())
+            .unwrap_or(0);
         Self { application: Mutex::new(()), path: Mutex::new(path), stream: Mutex::new(Streamer::skipping(len, decode, carried)), observer: Mutex::new(None), decode, marker: None }
     }
 
@@ -1055,7 +1059,15 @@ impl Tail {
         }
         let was_unknown = current.as_os_str().is_empty();
         *current = path.to_path_buf();
-        let offset = if was_unknown { 0 } else { std::fs::metadata(path).map(|m| m.len()).unwrap_or(0) };
+        let offset = if was_unknown {
+            0
+        } else {
+            std::fs::symlink_metadata(path)
+                .ok()
+                .filter(|m| m.file_type().is_file())
+                .map(|m| m.len())
+                .unwrap_or(0)
+        };
         let mut stream = self.stream.lock().unwrap();
         *stream = Streamer::skipping(offset, self.decode, stream.carried().clone()).marking(self.marker);
     }
@@ -1123,7 +1135,12 @@ impl Tail {
         if path.as_os_str().is_empty() {
             return None;
         }
-        let size = std::fs::metadata(path).ok()?.len();
+        let meta = std::fs::symlink_metadata(path).ok()?;
+        if meta.file_type().is_symlink() || !meta.file_type().is_file() {
+            log::warn!("refusing symlinked or non-regular transcript {}", path.display());
+            return None;
+        }
+        let size = meta.len();
         let offset = stream.offset();
         if size == offset {
             return None;
@@ -1136,17 +1153,65 @@ impl Tail {
             *stream = Streamer::skipping(size, self.decode, stream.carried().clone()).marking(self.marker);
             return None;
         }
-        let mut file = match std::fs::File::open(path) {
+        let mut file = match open_transcript_no_follow(path) {
             Ok(f) => f,
             Err(e) => {
                 log::warn!("transcript {}: {e}", path.display());
                 return None;
             }
         };
+        let actual_size = file.metadata().ok()?.len();
+        if actual_size <= offset {
+            return None;
+        }
+        let to_read = actual_size - offset;
         file.seek(SeekFrom::Start(offset)).ok()?;
-        let mut buf = Vec::with_capacity((size - offset) as usize);
-        file.take(size - offset).read_to_end(&mut buf).ok()?;
+        let mut buf = Vec::with_capacity(to_read as usize);
+        file.take(to_read).read_to_end(&mut buf).ok()?;
         Some(buf)
+    }
+}
+
+/// Open a transcript file without following a leaf symlink (`O_NOFOLLOW` on Unix,
+/// reparse-point refusal on Windows) so a symlink swapped into a transcript path
+/// can never leak arbitrary host files into chat history (S-29).
+fn open_transcript_no_follow(path: &Path) -> std::io::Result<std::fs::File> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(path)?;
+        if !file.metadata()?.is_file() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "transcript path is not a regular file",
+            ));
+        }
+        Ok(file)
+    }
+    #[cfg(windows)]
+    {
+        let file = crate::win::fs::open_read_refusing_links(path)?;
+        if !file.metadata()?.is_file() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "transcript path is not a regular file",
+            ));
+        }
+        Ok(file)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let meta = std::fs::symlink_metadata(path)?;
+        if meta.file_type().is_symlink() || !meta.file_type().is_file() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "transcript path is not a regular file",
+            ));
+        }
+        std::fs::File::open(path)
     }
 }
 
@@ -1670,6 +1735,19 @@ mod tests {
             last_words(b"signed in as ada@example.com auth: \"chatgpt\r\nError: Failed to refresh token: 401 Unauthorized\r\nPlease run codex login\r\n").as_deref(),
             Some("signed in as [email] auth: [redacted] Error: Failed to refresh token: 401 Unauthorized Please run codex login")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tail_refuses_symlinked_transcript_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let secret = dir.path().join("secret.txt");
+        std::fs::write(&secret, "top-secret-line\n").unwrap();
+        let link = dir.path().join("transcript.jsonl");
+        std::os::unix::fs::symlink(&secret, &link).unwrap();
+
+        let tail = Tail::from_offset(link, 0, echo);
+        assert!(tail.drain().is_empty(), "Tail must refuse symlinked transcript files");
     }
 
     fn a_split_multibyte_character_is_not_decoded_until_it_is_whole() {

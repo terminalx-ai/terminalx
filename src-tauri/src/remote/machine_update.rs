@@ -21,8 +21,20 @@
 //! data directory reads: the one that asked, and the one that took over.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+/// PID of the currently running authorized `terminalx-serve update` helper
+/// spawned by this runtime (0 when idle), so `control::refuse_runtime_lifecycle`
+/// permits only this exact helper to execute handover while still refusing all
+/// other runtime descendants.
+static ACTIVE_HELPER_PID: AtomicI32 = AtomicI32::new(0);
+
+#[cfg(unix)]
+pub(crate) fn is_active_helper(pid: i32) -> bool {
+    pid > 0 && ACTIVE_HELPER_PID.load(Ordering::Acquire) == pid
+}
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -629,10 +641,13 @@ impl MachineUpdates {
             }
         }
         let mut child = command.spawn().with_context(|| format!("start {}", helper.display()))?;
+        let helper_pid = child.id() as i32;
+        ACTIVE_HELPER_PID.store(helper_pid, Ordering::Release);
         log::info!("machine update: updating to {version} in helper pid {}", child.id());
         // Reaped here until a handover; the runtime that takes over reaps it then.
         std::thread::Builder::new().name("machine-update-helper".into()).spawn(move || {
             let _ = child.wait();
+            let _ = ACTIVE_HELPER_PID.compare_exchange(helper_pid, 0, Ordering::Release, Ordering::Relaxed);
         })?;
         Ok(())
     }

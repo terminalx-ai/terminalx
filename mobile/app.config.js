@@ -1,4 +1,5 @@
 import { withEntitlementsPlist } from "expo/config-plugins";
+import { withSecurityHardening } from "./plugins/security-hardening.js";
 
 // Keep static settings in app.json; only development builds carry the D badge.
 //
@@ -7,14 +8,16 @@ import { withEntitlementsPlist } from "expo/config-plugins";
 // bundle id, goes under this bundle id and without the push entitlement.
 // Push notifications do not reach such a build. Unset, nothing changes.
 export default ({ config }) => {
-  if (process.env.APP_VARIANT !== 'development') return config;
+  const isDevelopment = process.env.APP_VARIANT === 'development';
+  const hardened = withSecurityHardening(config, { isDevelopment });
+  if (!isDevelopment) return hardened;
   const development = {
-    ...config,
+    ...hardened,
     icon: './assets/icon-dev.png',
     android: {
-      ...config.android,
+      ...hardened.android,
       adaptiveIcon: {
-        ...config.android?.adaptiveIcon,
+        ...hardened.android?.adaptiveIcon,
         foregroundImage: './assets/adaptive-icon-dev.png',
       },
     },

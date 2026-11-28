@@ -3,7 +3,7 @@ import { setPipelineResolveConflicts } from "@/lib/issuePipeline";
 import { EmptyView } from "@/components/start/EmptyView";
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { Check, ChevronDown, Cloud, Copy, ExternalLink, Github, LogoLinear, FolderGit2, GitBranch, Loader2, Plus, RefreshCw, Search, Settings2, Users } from "@/icons";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openExternalWebUrl } from "@/lib/externalUrl";
 import { GH_INSTALL_URL, ghInstallCommand } from "@/lib/ghInstall";
 import { Button } from "@/components/ui/button";
 import { showError } from "@/lib/errorToasts";
@@ -876,7 +876,7 @@ export function IssuesView({
               <span className="max-w-[44ch] text-sm text-muted-foreground">{emptyReason}</span>
               {provider === "github" && ghOk === false && (
                 <div className="mt-1 flex flex-wrap justify-center gap-2">
-                  <Button size="sm" onClick={() => void openUrl(GH_INSTALL_URL).catch(() => {})}>
+                  <Button size="sm" onClick={() => void openExternalWebUrl(GH_INSTALL_URL).catch(() => {})}>
                     Install GitHub CLI <ExternalLink />
                   </Button>
                   <Button size="sm" variant="ghost" onClick={() => setTick((n) => n + 1)}>
@@ -1016,7 +1016,7 @@ export function IssuesView({
                 {projectPath && current && assigneeShown && (
                   <AssigneePicker key={`${current.provider}:${current.id}`} projectPath={projectPath} issue={current} viewer={viewer} onChange={assigned} open={assigneeOpen} onOpenChange={setAssigneeOpen} />
                 )}
-                <button type="button" onClick={() => void openUrl(selected.url)} className="flex items-center gap-1 hover:text-foreground">
+                <button type="button" onClick={() => void openExternalWebUrl(selected.url)} className="flex items-center gap-1 hover:text-foreground">
                   Open in browser <ExternalLink className="size-3" />
                 </button>
               </div>

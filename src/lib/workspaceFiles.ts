@@ -504,6 +504,7 @@ export function fileErrorText(error: unknown): string {
   }
 }
 
+const MAX_LOCAL_SOURCES = 32;
 const localSources = new Map<string, FileSource>();
 
 /**
@@ -514,7 +515,18 @@ export function useFileSource(sourceKey: string | undefined, root: string): File
   return useSyncExternalStore(onFileSourcesChanged, () => {
     if (sourceKey) return sources.get(sourceKey) ?? null;
     let local = localSources.get(root);
-    if (!local) localSources.set(root, (local = localFileSource(root)));
+    if (local) {
+      localSources.delete(root);
+      localSources.set(root, local);
+    } else {
+      local = localFileSource(root);
+      localSources.set(root, local);
+      while (localSources.size > MAX_LOCAL_SOURCES) {
+        const oldest = localSources.keys().next().value;
+        if (oldest === undefined) break;
+        localSources.delete(oldest);
+      }
+    }
     return local;
   });
 }

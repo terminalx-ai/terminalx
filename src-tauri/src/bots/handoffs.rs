@@ -393,17 +393,22 @@ fn change<T>(sink: Option<&dyn EventSink>, limit: usize, f: impl FnOnce(&mut Sto
     trim(&mut store);
     file.next = store.next;
     file.revision += 1;
-    let mut bytes;
-    loop {
+    let target = limit.max(before);
+    let serialize = |file: &mut HandoffFile, store: &Store| -> Result<Vec<u8>> {
         file.handoffs = store.handoffs.iter().map(serde_json::to_value).collect::<Result<_, _>>()?;
         file.handoffs.extend(lost_handoffs.iter().cloned());
         file.messages = store.messages.iter().map(serde_json::to_value).collect::<Result<_, _>>()?;
         file.messages.extend(lost_messages.iter().cloned());
-        bytes = serde_json::to_vec_pretty(&file)?;
-        // Over the limit, the oldest closed hand-offs and sent messages make room first; only what is open,
-        // waiting or unreadable is never dropped to fit.
-        if bytes.len() <= limit || bytes.len() <= before || !trim_bytes(&mut store) {
-            break;
+        Ok(serde_json::to_vec_pretty(&file)?)
+    };
+    let mut bytes = serialize(&mut file, &store)?;
+    // Compute the trim cutoff in O(M) instead of re-serializing the entire
+    // store 10% at a time (P-38).
+    if bytes.len() > target && trim_bytes_to(&mut store, bytes.len() - target) {
+        bytes = serialize(&mut file, &store)?;
+        // Handle any minor pretty-print indentation difference in at most one extra pass.
+        while bytes.len() > target && trim_bytes_to(&mut store, bytes.len() - target) {
+            bytes = serialize(&mut file, &store)?;
         }
     }
     if bytes.len() > limit && bytes.len() > before {
@@ -438,27 +443,59 @@ fn trim(store: &mut Store) {
     }
 }
 
-/// Drop about a tenth of what may go, to make room by bytes: sent messages first, then closed hand-offs, the bots'
-/// before the owner's, oldest first. Whether anything was dropped.
-fn trim_bytes(store: &mut Store) -> bool {
-    let sent: Vec<String> = {
-        let mut sent: Vec<(&str, &str)> = store.messages.iter().filter(|message| !message.pending).map(|message| (message.at.as_str(), message.id.as_str())).collect();
-        sent.sort();
-        sent.iter().take(sent.len().div_ceil(10)).map(|(_, id)| id.to_string()).collect()
-    };
-    if !sent.is_empty() {
-        store.messages.retain(|message| !sent.contains(&message.id));
-        return true;
+/// Drop enough trimmable items in one O(M) pass to recover at least `needed`
+/// bytes: sent messages first (oldest first), then closed hand-offs (the bots'
+/// before the owner's, oldest first). Returns whether anything was dropped.
+fn trim_bytes_to(store: &mut Store, needed: usize) -> bool {
+    let mut freed = 0usize;
+    let mut dropped_messages: BTreeSet<String> = BTreeSet::new();
+    let mut sent: Vec<(&str, &str, usize)> = store
+        .messages
+        .iter()
+        .filter(|message| !message.pending)
+        .map(|message| {
+            let approx = serde_json::to_vec_pretty(message).map(|v| v.len() + 4).unwrap_or(64);
+            (message.at.as_str(), message.id.as_str(), approx)
+        })
+        .collect();
+    sent.sort_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
+    for (_, id, approx) in sent {
+        dropped_messages.insert(id.to_owned());
+        freed = freed.saturating_add(approx);
+        if freed >= needed {
+            break;
+        }
     }
+    if !dropped_messages.is_empty() {
+        store.messages.retain(|message| !dropped_messages.contains(&message.id));
+        if freed >= needed {
+            return true;
+        }
+    }
+
     let owners = |handoff: &Handoff| handoff.by == OWNER || handoff.stopped_by.as_deref() == Some(OWNER);
-    let mut closed: Vec<(bool, String, u64)> = store.handoffs.iter().filter(|handoff| handoff.state.closed()).map(|handoff| (owners(handoff), handoff.closed.clone().unwrap_or_default(), handoff.number)).collect();
-    if closed.is_empty() {
-        return false;
+    let mut closed: Vec<(bool, String, u64, usize)> = store
+        .handoffs
+        .iter()
+        .filter(|handoff| handoff.state.closed())
+        .map(|handoff| {
+            let approx = serde_json::to_vec_pretty(handoff).map(|v| v.len() + 4).unwrap_or(128);
+            (owners(handoff), handoff.closed.clone().unwrap_or_default(), handoff.number, approx)
+        })
+        .collect();
+    closed.sort_by(|a, b| (a.0, &a.1, a.2).cmp(&(b.0, &b.1, b.2)));
+    let mut dropped_handoffs: BTreeSet<u64> = BTreeSet::new();
+    for (_, _, number, approx) in closed {
+        dropped_handoffs.insert(number);
+        freed = freed.saturating_add(approx);
+        if freed >= needed {
+            break;
+        }
     }
-    closed.sort();
-    let gone: BTreeSet<u64> = closed.iter().take(closed.len().div_ceil(10)).map(|(_, _, number)| *number).collect();
-    store.handoffs.retain(|handoff| !gone.contains(&handoff.number));
-    true
+    if !dropped_handoffs.is_empty() {
+        store.handoffs.retain(|handoff| !dropped_handoffs.contains(&handoff.number));
+    }
+    !dropped_messages.is_empty() || !dropped_handoffs.is_empty()
 }
 
 /// Change the store as a test sets it up.

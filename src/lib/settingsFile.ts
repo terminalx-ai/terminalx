@@ -26,6 +26,7 @@ export interface SettingsSaveFailure {
 }
 let state: { file: SettingsFileStatus | null; error: string | null; revision: number; saveFailure: SettingsSaveFailure | null } = { file: null, error: null, revision: 0, saveFailure: null };
 const listeners = new Set<() => void>();
+const __subscribe_listeners = (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; };
 const pending: Record<string, unknown>[] = [];
 let connected = false;
 let queue: Promise<void> = Promise.resolve();
@@ -150,5 +151,5 @@ export function createSettingsFile(): Promise<void> {
 }
 
 export function useSettingsFile() {
-  return useSyncExternalStore((listener) => { listeners.add(listener); return () => listeners.delete(listener); }, () => state, () => state);
+  return useSyncExternalStore(__subscribe_listeners, () => state, () => state);
 }

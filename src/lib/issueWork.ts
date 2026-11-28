@@ -318,6 +318,7 @@ export function cloudWorkers(input: CloudWorkInput, now = Date.now()): Map<strin
 let startedCloudWork: StartedCloudWork[] = [];
 const observedCloudWork = new Set<string>();
 const startListeners = new Set<() => void>();
+const __subscribe_startListeners = (listener: () => void) => { startListeners.add(listener); return () => { startListeners.delete(listener); }; };
 let startOwner: string | null = null;
 const accountOwner = () => {
   const { status } = getAccount();
@@ -532,7 +533,7 @@ export function useIssueWork(projectPath: string | null | undefined, provider: s
   }, []);
   const catalog = useCloudCatalog();
   const dashboard = useCloudDashboard();
-  const started = useSyncExternalStore((listener) => { startListeners.add(listener); return () => { startListeners.delete(listener); }; }, () => startedCloudWork);
+  const started = useSyncExternalStore(__subscribe_startListeners, () => startedCloudWork);
   for (const row of dashboard) {
     const list = liveCloudSessionList(row.orgId, row.workspaceId) ?? catalog.orgs[row.orgId]?.sessions[row.workspaceId]?.sessions;
     if (list?.some((session) => session.id === row.sessionId)) observedCloudWork.add(row.key);

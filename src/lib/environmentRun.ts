@@ -17,6 +17,7 @@ export type EnvironmentRun =
 let run: EnvironmentRun = { kind: "none" };
 let controller: AbortController | null = null;
 const listeners = new Set<() => void>();
+const __subscribe_listeners = (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; };
 
 function set(next: EnvironmentRun) {
   run = next;
@@ -27,10 +28,7 @@ export const getEnvironmentRun = () => run;
 
 export function useEnvironmentRun(): EnvironmentRun {
   return useSyncExternalStore(
-    (listener) => {
-      listeners.add(listener);
-      return () => listeners.delete(listener);
-    },
+    __subscribe_listeners,
     getEnvironmentRun,
   );
 }

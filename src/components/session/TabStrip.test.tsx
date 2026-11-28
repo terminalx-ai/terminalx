@@ -30,7 +30,7 @@ vi.mock("@/components/changes/PrPanel", () => ({ PrPanel: () => <div>Review PR</
 vi.mock("@/components/changes/ConflictView", () => ({ ConflictView: () => <div>Review conflict</div> }));
 const { dropEditors, getEditors, openConflict, openDiff, openPr, setConflictCount, setEditorDirty } = await import("@/lib/editors");
 const { confirmInApp: ask } = await import("@/lib/confirm");
-const { getTerminalState, restoreSessionTabSelection, selectSessionTab } = await import("@/lib/terminal");
+const { flushTerminalSelectionPersistence, getTerminalState, restoreSessionTabSelection, selectSessionTab } = await import("@/lib/terminal");
 const { newTab } = await import("@/lib/tabActions");
 const { workspaceRow } = await import("@/lib/sessionTabs");
 const { backend, FEATURE } = await import("@/test/tabsBackend");
@@ -440,6 +440,7 @@ describe("review tabs in the workspace row", () => {
     act(() => { id = openReview("pr"); });
     const selected = { kind, id: kind === "agent" ? "a2" : kind === "terminal" ? shell : kind === "browser" ? "page-feature" : id };
     act(() => selectSessionTab("a", selected));
+    flushTerminalSelectionPersistence();
     const saved = localStorage.getItem("terminalx:selected-tabs:v1");
     act(() => selectSessionTab("a", { kind: "review", id }));
     act(() => selectSessionTab("a", restoreSessionTabSelection(saved).a));

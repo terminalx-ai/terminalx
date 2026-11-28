@@ -29,6 +29,7 @@ export interface Frame {
 
 let state: BrowserState = { loaded: false, pages: [], screencast: {} };
 const listeners = new Set<() => void>();
+const __subscribe_listeners = (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; };
 function set(patch: Partial<BrowserState>) {
   state = { ...state, ...patch };
   for (const l of listeners) l();
@@ -36,10 +37,7 @@ function set(patch: Partial<BrowserState>) {
 
 export function useBrowser(): BrowserState {
   return useSyncExternalStore(
-    (cb) => {
-      listeners.add(cb);
-      return () => listeners.delete(cb);
-    },
+    __subscribe_listeners,
     () => state,
     () => state,
   );

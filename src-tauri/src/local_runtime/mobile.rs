@@ -87,6 +87,8 @@ impl WritePermit {
     }
 }
 
+const MAX_LEGACY_RETIRED: usize = 4096;
+
 #[derive(Default)]
 struct State {
     owners: HashMap<String, Owner>,
@@ -96,6 +98,7 @@ struct State {
     drivers: HashMap<String, Arc<Driver>>,
     forwarded: HashMap<String, ForwardedPhone>,
     legacy_retired: HashSet<String>,
+    legacy_retired_order: VecDeque<String>,
 }
 
 struct ForwardedPhone {
@@ -580,7 +583,14 @@ impl Registry {
         grant.driver()?;
         let entry = crate::store::index::get(session)?;
         let mode = entry.tab(tab).context("The tab does not belong to this session.")?.permission_mode.clone();
-        let revision = self.0.lock().unwrap().revisions.entry(format!("{session}/{tab}")).or_default().clone();
+        let revision = {
+            let mut state = self.0.lock().unwrap();
+            let key = format!("{session}/{tab}");
+            if state.revisions.len() >= 256 && !state.revisions.contains_key(&key) {
+                state.revisions.retain(|_, rev| Arc::strong_count(rev) > 1);
+            }
+            state.revisions.entry(key).or_default().clone()
+        };
         let epoch = *revision.lock().unwrap();
         Ok(WritePermit { grant,revision,epoch,mode })
     }
@@ -588,7 +598,18 @@ impl Registry {
     /// Invoke before acquiring a tab's runtime lock. A writer holds its epoch
     /// through actual input; stop/mode changes cannot acknowledge past that write.
     pub fn invalidate_tab(&self, session: &str, tab: &str) {
-        let revision = self.0.lock().unwrap().revisions.get(&format!("{session}/{tab}")).cloned();
+        let key = format!("{session}/{tab}");
+        let revision = {
+            let mut state = self.0.lock().unwrap();
+            match state.revisions.get(&key) {
+                Some(rev) if Arc::strong_count(rev) == 1 => {
+                    state.revisions.remove(&key);
+                    None
+                }
+                Some(rev) => Some(rev.clone()),
+                None => None,
+            }
+        };
         if let Some(revision) = revision { *revision.lock().unwrap() += 1; }
     }
 
@@ -635,6 +656,16 @@ impl Registry {
             // opaque output on the first retirement, including on an ACK retry
             // after a credential was already persisted as revoked.
             let retire_legacy = state.legacy_retired.insert(device.into());
+            if retire_legacy {
+                state.legacy_retired_order.push_back(device.into());
+                while state.legacy_retired.len() > MAX_LEGACY_RETIRED {
+                    if let Some(oldest) = state.legacy_retired_order.pop_front() {
+                        state.legacy_retired.remove(&oldest);
+                    } else {
+                        break;
+                    }
+                }
+            }
             for route in state.forwarded.values().filter(|route|
                 route.device.as_deref() == Some(device) || (route.legacy && retire_legacy)) {
                 route.output.send_modify(|generation| *generation = generation.wrapping_add(1));

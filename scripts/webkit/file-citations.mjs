@@ -96,6 +96,7 @@ try {
     await page.evaluate(() => { document.documentElement.style.zoom = "1"; });
     await page.emulateMedia({ colorScheme: "light" });
     await chip.click();
+    await page.getByRole("button", { name: "Open", exact: true }).click();
     await page.waitForFunction(() => window.__PW_FILE_ACTIONS__.length === 1);
     await chip.click({ button: "right" });
     await page.getByRole("menuitem", { name: /^Reveal in (Finder|File Explorer|File Manager)$/ }).click();

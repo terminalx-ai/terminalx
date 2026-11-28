@@ -397,7 +397,20 @@ jobs:
         run: |
           set -euo pipefail
           cd dist
-          files=$(ls | grep -v '^latest-.*\.json$')
-          gh release upload "$TAG" $files --clobber
-          gh release upload "$TAG" latest-*.json --clobber
+          shopt -s nullglob
+          files=()
+          for f in *; do
+            [[ "$f" == latest-*.json ]] && continue
+            [[ -f "$f" ]] || continue
+            files+=("$f")
+          done
+          if (( ${#files[@]} == 0 )); then
+            echo "No release assets found in dist" >&2
+            exit 1
+          fi
+          gh release upload "$TAG" --clobber -- "${files[@]}"
+          feeds=(latest-*.json)
+          if (( ${#feeds[@]} > 0 )); then
+            gh release upload "$TAG" --clobber -- "${feeds[@]}"
+          fi
           echo "Attached to $TAG:"; ls

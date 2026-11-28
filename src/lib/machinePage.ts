@@ -11,6 +11,7 @@ import type { PairedMachine } from "@/types/machines";
  */
 let requested: string | null = null;
 const listeners = new Set<() => void>();
+const __subscribe_listeners = (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; };
 function publish(next: string | null) {
   requested = next;
   for (const listener of [...listeners]) listener();
@@ -24,10 +25,7 @@ export function openMachinePage(machineId: string) {
 /** The machine whose page was asked for and not shown yet. */
 export function useMachinePageRequest(): string | null {
   return useSyncExternalStore(
-    (listener) => {
-      listeners.add(listener);
-      return () => void listeners.delete(listener);
-    },
+    __subscribe_listeners,
     () => requested,
     () => requested,
   );

@@ -8,7 +8,7 @@ import { navigateBrowserPage, sendPageInput, setScreencast, subscribeFrames, use
 import { insertText, isFocusEscapeKey, keyEvents, keyForPage, mouseEvent, nextClickCount, toPagePoint, viewportEvent, wheelEvent, wheelPixels, modifiersOf, type PageInputEvent } from "@/lib/browserInput";
 
 const modifiersFrom = (e: { altKey: boolean; ctrlKey: boolean; metaKey: boolean; shiftKey: boolean }) => ({ altKey: e.altKey, ctrlKey: e.ctrlKey, metaKey: e.metaKey, shiftKey: e.shiftKey });
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openExternalWebUrl } from "@/lib/externalUrl";
 import { isMac } from "@/lib/hotkeys";
 import { cn } from "@/lib/cn";
 import { errorMessage } from "@/lib/api";
@@ -286,7 +286,7 @@ export function BrowserView({ page, active, compact }: { session: Pick<SessionEn
           </Button>
         </WithTooltip>
         <WithTooltip label="Open in your browser">
-          <Button type="button" variant="ghost" size="icon-sm" aria-label="Open in browser" disabled={!/^https?:/i.test(page.url)} onClick={() => void openUrl(page.url).catch((e) => setError(errorMessage(e)))}>
+          <Button type="button" variant="ghost" size="icon-sm" aria-label="Open in browser" disabled={!/^https?:/i.test(page.url)} onClick={() => void openExternalWebUrl(page.url, { allowHttp: true }).catch((e) => setError(errorMessage(e)))}>
             <ExternalLink />
           </Button>
         </WithTooltip>

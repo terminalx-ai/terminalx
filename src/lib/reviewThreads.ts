@@ -1,5 +1,5 @@
 import { useEffect, useSyncExternalStore } from "react";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openExternalWebUrl } from "@/lib/externalUrl";
 import { showError } from "@/lib/errorToasts";
 import { getDraft, setDraft } from "@/lib/drafts";
 import type { ReviewComment } from "@/lib/reviewComments";
@@ -460,7 +460,7 @@ export async function setThreadResolved(workspace: string, url: string, thread: 
       title: "Thread resolved on GitHub",
       key: `review-thread-resolved:${thread.id}`,
       tone: "success",
-      actions: [{ label: "View on GitHub", keepOpen: true, run: () => openUrl(link) }],
+      actions: [{ label: "View on GitHub", keepOpen: true, run: () => openExternalWebUrl(link) }],
     });
   }
   return done;

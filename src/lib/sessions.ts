@@ -155,6 +155,7 @@ let state: State = {
 };
 
 const listeners = new Set<() => void>();
+const __subscribe_listeners = (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; };
 function set(patch: Partial<State>) {
   const next = { ...state, ...patch };
   // Background deletion/archival must not replace another destination or an explicit draft.
@@ -200,10 +201,7 @@ function set(patch: Partial<State>) {
 
 export function useSessionStore(): State {
   return useSyncExternalStore(
-    (cb) => {
-      listeners.add(cb);
-      return () => listeners.delete(cb);
-    },
+    __subscribe_listeners,
     () => state,
     () => state,
   );
@@ -212,10 +210,7 @@ export function useSessionStore(): State {
 /** Narrow selector subscription: skips re-renders when unrelated session store fields change. */
 export function useSessionSelector<T>(selector: (store: State) => T): T {
   return useSyncExternalStore(
-    (cb) => {
-      listeners.add(cb);
-      return () => listeners.delete(cb);
-    },
+    __subscribe_listeners,
     () => selector(state),
     () => selector(state),
   );

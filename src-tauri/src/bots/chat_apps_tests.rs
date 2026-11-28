@@ -579,3 +579,26 @@ fn outbound_bot_replies_scrub_configured_secrets_and_token_patterns_s21() {
     assert!(scrubbed.contains("[REDACTED]"));
     assert!(scrubbed.contains("Status: all checks passed."), "benign reply text must stay intact");
 }
+
+#[test]
+fn slack_people_cache_bounds_size_and_evicts_stale_or_oldest_entries() {
+    let mut people: People = BTreeMap::new();
+    let base = std::time::Instant::now();
+    // Insert MAX_SLACK_PEOPLE + 20 entries; map must stay capped at MAX_SLACK_PEOPLE.
+    for i in 0..(MAX_SLACK_PEOPLE + 20) {
+        let ts = base + Duration::from_millis(i as u64);
+        cache_slack_person(
+            &mut people,
+            format!("U{i:04}"),
+            format!("User {i}"),
+            None,
+            false,
+            ts,
+        );
+    }
+    assert_eq!(people.len(), MAX_SLACK_PEOPLE);
+    // The 20 oldest entries were evicted; newest entries remain.
+    assert!(!people.contains_key("U0000"));
+    assert!(!people.contains_key("U0019"));
+    assert!(people.contains_key(&format!("U{:04}", MAX_SLACK_PEOPLE + 19)));
+}

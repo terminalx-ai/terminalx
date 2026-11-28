@@ -41,8 +41,6 @@ const ACCESS_ALLOWED_COMPOUND_ACE_TYPE: u8 = 4;
 const ACCESS_ALLOWED_OBJECT_ACE_TYPE: u8 = 5;
 const ACCESS_ALLOWED_CALLBACK_ACE_TYPE: u8 = 9;
 const ACCESS_ALLOWED_CALLBACK_OBJECT_ACE_TYPE: u8 = 11;
-/// An entry that only passes to children and grants nothing on the object.
-const INHERIT_ONLY_ACE: u8 = 0x08;
 /// In an object ACE's flags: which of its two GUIDs are present.
 const ACE_OBJECT_TYPE_PRESENT: u32 = 0x1;
 const ACE_INHERITED_OBJECT_TYPE_PRESENT: u32 = 0x2;
@@ -321,11 +319,14 @@ unsafe fn read_access(owner: PSID, dacl: *mut ACL, descriptor: PSECURITY_DESCRIP
         if unsafe { GetAce(dacl, index, &mut ace) } == 0 {
             return Err(io::Error::last_os_error());
         }
-        // SAFETY: every ACE starts with an ACE_HEADER.
-        let header = unsafe { &*(ace as *const ACE_HEADER) };
-        if header.AceFlags & INHERIT_ONLY_ACE != 0 {
-            continue;
+        if ace.is_null() {
+            return Err(io::Error::other("null ACE pointer"));
         }
+        // SAFETY: `ace` is non-null and every ACE starts with an ACE_HEADER.
+        let header = unsafe { &*(ace as *const ACE_HEADER) };
+        // Audit INHERIT_ONLY_ACE trustees too: an inherit-only allow ACE for
+        // another account on a private directory would grant that account
+        // access to newly created secret files inside it.
         match header.AceType {
             ACCESS_ALLOWED_ACE_TYPE | ACCESS_ALLOWED_CALLBACK_ACE_TYPE => {
                 // SAFETY: these ACEs have the ACCESS_ALLOWED_ACE layout, and
@@ -513,5 +514,19 @@ mod tests {
         let child = dir.path().join("child");
         std::fs::write(&child, b"y").unwrap();
         verify_private(&child).unwrap();
+        // An inherit-only allow ACE for Everyone on a private directory must be refused.
+        let inherit_only = Descriptor::from_sddl(&format!("D:P(A;OICI;FA;;;{})(A;OICIIO;FR;;;WD)", current_user().unwrap())).unwrap();
+        let dir_name = wide(dir.path().as_os_str());
+        // SAFETY: applying a parsed test descriptor's DACL.
+        let status = unsafe {
+            let mut present = 0;
+            let mut defaulted = 0;
+            let mut dacl: *mut ACL = std::ptr::null_mut();
+            GetSecurityDescriptorDacl(inherit_only.as_ptr(), &mut present, &mut dacl, &mut defaulted);
+            SetNamedSecurityInfoW(dir_name.as_ptr(), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION, std::ptr::null_mut(), std::ptr::null_mut(), dacl, std::ptr::null())
+        };
+        assert_eq!(status, ERROR_SUCCESS);
+        let error = verify_private(dir.path()).unwrap_err();
+        assert!(error.to_string().contains("S-1-1-0"), "{error}");
     }
 }

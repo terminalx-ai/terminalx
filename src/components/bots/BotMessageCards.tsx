@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openExternalWebUrl } from "@/lib/externalUrl";
 import type { BotMessage, HandoffNote, MentionSource } from "@terminalx/portable/events";
 import { messageTime } from "@terminalx/portable/transcript";
 import {
@@ -376,7 +376,7 @@ function MentionCard({ card, source, text, seq, ts, queued, className }: { card:
             <footer className="flex flex-wrap items-center gap-x-1.5 gap-y-1.5 border-t border-hairline px-4 py-2 @max-[24rem]/botcard:px-3">
               {source.place && <Chip className={linkChip} data-testid="bot-card-place"><Hash className="size-3 shrink-0" />{source.place}</Chip>}
               {source.url && (
-                <ChipButton className={linkChip} onClick={() => { setFailed(null); void openUrl(source.url!).catch((cause) => setFailed(errorMessage(cause))); }} data-testid="bot-card-open">
+                <ChipButton className={linkChip} onClick={() => { setFailed(null); void openExternalWebUrl(source.url!).catch((cause) => setFailed(errorMessage(cause))); }} data-testid="bot-card-open">
                   <ExternalLink className="size-3 shrink-0" />{service.open}
                 </ChipButton>
               )}

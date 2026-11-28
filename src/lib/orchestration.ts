@@ -6,6 +6,7 @@ import type { AutoStep, Cap, MergeState, PieceKind, PieceState, PieceTry, Route,
 /** The runs this window has heard of, by the session that leads each: a lead has one run to show, its newest. */
 let runs: Record<string, Run | null> = {};
 const listeners = new Set<() => void>();
+const __subscribe_listeners = (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; };
 let booted = false;
 
 function publish(next: Record<string, Run | null>) {
@@ -43,10 +44,7 @@ function boot() {
 /** The run `sessionId` leads: `undefined` until read, `null` when it leads none. */
 export function useRun(sessionId: string | undefined, enabled = true): Run | null | undefined {
   const all = useSyncExternalStore(
-    (listener) => {
-      listeners.add(listener);
-      return () => listeners.delete(listener);
-    },
+    __subscribe_listeners,
     () => runs,
     () => runs,
   );
@@ -82,10 +80,7 @@ async function readAll() {
  */
 export function useRunsByLead(enabled = true): Record<string, Run | null> {
   const all = useSyncExternalStore(
-    (listener) => {
-      listeners.add(listener);
-      return () => listeners.delete(listener);
-    },
+    __subscribe_listeners,
     () => runs,
     () => runs,
   );
@@ -460,6 +455,7 @@ export function onOrchestratorSettingsRequest(listener: () => void): () => void 
 /** Which sessions show their Run view in place of the chat. Kept while the window lives: a session comes back as it was left. */
 let runViews: Record<string, boolean> = {};
 const runViewListeners = new Set<() => void>();
+const __subscribe_runViewListeners = (listener: () => void) => { runViewListeners.add(listener); return () => { runViewListeners.delete(listener); }; };
 export function showRunView(sessionId: string, shown: boolean) {
   if (!!runViews[sessionId] === shown) return;
   runViews = { ...runViews, [sessionId]: shown };
@@ -467,10 +463,7 @@ export function showRunView(sessionId: string, shown: boolean) {
 }
 export function useRunViewShown(sessionId: string): boolean {
   const all = useSyncExternalStore(
-    (listener) => {
-      runViewListeners.add(listener);
-      return () => runViewListeners.delete(listener);
-    },
+    __subscribe_runViewListeners,
     () => runViews,
     () => runViews,
   );

@@ -9,8 +9,8 @@ import { TextField } from "../TextField";
 import { useTheme } from "../theme";
 import { keyboardAvoidingBehavior } from "@mobile/ui/keyboard";
 
-/** The launch flow's own page frame: a header, a scrolling body and a foot above the keyboard. */
-export type RepositoriesPage = (title: string, onBack: () => void, body: ReactNode, foot: ReactNode, subtitle?: string) => ReactNode;
+/** The launch flow's own page frame: a header, a scrolling body (or virtualized list container when `scroll: false`) and a foot above the keyboard. */
+export type RepositoriesPage = (title: string, onBack: () => void, body: ReactNode, foot: ReactNode, subtitle?: string, options?: { scroll?: boolean }) => ReactNode;
 
 /** The quiet paragraph a page opens with. */
 export function Lede({ children, small }: { children: string; small?: boolean }) {

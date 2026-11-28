@@ -9,6 +9,7 @@ import { api } from "@/lib/api";
 let sizes: Record<string, number> = {};
 const asked = new Set<string>();
 const listeners = new Set<() => void>();
+const __subscribe_listeners = (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; };
 
 function publish(path: string, bytes: number) {
   sizes = { ...sizes, [path]: bytes };
@@ -45,10 +46,7 @@ export function useWorkspaceSizes(projectPath: string, paths: string[], active: 
     for (const path of key ? key.split("\n") : []) measure(projectPath, path);
   }, [active, projectPath, key]);
   return useSyncExternalStore(
-    (listener) => {
-      listeners.add(listener);
-      return () => listeners.delete(listener);
-    },
+    __subscribe_listeners,
     () => sizes,
     () => sizes,
   );

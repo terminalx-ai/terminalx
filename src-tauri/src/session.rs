@@ -373,6 +373,8 @@ pub(crate) struct ScreenPromptState {
     candidate: Option<tui::ScreenPrompt>,
 }
 
+type ScreenPromptScan = (Option<Instant>, Option<tui::ScreenPrompt>, tui::Composer);
+
 /// How the wait for a pane's CLI to listen ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Readiness {
@@ -1586,6 +1588,17 @@ pub struct SessionManager {
     /// (PRO-460), by `key_of`: kept apart from the CLI, so a stop, an exit or
     /// a restart that drops the CLI still takes the card down.
     screen_prompts: Arc<Mutex<std::collections::HashSet<String>>>,
+    /// Cached VT100 screen scan results per tab `key_of`, keyed by the pane's
+    /// `last_output` instant so idle panes skip redundant 5s screen scans (P-82).
+    screen_prompt_scans: Arc<Mutex<HashMap<String, ScreenPromptScan>>>,
+    /// In-memory `pane_id -> (session_id, tab_id)` map so `session_of_process`
+    /// resolves pane callers without full `index::load()` scans (P-58).
+    #[cfg_attr(not(unix), allow(dead_code))]
+    pane_sessions: Arc<Mutex<HashMap<String, (String, String)>>>,
+    /// Broadcast generation + Condvar signaled on status/ask/turn/recovery
+    /// mutations so `control.rs` `wait`/`wait_many`/`wait_run` park without
+    /// 50ms/250ms polling loops (P-52).
+    wait_signal: Arc<(Mutex<u64>, std::sync::Condvar)>,
 }
 
 /// Native tab-lifetime sidecar; weak runtime ownership avoids retaining tabs.
@@ -2182,7 +2195,10 @@ impl SessionManager {
             follow: Arc::default(),
             first_starts: Arc::default(),
             screen_prompts: Arc::default(),
+            screen_prompt_scans: Arc::default(),
             account_switch: Arc::default(),
+            pane_sessions: Arc::default(),
+            wait_signal: Arc::default(),
         };
         let mut watcher = manager.clone();
         // The polling copy must not keep its own lifetime alive. In particular,
@@ -2284,7 +2300,7 @@ impl SessionManager {
             let drawn = pane.and_then(|pane| drawn_at(&pane));
             // A question the CLI drew in its own screen has the tab waiting
             // on the reader, not stalled (PRO-460).
-            self.watch_screen_prompt(&mut rt, drawn.map(|drawn| now.saturating_duration_since(drawn)));
+            self.watch_screen_prompt(&mut rt, drawn, drawn.map(|drawn| now.saturating_duration_since(drawn)));
             if let Some(at) = rt.stalled_at {
                 if drawn.is_some_and(|drawn| drawn > at) {
                     rt.incidents.progress("terminal_output");
@@ -2324,7 +2340,7 @@ impl SessionManager {
     /// tab back. A question a hook asked has its own card, and is left to it.
     /// A CLI that is no longer there to ask (stopped, exited, left the
     /// terminal, starting again) asks nothing: a question shown is taken down.
-    fn watch_screen_prompt(&self, rt: &mut TabRuntime, quiet: Option<Duration>) {
+    fn watch_screen_prompt(&self, rt: &mut TabRuntime, drawn: Option<Instant>, quiet: Option<Duration>) {
         let pane = match &rt.engine {
             Engine::Cli(p) if p.harness == CliKind::Claude && p.by_hand.is_none() => Some(p.pane_id.clone()),
             _ => None,
@@ -2332,7 +2348,9 @@ impl SessionManager {
         let live = pane.as_ref().is_some_and(|pane| self.terminals.is_running(pane))
             && self.left_the_terminal(rt).is_none()
             && matches!(&rt.engine, Engine::Cli(p) if p.ready.marked());
+        let key = rt.key();
         let (Some(pane), true) = (pane, live) else {
+            self.screen_prompt_scans.lock().unwrap().remove(&key);
             self.screen_prompt_is(rt, None);
             return;
         };
@@ -2342,7 +2360,19 @@ impl SessionManager {
         // A prompt being typed in is not something the CLI is asking.
         let writer = self.writers.lock().unwrap().get(&pane).cloned();
         let Ok(_typing) = writer.as_ref().map_or(Ok(None), |writer| writer.try_lock().map(Some)) else { return };
-        let Some((read, composer)) = self.terminals.screen(&pane, |screen| (claude::pty::terminal_prompt(screen), claude::pty::composer(screen))) else { return };
+        // Skip redundant 5s VT100 screen scans when pane output has not advanced
+        // since the previous scan, reusing the cached screen parse (P-82).
+        let cached = self.screen_prompt_scans.lock().unwrap().get(&key).and_then(|(last_drawn, read, composer)| {
+            (*last_drawn == drawn).then(|| (read.clone(), composer.clone()))
+        });
+        let (read, composer) = match cached {
+            Some(pair) => pair,
+            None => {
+                let Some(pair) = self.terminals.screen(&pane, |screen| (claude::pty::terminal_prompt(screen), claude::pty::composer(screen))) else { return };
+                self.screen_prompt_scans.lock().unwrap().insert(key, (drawn, pair.0.clone(), pair.1.clone()));
+                pair
+            }
+        };
         let quiet = quiet.unwrap_or_default();
         let Engine::Cli(p) = &mut rt.engine else { return };
         let state = &mut p.input.prompt;
@@ -2513,8 +2543,10 @@ impl SessionManager {
         // Take the card down as soon as the CLI has, not at the watcher's next pass.
         std::thread::sleep(SCREEN_PROMPT_SETTLE);
         let mut rt = rt_arc.lock().unwrap();
+        self.screen_prompt_scans.lock().unwrap().remove(&rt.key());
+        let drawn = self.terminals.last_output(&pane);
         let quiet = self.terminals.quiet_for(&pane);
-        self.watch_screen_prompt(&mut rt, quiet);
+        self.watch_screen_prompt(&mut rt, drawn, quiet);
         Ok(())
     }
 
@@ -3088,6 +3120,16 @@ impl SessionManager {
             prompt_request_id,
             payload,
         };
+        if matches!(
+            &ev.payload,
+            Payload::PermissionRequested { .. }
+                | Payload::QuestionsAsked { .. }
+                | Payload::PermissionDecided { .. }
+                | Payload::TurnCompleted { .. }
+                | Payload::Recovery { .. }
+        ) {
+            self.notify_waiters();
+        }
         if ev.payload.is_persisted() {
             if let Ok(line) = serde_json::to_string(&ev) {
                 if let Err(e) = store::append_line(&rt.log_path, &line) {
@@ -3353,6 +3395,7 @@ impl SessionManager {
         rt.status = status;
         self.observer.tab_status(rt.key(), status);
         self.sink.emit("tab_status", &TabStatusEvent { session_id: rt.session_id.clone(), tab_id: rt.tab_id.clone(), status });
+        self.notify_waiters();
         true
     }
 
@@ -3513,6 +3556,32 @@ impl SessionManager {
         runtime.map(|r| r.lock().unwrap().status).unwrap_or(TabStatus::Idle)
     }
 
+    /// Current wait-signal generation; snapshot before calling `wait_view` and
+    /// pass to [`Self::wait_for_change`] to park without lost wakeups (P-52).
+    pub fn wait_generation(&self) -> u64 {
+        *self.wait_signal.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Block until a status/event/ask/recovery mutation advances the wait
+    /// generation past `seen`, or `timeout` elapses (P-52).
+    pub fn wait_for_change(&self, seen: u64, timeout: Duration) -> u64 {
+        let (lock, cvar) = &*self.wait_signal;
+        let guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        if *guard != seen {
+            return *guard;
+        }
+        let (guard, _) = cvar.wait_timeout(guard, timeout).unwrap_or_else(|e| e.into_inner());
+        *guard
+    }
+
+    pub(crate) fn notify_waiters(&self) {
+        let (lock, cvar) = &*self.wait_signal;
+        let mut generation = lock.lock().unwrap_or_else(|e| e.into_inner());
+        *generation = generation.wrapping_add(1);
+        drop(generation);
+        cvar.notify_all();
+    }
+
     /// What `terminalx wait` goes by. A tab with no runtime has nothing
     /// running and nothing to answer.
     pub fn wait_view(&self, session_id: &str, tab_id: &str) -> WaitView {
@@ -3545,6 +3614,7 @@ impl SessionManager {
             rt.pending.insert("ask".into(), PendingAsk { tool_use_id: "tool".into(), tool_name: "Bash".into(), input: serde_json::json!({}), suggestions: Vec::new() });
         }
         self.set_display_status(&mut rt, status);
+        self.notify_waiters();
     }
 
     /// An agent's question card open on a tab, as its agent's `tool` would raise one.
@@ -3552,6 +3622,7 @@ impl SessionManager {
     pub(crate) fn put_question_for_tests(&self, session_id: &str, tab_id: &str, tool: &str, input: serde_json::Value) {
         let runtime = self.runtime(session_id, tab_id).unwrap();
         runtime.lock().unwrap().pending.insert(format!("question-{tab_id}"), PendingAsk { tool_use_id: "tool".into(), tool_name: tool.into(), input, suggestions: Vec::new() });
+        self.notify_waiters();
     }
 
     /// Hold tab `tab_id`'s lock on a thread of its own, as a slow launch does, until the sender is dropped or sent to.
@@ -3720,7 +3791,7 @@ impl SessionManager {
         Ok(match found {
             None => None,
             Some(Root::Tab(session, tab)) => Some(Placed { session: Some(session), tab: Some(tab) }),
-            Some(Root::Pane(pane)) => Some(Self::place_pane(&pane)?),
+            Some(Root::Pane(pane)) => Some(self.place_pane(&pane)?),
         })
     }
 
@@ -3728,16 +3799,74 @@ impl SessionManager {
     /// terminal of its session (`<session>:…`, a workspace setup's included),
     /// in a session with tabs or none. A pane of no session (an agent's
     /// setup) is still a TerminalX pane: placed, in no session.
+    ///
+    /// Checks the in-memory `pane_sessions` / `cli_panes` maps first, falling
+    /// back to a raw minimal read of `sessions/index.json` without projecting
+    /// N `message-activity.json` sidecars (P-58).
     #[cfg(unix)]
-    fn place_pane(pane: &str) -> Result<Placed> {
-        let sessions = index::load().with_context(|| format!("read the sessions to place a process in pane {pane}"))?;
-        Ok(sessions.iter().find_map(|session| {
-            if let Some(tab) = session.tabs.iter().find(|tab| tab.pane_id() == pane) {
+    fn place_pane(&self, pane: &str) -> Result<Placed> {
+        if let Some((session, tab)) = self.pane_sessions.lock().unwrap_or_else(|e| e.into_inner()).get(pane).cloned() {
+            return Ok(Placed { session: Some(session), tab: Some(tab) });
+        }
+        {
+            let cli_panes = self.cli_panes.lock().unwrap_or_else(|e| e.into_inner());
+            for (key, (_, tracked_pane)) in cli_panes.iter() {
+                if tracked_pane == pane {
+                    if let Some((session, tab)) = key.split_once('/') {
+                        let pair = (session.to_owned(), tab.to_owned());
+                        self.pane_sessions.lock().unwrap_or_else(|e| e.into_inner()).insert(pane.to_owned(), pair.clone());
+                        return Ok(Placed { session: Some(pair.0), tab: Some(pair.1) });
+                    }
+                }
+            }
+        }
+        #[derive(serde::Deserialize, Default)]
+        struct MinimalIndex {
+            #[serde(default)]
+            sessions: Vec<MinimalSession>,
+        }
+        #[derive(serde::Deserialize)]
+        struct MinimalSession {
+            #[serde(default)]
+            id: String,
+            #[serde(default)]
+            tabs: Vec<MinimalTab>,
+        }
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct MinimalTab {
+            #[serde(default)]
+            id: String,
+            #[serde(default)]
+            follow: MinimalFollow,
+        }
+        #[derive(serde::Deserialize, Default)]
+        #[serde(rename_all = "camelCase")]
+        struct MinimalFollow {
+            #[serde(default)]
+            pane: Option<String>,
+        }
+        let index_path = store::root()?.join("sessions/index.json");
+        let raw: MinimalIndex = store::read_json(&index_path)
+            .with_context(|| format!("read the sessions to place a process in pane {pane}"))?
+            .unwrap_or_default();
+        let placed = raw.sessions.iter().find_map(|session| {
+            if let Some(tab) = session.tabs.iter().find(|tab| {
+                tab.follow.pane.as_deref().map_or_else(|| format!("tab:{}", tab.id) == pane, |p| p == pane)
+            }) {
                 return Some(Placed { session: Some(session.id.clone()), tab: Some(tab.id.clone()) });
             }
             pane.starts_with(&format!("{}:", session.id))
                 .then(|| Placed { session: Some(session.id.clone()), tab: session.tabs.first().map(|tab| tab.id.clone()) })
-        }).unwrap_or(Placed { session: None, tab: None }))
+        }).unwrap_or(Placed { session: None, tab: None });
+        if let (Some(session), Some(tab)) = (&placed.session, &placed.tab) {
+            let mut map = self.pane_sessions.lock().unwrap_or_else(|e| e.into_inner());
+            if map.len() >= 1024 {
+                map.clear();
+            }
+            map.insert(pane.to_owned(), (session.clone(), tab.clone()));
+        }
+        Ok(placed)
     }
 
     /// Keep [`Self::children`] as `rt.child_pid` says: called wherever it changes.
@@ -7199,6 +7328,10 @@ impl SessionManager {
         });
         rt.turn_open = false;
         self.cli_panes.lock().unwrap_or_else(|e| e.into_inner()).insert(rt.key(), (kind, pane.clone()));
+        self.pane_sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(pane.clone(), (rt.session_id.clone(), rt.tab_id.clone()));
         self.announce_pane(rt);
         self.follow_transcript(rt_arc, tail, pane, generation);
         // The process is now fully owned, including its hook token and

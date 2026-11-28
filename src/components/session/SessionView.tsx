@@ -12,7 +12,7 @@ import { describeGithubIdentity, refreshGithubIdentity, useGithubIdentity } from
 import type { GithubIdentity } from "@/lib/api";
 import { toggleTabView, useTabViews } from "@/lib/tabViews";
 import { followedSelection, isTerminalTab, tabViewIn } from "@/lib/tabFront";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openExternalWebUrl } from "@/lib/externalUrl";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { SessionIssueWork } from "@/components/issues/IssueWork";
@@ -876,7 +876,7 @@ export const SessionView = memo(function SessionView({
               <WithTooltip label={session.issue.title + (session.issueWork?.link ? ` · ${linkText(session.issueWork.link)}` : "")}>
                 <button
                   type="button"
-                  onClick={() => void openUrl(session.issue!.url)}
+                  onClick={() => void openExternalWebUrl(session.issue!.url)}
                   className={cn("ml-1 flex shrink-0 items-center gap-1 rounded-md bg-veil-raised px-1.5 py-0.5 text-[11px] text-muted-foreground hover:text-foreground", HEADER_TIGHT)}
                 >
                   <CircleDot className="size-3" />

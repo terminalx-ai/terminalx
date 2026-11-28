@@ -76,9 +76,10 @@ pub(super) fn run(root: &Path, cwd: &Path, managed: bool) {
         assert!(!stale());
         assert_eq!(launches(root), before);
 
-        // The list/view and required checks may complete, but cannot renew
-        // authority before the next read or the actual enqueue mutation.
-        for count in [1, 2] {
+        // The list/view (wave 1) and concurrent enrichment reads (wave 2: checks + queue)
+        // may complete, but cannot renew authority before the next wave or enqueue mutation.
+        let boundaries: &[usize] = if queue { &[1, 2] } else { &[1] };
+        for &count in boundaries {
             let before = launches(root);
             let (arrived, release) = after_outputs(count);
             let path = cwd.to_path_buf();
@@ -92,6 +93,7 @@ pub(super) fn run(root: &Path, cwd: &Path, managed: bool) {
         }
 
         let _ = std::fs::remove_file(root.join("panel-enqueued"));
+        let before_hold = launches(root);
         std::fs::write(root.join("hold"), if queue { "panel-merge\n" } else { "panel-checks\n" }).unwrap();
         let path = cwd.to_path_buf();
         let worker = std::thread::spawn(move || invoke_panel(operation, &path));
@@ -102,7 +104,11 @@ pub(super) fn run(root: &Path, cwd: &Path, managed: bool) {
             std::thread::sleep(Duration::from_millis(5));
         }
         let last = std::fs::read_to_string(root.join("launches")).unwrap();
-        assert!(last.lines().last().unwrap().starts_with(if queue { "gh pr merge " } else { "gh pr checks " }));
+        let expected_prefix = if queue { "gh pr merge " } else { "gh pr checks " };
+        assert!(
+            last.lines().skip(before_hold).any(|line| line.starts_with(expected_prefix)),
+            "expected `{expected_prefix}` among launches since hold"
+        );
         let started = Instant::now();
         policy(true, managed);
         assert!(started.elapsed() < Duration::from_secs(5));

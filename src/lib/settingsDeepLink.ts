@@ -57,6 +57,7 @@ let notice: UnknownSettingLinkNotice | null = null;
 let nextNotice = 1;
 let timer: ReturnType<typeof setTimeout> | undefined;
 const listeners = new Set<() => void>();
+const __subscribe_listeners = (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; };
 
 function emit() {
   for (const listener of [...listeners]) listener();
@@ -85,5 +86,5 @@ export function getUnknownSettingLink(): UnknownSettingLinkNotice | null {
 }
 
 export function useUnknownSettingLink(): UnknownSettingLinkNotice | null {
-  return useSyncExternalStore((listener) => { listeners.add(listener); return () => { listeners.delete(listener); }; }, () => notice, () => notice);
+  return useSyncExternalStore(__subscribe_listeners, () => notice, () => notice);
 }

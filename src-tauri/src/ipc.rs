@@ -62,7 +62,33 @@ pub(crate) fn endpoint(root: &Path, name: &str) -> PathBuf {
 pub(crate) fn in_home(root: &Path, candidate: &Path) -> bool {
     #[cfg(unix)]
     {
-        candidate.parent() == Some(root.join("run").as_path())
+        use std::path::Component;
+        if !candidate.is_absolute() {
+            return false;
+        }
+        if candidate
+            .components()
+            .any(|c| matches!(c, Component::ParentDir | Component::CurDir))
+        {
+            return false;
+        }
+        if !matches!(candidate.components().next_back(), Some(Component::Normal(_))) {
+            return false;
+        }
+        // Refuse leaf symlinks inside `run/` pointing to another endpoint (S-30).
+        if std::fs::symlink_metadata(candidate)
+            .is_ok_and(|meta| meta.file_type().is_symlink())
+        {
+            return false;
+        }
+        let Some(parent) = candidate.parent() else {
+            return false;
+        };
+        let run_dir = root.join("run");
+        match (crate::paths::canonicalize(&run_dir), crate::paths::canonicalize(parent)) {
+            (Ok(real_run), Ok(real_parent)) => real_parent == real_run,
+            _ => false,
+        }
     }
     #[cfg(windows)]
     {
@@ -86,6 +112,34 @@ pub(crate) fn test_endpoint(dir: &Path, name: &str) -> PathBuf {
     {
         let _ = dir;
         PathBuf::from(format!(r"\\.\pipe\terminalx-test-{}-{name}", uuid::Uuid::new_v4().simple()))
+    }
+}
+
+#[cfg(all(test, unix))]
+mod unix_tests {
+    use super::*;
+
+    #[test]
+    fn in_home_rejects_traversal_and_symlinks_s30() {
+        let home = tempfile::tempdir().unwrap();
+        let run = home.path().join("run");
+        std::fs::create_dir_all(&run).unwrap();
+        let real_sock = run.join("hooks.sock");
+        std::fs::write(&real_sock, b"").unwrap();
+        assert!(in_home(home.path(), &real_sock));
+
+        // Traversal outside run/ must be rejected.
+        assert!(!in_home(home.path(), &run.join("..")));
+        assert!(!in_home(home.path(), &run.join("../outside.sock")));
+        assert!(!in_home(home.path(), &run.join(".")));
+        assert!(!in_home(home.path(), Path::new("relative.sock")));
+
+        // Symlink inside run/ pointing outside must be rejected.
+        let outside = home.path().join("other.sock");
+        std::fs::write(&outside, b"").unwrap();
+        let link = run.join("sneaky.sock");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        assert!(!in_home(home.path(), &link));
     }
 }
 

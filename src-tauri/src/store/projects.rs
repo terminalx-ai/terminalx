@@ -143,7 +143,8 @@ fn validate_preview_urls(urls: &[PreviewUrlEntry]) -> Result<()> {
 /// Only this store; the hooks use `configuration::setup_script` and `configuration::archive_script` for every layer.
 pub fn scripts(path: &Path) -> Result<RepositoryScripts> {
     let canonical = |path: &Path| crate::paths::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    Ok(load()?.projects.into_iter().find(|project| canonical(Path::new(&project.path)) == canonical(path))
+    let target = canonical(path);
+    Ok(load()?.projects.into_iter().find(|project| canonical(Path::new(&project.path)) == target)
         .and_then(|project| project.scripts).unwrap_or_default())
 }
 
@@ -473,33 +474,78 @@ fn migrations_path() -> Result<PathBuf> {
     Ok(super::root()?.join("projects-migrations.json"))
 }
 
+#[cfg(not(test))]
+static PROJECTS_MIGRATED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(test)]
+fn migrated_test_roots() -> &'static std::sync::Mutex<std::collections::HashSet<PathBuf>> {
+    static ROOTS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<PathBuf>>> =
+        std::sync::OnceLock::new();
+    ROOTS.get_or_init(Default::default)
+}
+
+fn is_migration_done(marker_path: &Path) -> bool {
+    #[cfg(not(test))]
+    {
+        let _ = marker_path;
+        PROJECTS_MIGRATED.load(std::sync::atomic::Ordering::Acquire)
+    }
+    #[cfg(test)]
+    {
+        migrated_test_roots()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(marker_path)
+    }
+}
+
+fn mark_migration_done(marker_path: &Path) {
+    #[cfg(not(test))]
+    {
+        let _ = marker_path;
+        PROJECTS_MIGRATED.store(true, std::sync::atomic::Ordering::Release);
+    }
+    #[cfg(test)]
+    {
+        migrated_test_roots()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(marker_path.to_path_buf());
+    }
+}
+
 /// A marker that cannot be read counts as current: migrating again would
 /// forget an Off chosen since.
-fn migrated_version() -> Result<u32> {
-    let path = migrations_path()?;
-    Ok(match super::read_json::<serde_json::Value>(&path) {
+fn migrated_version(path: &Path) -> u32 {
+    match super::read_json::<serde_json::Value>(path) {
         Ok(None) => 0,
         Ok(Some(marker)) => marker["version"].as_u64().map_or(PROJECTS_VERSION, |version| u32::try_from(version).unwrap_or(u32::MAX)),
         Err(error) => {
             log::warn!("read {}: {error:#}", path.display());
             PROJECTS_VERSION
         }
-    })
+    }
 }
 
 fn load() -> Result<ProjectsFile> {
     let f: ProjectsFile = super::read_json(&file_path()?)?.unwrap_or_default();
-    if migrated_version()? >= PROJECTS_VERSION {
+    let marker = migrations_path()?;
+    if is_migration_done(&marker) {
         return Ok(f);
     }
-    Ok(migrate(f))
+    if migrated_version(&marker) >= PROJECTS_VERSION {
+        mark_migration_done(&marker);
+        return Ok(f);
+    }
+    Ok(migrate(f, &marker))
 }
 
 /// Forget the switches a build from before #700 saved as `false`, once, and
 /// answer with the file as it then stands on disk. The marker is written
 /// first: should the file then fail to be written, its `false`s stay and read
 /// as Off. Should the marker fail, nothing is forgotten until it can be written.
-fn migrate(f: ProjectsFile) -> ProjectsFile {
+fn migrate(f: ProjectsFile, marker: &Path) -> ProjectsFile {
     let mut migrated = f.clone();
     for project in &mut migrated.projects {
         if let Some(settings) = project.issue_pipeline.as_mut() {
@@ -510,10 +556,11 @@ fn migrate(f: ProjectsFile) -> ProjectsFile {
             project.issue_pipeline = None;
         }
     }
-    if let Err(error) = migrations_path().and_then(|path| super::write_json(&path, &serde_json::json!({ "version": PROJECTS_VERSION }))) {
+    if let Err(error) = super::write_json(marker, &serde_json::json!({ "version": PROJECTS_VERSION })) {
         log::warn!("mark projects.json migrated: {error:#}");
         return f;
     }
+    mark_migration_done(marker);
     if migrated.projects == f.projects {
         return migrated;
     }
@@ -997,5 +1044,33 @@ mod tests {
         assert_eq!(last.as_deref(), Some(a.path.as_str()));
         remove(&a.path).unwrap();
         assert!(list().unwrap().0.is_empty());
+    }
+
+    #[test]
+    fn migration_check_is_cached_after_first_load_and_scripts_resolves_target_once() {
+        let _home = crate::store::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let project = add(dir.path().to_str().unwrap()).unwrap();
+        let marker = migrations_path().unwrap();
+        assert!(marker.exists());
+        // Removing the marker after initial load does not trigger re-reading/re-creating it.
+        std::fs::remove_file(&marker).unwrap();
+        assert_eq!(list().unwrap().0.len(), 1);
+        assert!(!marker.exists(), "load() should not re-read or re-run migrations once cached");
+
+        let saved_scripts = RepositoryScripts {
+            setup: "echo setup".into(),
+            archive: "echo archive".into(),
+            archive_timeout_minutes: Some(5),
+        };
+        update(
+            &project.path,
+            ProjectPatch {
+                scripts: Some(saved_scripts.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(scripts(dir.path()).unwrap(), saved_scripts);
     }
 }

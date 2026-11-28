@@ -10,7 +10,7 @@ import { Check, ChevronsUpDown, CircleAlert, ExternalLink, Loader2, Monitor, Moo
 import { bindingText, useKeymap } from "@/lib/shortcuts";
 import { isMac, profile } from "@/lib/platform";
 import { getVersion } from "@tauri-apps/api/app";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openExternalWebUrl } from "@/lib/externalUrl";
 import { checkForUpdate, installUpdate, useUpdate } from "@/lib/updates";
 import { Button } from "@/components/ui/button";
 import { Segmented, Switch } from "@/components/ui/controls";
@@ -588,7 +588,7 @@ export function AboutTab() {
           <button
             type="button"
             className="inline-flex items-center gap-1 underline decoration-hairline-strong underline-offset-2 hover:text-foreground"
-            onClick={() => void openUrl(repoFile("THIRD-PARTY-NOTICES.md"))}
+            onClick={() => void openExternalWebUrl(repoFile("THIRD-PARTY-NOTICES.md"))}
           >
             Third-party notices <ExternalLink className="size-3" />
           </button>

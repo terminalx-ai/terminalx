@@ -202,9 +202,13 @@ fn retry_deadline(raw: &str, now: i64) -> Option<i64> {
     chrono::DateTime::parse_from_rfc2822(raw).ok().map(|at| at.timestamp_millis())
 }
 
+fn http_agent() -> &'static ureq::Agent {
+    static AGENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
+    AGENT.get_or_init(|| crate::data_privacy::http_agent().timeout(Duration::from_secs(10)).redirects(0).build())
+}
+
 pub(super) fn fetch(token: &str, updated_at: i64) -> Result<Vec<UsageWindow>> {
-    let agent = crate::data_privacy::http_agent().timeout(Duration::from_secs(10)).build();
-    let response = agent
+    let response = http_agent()
         .get(USAGE_URL)
         .set("Authorization", &format!("Bearer {token}"))
         .set("anthropic-beta", "oauth-2025-04-20")

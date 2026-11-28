@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openExternalWebUrl } from "@/lib/externalUrl";
 import { ChevronDown, GitBranch, Loader2, Trash2 } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -430,7 +430,7 @@ export function MachineBranchButton({ branch, workspace }: { branch: MachineBran
               </DropdownMenuItem>
             ))}
             {showGitStep && <DropdownMenuSeparator />}
-            {snapshot?.pr && <DropdownMenuItem onSelect={() => void openUrl(snapshot.pr!.url).catch((reason) => setError(errorText(source, reason)))}>Open pull request</DropdownMenuItem>}
+            {snapshot?.pr && <DropdownMenuItem onSelect={() => void openExternalWebUrl(snapshot.pr!.url).catch((reason) => setError(errorText(source, reason)))}>Open pull request</DropdownMenuItem>}
             {source && <DropdownMenuItem disabled={refreshing} onSelect={() => void refresh(true)}>Refresh Git status</DropdownMenuItem>}
             {workspace && (
               <DropdownMenuItem destructive onSelect={() => openWorkspaceDelete(workspace.projectPath, workspace.path, workspace.name, workspace.host)}>
