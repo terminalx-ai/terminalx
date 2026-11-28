@@ -106,7 +106,7 @@ try {
       if (name === "account") {
         // PRO-400 (17.01): Sign out asks in the app's own dialog: what happens, then Cancel on the left and a red Sign out on the right.
         await settings.locator("[data-testid=account-sign-out]").getByRole("button", { name: "Sign out", exact: true }).click();
-        const dialog = page.getByRole("dialog", { name: "Sign out of TerminalX?" });
+        const dialog = page.getByRole("alertdialog", { name: "Sign out of TerminalX?" });
         await dialog.waitFor();
         await page.evaluate(() => Promise.all(document.getAnimations().map((animation) => animation.finished.catch(() => {}))));
         if (shots) await page.screenshot({ path: join(shots, `sign-out-${mode}-1440.png`) });
@@ -134,7 +134,7 @@ try {
           "Cancel on the left, a red Sign out on the right": JSON.stringify(asked.buttons) === JSON.stringify(["Cancel", "Sign out"]) && asked.cancelFirst && asked.red,
           "the dialog is inside the window": asked.inWindow,
           "the row has no inline confirmation": !/Confirm sign out/.test(asked.row),
-          "Cancel closes it and stays signed in": (await page.getByRole("dialog").count()) === 0 && (await settings.locator("[data-testid=account-identity]").count()) === 1,
+          "Cancel closes it and stays signed in": (await page.getByRole("alertdialog").count()) === 0 && (await settings.locator("[data-testid=account-identity]").count()) === 1,
         }, asked);
       }
       await page.close();

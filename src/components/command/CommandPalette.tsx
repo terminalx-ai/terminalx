@@ -1186,7 +1186,7 @@ export function CommandPalette({
         layout="pinned"
         width="max-w-[42.5rem]"
         // Near the top of the window (design 07.04), clamped on short windows so the footer never clips.
-        className="bottom-auto top-[min(6rem,4dvh)] max-h-[min(42rem,calc(100dvh-2rem))] gap-0 overflow-hidden p-0"
+        className="bottom-auto top-24 max-h-[min(42rem,calc(100dvh-7rem))] gap-0 overflow-hidden p-0"
         onOpenAutoFocus={(event) => {
           event.preventDefault();
           previousFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;

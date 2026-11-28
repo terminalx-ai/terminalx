@@ -92,7 +92,7 @@ try {
     await openCloudSession(cloud, "Cloud status review");
     await cloud.keyboard.press("Meta+K");
     const palette = cloud.getByRole("dialog");
-    await palette.getByRole("textbox", { name: "Command palette search" }).fill("status");
+    await palette.getByRole("combobox", { name: "Command palette search" }).fill("status");
     if (role === "manager" && manualStatus) {
       await palette.getByRole("option", { name: /Set status…/ }).click();
       assert.match(await palette.getByRole("option", { name: /In progress/ }).textContent(), /Current status/);

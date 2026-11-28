@@ -146,7 +146,7 @@ try {
     assert.equal(await page.getByRole("button", { name: "Discard changes to src/lib/prefs.ts" }).isVisible(), true);
     // PRO-400 (17.01): Discard asks in the app's own card, which names the file and counts the lines that go back.
     await page.getByRole("button", { name: "Discard changes to src/lib/prefs.ts" }).click();
-    const discard = page.getByRole("dialog", { name: "Discard changes to src/lib/prefs.ts?" });
+    const discard = page.getByRole("alertdialog", { name: "Discard changes to src/lib/prefs.ts?" });
     await discard.waitFor();
     assert.match(await discard.innerText(), /6 added lines go back to .+\. This can’t be undone\./);
     assert.deepEqual((await discard.getByRole("button").allTextContents()).map((label) => label.trim()), ["Cancel", "Discard"]);
