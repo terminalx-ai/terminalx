@@ -537,13 +537,32 @@ impl ControlService {
     fn execute_gated(&self, command: &str, params: Value, request_id: &str) -> Result<Value, ControlError> {
         if let Some(lifetime) = &self.local_lifetime {
             if command == crate::serve_cli::consent::WINDOW_REGISTER {
+                // S-37: Unconditionally block scoped agent tabs, unreadable peers,
+                // runtime descendants, and processes inside TerminalX panes from
+                // registering as the window service — regardless of whether Bots is on.
+                if crate::hooks::caller_capability().is_some() {
+                    return Err(ControlError::new(
+                        "forbidden",
+                        "An agent tab cannot register as the TerminalX window.",
+                        Some("Only the TerminalX desktop window may register window services.".into()),
+                    ));
+                }
+                #[cfg(unix)]
+                match crate::hooks::caller() {
+                    crate::hooks::Peer::Unreadable => return Err(gone()),
+                    crate::hooks::Peer::Pid(pid) if matches!(self.manager.session_of_process(pid), Ok(Some(_))) => {
+                        return Err(ControlError::new(
+                            "forbidden",
+                            "A process inside a TerminalX pane cannot register as the window.",
+                            Some("Only the TerminalX desktop window may register window services.".into()),
+                        ));
+                    }
+                    crate::hooks::Peer::Pid(_) | crate::hooks::Peer::InProcess => {}
+                }
                 // A runtime whose window's key is pinned takes for the window
-                // only a registrant that proves it is, Bots on or off (PRO-489):
-                // the control token is in every agent tab's environment, so a
-                // lease alone says nothing of who holds it. With Bots off nothing
-                // is guarded, so an unproven window still provides its services;
-                // it is not recognised, so turning Bots on later leaves its
-                // writes refused until it proves itself (Try again in the app).
+                // only a registrant that proves it is, unconditionally whether
+                // Bots is on or off (PRO-489, S-37): an unproven caller never
+                // registers as the window service and cannot intercept window RPCs.
                 let mut params = params;
                 let window = current_window();
                 let proof = window.keyed().then(|| self.prove_window(&mut params, &window));
@@ -554,30 +573,29 @@ impl ControlService {
                     // current lease, no private endpoint) is refused as it
                     // is with a proof, before it changes anything (PRO-508).
                     lifetime.window.validate(lifetime, &params)?;
-                    log::warn!("a registration as the window did not prove it is the window ({message}): attached, not taken for the window");
+                    log::warn!("a registration as the window did not prove it is the window ({message}): refused");
                     // The process that now cannot prove it is no longer taken
                     // for the window (PRO-507). Another process's registration
                     // unseats no one, a handover's window included (PRO-508).
                     #[cfg(unix)]
                     lifetime.window.unproven_from(crate::hooks::caller_pid());
-                    // Unproven (a window that cannot read its Keychain key, or
-                    // not the window at all) while Bots is on: its attachment
-                    // stays, so the app still shows what runs and can repair, but
-                    // it provides no window services, which a launch trusts, and
-                    // changes nothing here (review 2). A window service asked
-                    // for meanwhile says why (PRO-507).
-                    if crate::bots::enabled_cached() {
-                        lifetime.window.refused_unproven(lifetime, &params);
-                        return Ok(json!({"registered": false, "proven": false, "message": message}));
-                    }
+                    // Unconditionally refuse unproven window service registration
+                    // even when Bots is off so agent/untrusted callers cannot hijack
+                    // window-forwarded RPCs while the desktop window is restarting (S-37).
+                    lifetime.window.refused_unproven(lifetime, &params);
+                    return Ok(json!({"registered": false, "proven": false, "message": message}));
                 }
-                // An unproven window serves while Bots stays off, and gives
-                // way to one that proves it (PRO-507).
-                let mut registered = if unproven.is_some() { lifetime.window.register_unproven(lifetime, params)? } else { lifetime.window.register(lifetime, params)? };
-                if let Some(message) = unproven {
-                    registered["proven"] = json!(false);
-                    registered["message"] = json!(message);
+                // S-37: Even on an unkeyed runtime (or after proof), never allow
+                // a runtime child/descendant or pane process to register as the window.
+                #[cfg(unix)]
+                if matches!(crate::hooks::caller(), crate::hooks::Peer::Pid(pid) if !self.may_be_the_window(pid)) {
+                    return Err(ControlError::new(
+                        "forbidden",
+                        "A process inside a TerminalX pane or under this runtime cannot register as the window.",
+                        Some("Only the TerminalX desktop window may register window services.".into()),
+                    ));
                 }
+                let mut registered = lifetime.window.register(lifetime, params)?;
                 // A desktop launch that could not pin the window's key (Keychain
                 // could not be read then): bots are held by placement alone here,
                 // which the window says (PRO-489 review, low).
@@ -2285,6 +2303,7 @@ impl ControlService {
             if self.local_lifetime.as_ref().is_some_and(|lifetime| lifetime.is_stopping()) {
                 return Err(ControlError::new("runtime_stopping", "The local runtime is stopping.", None::<String>));
             }
+            let wait_gen = self.manager.wait_generation();
             let view = self.manager.wait_view(&target.session.id, &target.tab.id);
             if let Some(end) = wait_end(&view) {
                 let mut result = json!({"sessionId": target.session.id, "tabId": target.tab.id, "reason": end.reason(), "status": view.status});
@@ -2293,12 +2312,14 @@ impl ControlService {
                 }
                 return Ok(result);
             }
-            if Instant::now() >= deadline {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
                 return Ok(
                     json!({"sessionId": target.session.id, "tabId": target.tab.id, "reason": "timeout", "status": view.status}),
                 );
             }
-            std::thread::sleep(Duration::from_millis(50));
+            // Wait on the status/event Condvar instead of 50ms busy-polling (P-52).
+            let _ = self.manager.wait_for_change(wait_gen, remaining.min(Duration::from_secs(2)));
         }
     }
 
@@ -2346,25 +2367,36 @@ impl ControlService {
         // only through `ready` or the run's end, which a missed change always shows up as.
         let began = engine::refreshed(&host, run_id).map_err(ControlError::of_run)?;
         let mut read = Instant::now();
+        let mut cached = began.clone();
+        let mut needs_read = false;
         loop {
             if self.local_lifetime.as_ref().is_some_and(|lifetime| lifetime.is_stopping()) {
                 return Err(ControlError::new("runtime_stopping", "The local runtime is stopping.", None::<String>));
             }
+            let wait_gen = self.manager.wait_generation();
             let now = if read.elapsed() >= Duration::from_secs(5) {
                 read = Instant::now();
-                engine::refreshed(&host, run_id).map_err(ControlError::of_run)?
+                cached = engine::refreshed(&host, run_id).map_err(ControlError::of_run)?;
+                &cached
+            } else if needs_read {
+                cached = store::get(run_id).map_err(ControlError::internal)?;
+                &cached
             } else {
-                store::get(run_id).map_err(ControlError::internal)?
+                &cached
             };
-            let timed_out = Instant::now() >= deadline;
-            if let Some(mut woken) = engine::wake(&began, &now, mode == "all").or_else(|| timed_out.then(|| json!({"run": now.id, "state": now.state, "why": [], "ready": [], "pieces": now.pieces.iter().map(|piece| json!({"piece": piece.id, "state": piece.state, "changed": false, "note": piece.note})).collect::<Vec<_>>()}))) {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let timed_out = remaining.is_zero();
+            if let Some(mut woken) = engine::wake(&began, now, mode == "all").or_else(|| timed_out.then(|| json!({"run": now.id, "state": now.state, "why": [], "ready": [], "pieces": now.pieces.iter().map(|piece| json!({"piece": piece.id, "state": piece.state, "changed": false, "note": piece.note})).collect::<Vec<_>>()}))) {
                 woken["mode"] = json!(mode);
                 woken["timedOut"] = json!(timed_out && woken["why"].as_array().is_none_or(|why| why.is_empty()));
                 // No tab is listed: the run is what was waited on. `runs show` has each worker.
                 woken["targets"] = json!([]);
                 return Ok(woken);
             }
-            std::thread::sleep(Duration::from_millis(250));
+            let refresh_in = Duration::from_secs(5).saturating_sub(read.elapsed());
+            // Park on the SessionManager change Condvar instead of 250ms disk polling (P-52).
+            let _ = self.manager.wait_for_change(wait_gen, remaining.min(refresh_in).min(Duration::from_secs(1)));
+            needs_read = true;
         }
     }
 
@@ -2396,12 +2428,14 @@ impl ControlService {
             if self.local_lifetime.as_ref().is_some_and(|lifetime| lifetime.is_stopping()) {
                 return Err(ControlError::new("runtime_stopping", "The local runtime is stopping.", None::<String>));
             }
+            let wait_gen = self.manager.wait_generation();
             let views: Vec<WaitView> = targets.iter().map(|target| self.manager.wait_view(&target.session.id, &target.tab.id)).collect();
             let ends: Vec<Option<WaitEnd>> = views.iter().map(wait_end).collect();
             let began = began.get_or_insert_with(|| ends.clone());
             let settled = ends.iter().flatten().count();
             let done = if mode == "all" { settled == ends.len() } else { settled > 0 };
-            let timed_out = !done && Instant::now() >= deadline;
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let timed_out = !done && remaining.is_zero();
             if done || timed_out {
                 let listed: Vec<Value> = (0..targets.len())
                     .map(|i| {
@@ -2421,7 +2455,8 @@ impl ControlService {
                     .collect();
                 return Ok(json!({"mode": mode, "timedOut": timed_out, "targets": listed}));
             }
-            std::thread::sleep(Duration::from_millis(50));
+            // Wait on the status/event Condvar instead of 50ms busy-polling (P-52).
+            let _ = self.manager.wait_for_change(wait_gen, remaining.min(Duration::from_secs(2)));
         }
     }
 
@@ -3222,9 +3257,19 @@ impl ControlService {
                 }
                 Ok(None) => {}
             }
-            let caller = Caller::of_process(&self.manager, params, Some(pid));
-            if caller.bot.is_some() {
-                return Err(caller.forbidden(&format!("invoke {command}")));
+            // Reuse already-checked non-pane placement without re-walking the process tree (P-58).
+            if crate::bots::enabled_cached() {
+                if let Some(claimed_id) = params["caller"]["session"].as_str() {
+                    if let Ok(entry) = index::get(claimed_id) {
+                        if crate::bots::chat::acting_bot(&entry).is_some() {
+                            return Err(ControlError::new(
+                                "forbidden",
+                                format!("A bot, and a session a bot started, does not invoke {command}. Only your owner does, in TerminalX."),
+                                Some("Tell your owner what you need and why; do not try another way.".into()),
+                            ));
+                        }
+                    }
+                }
             }
             if witnessed {
                 verify_consent(params)?;
@@ -3659,6 +3704,9 @@ struct Caller {
     /// The cryptographically verified per-tab capability token, when the request
     /// authenticated with a scoped tab token instead of the master token (S-01).
     cap: Option<crate::hooks::TabCapability>,
+    /// Cached resolved `SessionEntry` from `cap` or `placed` so subsequent
+    /// checks do not re-read `index.json` multiple times per RPC (P-58).
+    resolved_entry: Option<index::SessionEntry>,
     /// The process the kernel says sent the command; `None` in-process or off unix.
     #[cfg_attr(not(unix), allow(dead_code))]
     peer: Option<i32>,
@@ -3814,7 +3862,13 @@ impl Caller {
             },
             None => None,
         };
-        let cap_entry = cap.as_ref().and_then(|c| index::get(&c.session_id).ok());
+        // Avoid a redundant `index::get` when the capability token names the same session (P-58).
+        let cap_entry = match cap.as_ref() {
+            Some(c) if placed_entry.as_ref().is_some_and(|e| e.id == c.session_id) => placed_entry.clone(),
+            Some(c) => index::get(&c.session_id).ok(),
+            None => None,
+        };
+        let resolved_entry = cap_entry.clone().or_else(|| placed_entry.clone());
         let nobody = Self {
             bot: None,
             name: String::new(),
@@ -3824,6 +3878,7 @@ impl Caller {
             session: None,
             placed: placed.clone(),
             cap: cap.clone(),
+            resolved_entry: resolved_entry.clone(),
             peer,
             gone,
             incomplete,
@@ -3879,18 +3934,15 @@ impl Caller {
                 access = cap_access;
             }
         }
-        Self { bot: Some(id), name, paused, access, verified, session: Some(session), placed, cap, peer, gone, incomplete }
+        Self { bot: Some(id), name, paused, access, verified, session: Some(session), placed, cap, resolved_entry, peer, gone, incomplete }
     }
 
     /// The session the command runs in, resolved from authenticated capability
     /// token or kernel PID placement; only falls back to `params["caller"]` for
     /// in-process callers (never for socket peers, S-08).
     fn resolved_session(&self, params: &Value) -> Option<index::SessionEntry> {
-        if let Some(cap) = &self.cap {
-            return index::get(&cap.session_id).ok();
-        }
-        if let Some(placed) = &self.placed {
-            return placed.session.as_deref().and_then(|session| index::get(session).ok());
+        if self.cap.is_some() || self.placed.is_some() {
+            return self.resolved_entry.clone();
         }
         if self.peer.is_some() {
             return None;
@@ -3928,34 +3980,24 @@ impl Caller {
         {
             return true;
         }
-        if let Some(placed) = &self.placed {
-            if placed
-                .session
-                .as_deref()
-                .and_then(|id| index::get(id).ok())
-                .is_some_and(|entry| crate::orchestration::guard::limited(&entry))
-            {
-                return true;
-            }
-        }
-        if let Some(cap) = &self.cap {
-            if index::get(&cap.session_id)
-                .ok()
-                .is_some_and(|entry| crate::orchestration::guard::limited(&entry))
-            {
-                return true;
-            }
+        if self
+            .resolved_entry
+            .as_ref()
+            .is_some_and(crate::orchestration::guard::limited)
+        {
+            return true;
         }
         // Only for in-process callers (no socket peer and no scoped token) may
         // `params["caller"]["session"]` further tighten limits.
-        if self.peer.is_none() && self.cap.is_none() && self.placed.is_none() {
-            if params["caller"]["session"]
+        if self.peer.is_none()
+            && self.cap.is_none()
+            && self.placed.is_none()
+            && params["caller"]["session"]
                 .as_str()
                 .and_then(|id| index::get(id).ok())
                 .is_some_and(|entry| crate::orchestration::guard::limited(&entry))
-            {
-                return true;
-            }
+        {
+            return true;
         }
         false
     }
@@ -4268,8 +4310,8 @@ impl Caller {
                 if is_verifier { "verifier" } else { cap.permission_mode.as_str() }
             )));
         }
-        if is_worker {
-            if matches!(
+        if is_worker
+            && (matches!(
                 command,
                 "projects.add"
                     | "projects.remove"
@@ -4296,10 +4338,9 @@ impl Caller {
                     | "pipelines.resolveConflicts"
                     | "pipelines.act"
             ) || command.starts_with("share.")
-                || command.strip_prefix("machine.").is_some_and(|a| LIMITED_MACHINE_ACTIONS.contains(&a))
-            {
-                return Err(deny(format!("An orchestration worker tab cannot invoke `{command}`.")));
-            }
+                || command.strip_prefix("machine.").is_some_and(|a| LIMITED_MACHINE_ACTIONS.contains(&a)))
+        {
+            return Err(deny(format!("An orchestration worker tab cannot invoke `{command}`.")));
         }
         Ok(())
     }
@@ -6104,7 +6145,7 @@ mod tests {
             "id": "a-run", "lead": {"sessionId": "lead", "tabId": "t"}, "projectPath": "/fixture", "goal": "Something",
             "state": "running", "pieces": [], "workerMode": "plan", "created": "2026-11-20T09:00:00Z", "modified": "2026-11-20T09:00:00Z",
         })).unwrap();
-        let caller = |gone: bool, incomplete: bool| Caller { bot: None, name: String::new(), paused: false, access: crate::bots::BotAccess::Full, verified: false, session: None, placed: None, peer: Some(4242), cap: None, gone, incomplete };
+        let caller = |gone: bool, incomplete: bool| Caller { bot: None, name: String::new(), paused: false, access: crate::bots::BotAccess::Full, verified: false, session: None, resolved_entry: None, placed: None, peer: Some(4242), cap: None, gone, incomplete };
         caller(false, false).may_steer(&run).unwrap();
         assert_eq!(caller(true, false).may_steer(&run).unwrap_err().code, "person_required");
         let refused = caller(false, true).may_steer(&run).unwrap_err();
@@ -6262,12 +6303,11 @@ mod tests {
             crate::store::settings::save(&settings).unwrap();
         };
 
-        // M2: with Bots off an unproven window still gets its services, says
-        // it is unproven, and is not recognised, so turning Bots on later
-        // leaves its writes refused until it proves itself.
+        // S-37: even with Bots off, an unproven window registration is refused
+        // on a keyed runtime and is never recognised as the window.
         bots(false);
         let (_, services) = register(None);
-        assert_eq!((services["registered"].clone(), services["proven"].clone()), (json!(true), json!(false)), "{services}");
+        assert_eq!((services["registered"].clone(), services["proven"].clone()), (json!(false), json!(false)), "{services}");
         assert!(lifetime.window.window_process().is_none(), "not recognised while Bots is off either");
         bots(true);
         assert_eq!(write().as_deref(), Some("person_required"), "Bots on: still not the window");
@@ -6383,44 +6423,39 @@ mod tests {
             let (stranger, attached, answer) = register(None);
             assert_ne!(stranger, window);
             let answer = answer.unwrap();
-            assert_eq!((answer["registered"].clone(), answer["proven"].clone()), (json!(!on), json!(false)), "Bots {on}: {answer}");
+            assert_eq!((answer["registered"].clone(), answer["proven"].clone()), (json!(false), json!(false)), "Bots {on}: {answer}");
             assert_eq!(lifetime.window.window_process(), Some((window, 1)), "Bots {on}: another process's registration does not unseat a handover's window");
             lifetime.command("runtime.detach", attached).unwrap();
 
             let (_, attached, own) = registrant(None, true);
             let answer = send(window, own).unwrap();
-            assert_eq!((answer["registered"].clone(), answer["proven"].clone()), (json!(!on), json!(false)), "Bots {on}: {answer}");
+            assert_eq!((answer["registered"].clone(), answer["proven"].clone()), (json!(false), json!(false)), "Bots {on}: {answer}");
             assert!(lifetime.window.window_process().is_none(), "Bots {on}: the handed-over window that cannot prove it is no longer taken for it");
             lifetime.command("runtime.detach", attached).unwrap();
         }
 
-        // Bots off: an unproven window is registered and serves.
+        // S-37: even with Bots off, an unproven window is refused and serves nothing.
         let (_, _, unproven) = register(None);
         let unproven = unproven.unwrap();
-        assert_eq!((unproven["registered"].clone(), unproven["proven"].clone()), (json!(true), json!(false)), "{unproven}");
+        assert_eq!((unproven["registered"].clone(), unproven["proven"].clone()), (json!(false), json!(false)), "{unproven}");
         assert!(lifetime.window.window_process().is_none());
-        assert!(lifetime.window.available(), "Bots off: the unproven window serves");
-        let (_, _, another) = register(None);
-        assert!(another.unwrap_err().message.contains("Another desktop"), "it holds the slot against another unproven one");
+        assert!(!lifetime.window.available(), "Bots off: unproven window must not serve (S-37)");
 
-        // Bots off: the window, proving it on its own lease, takes the slot from it.
+        // Bots off: the window, proving it on its own lease, registers and serves.
         let (pid, attached, proven) = register(Some(&[7; 32]));
         let proven = proven.unwrap();
         assert_eq!((proven["registered"].clone(), proven.get("proven")), (json!(true), None), "{proven}");
         assert_eq!(lifetime.window.window_process().map(|(window, _)| window), Some(pid));
+        assert!(lifetime.window.available());
         lifetime.command("runtime.detach", attached).unwrap();
 
-        // Bots on: an unproven window serves nothing but keeps the slot (it
-        // serves again with Bots off); the window proving it takes it.
+        // Bots on: unproven is refused, proven registers and cannot be unseated by stranger.
+        bots(true);
         let (_, _, unproven) = register(None);
-        assert_eq!(unproven.unwrap()["registered"], true);
-        bots(true);
-        assert!(!lifetime.window.available(), "Bots on: it serves no longer");
-        bots(false);
-        assert!(lifetime.window.available(), "still in the slot: Bots off, it serves again");
-        bots(true);
+        assert_eq!(unproven.unwrap()["registered"], false);
+        assert!(!lifetime.window.available());
         let (pid, _, proven) = register(Some(&[7; 32]));
-        assert_eq!(proven.unwrap()["registered"], true, "gives way while Bots is on");
+        assert_eq!(proven.unwrap()["registered"], true, "proven window registers");
         assert_eq!(lifetime.window.window_process().map(|(window, _)| window), Some(pid));
         assert!(lifetime.window.available());
         // Another process that cannot prove it does not unseat it.
@@ -8072,6 +8107,68 @@ mod tests {
         let lease = service.execute("runtime.attach", json!({"protocol": 1}), "s02-ok").unwrap();
         assert!(lease["lease"].is_string());
         service.execute("runtime.detach", lease, "s02-ok").unwrap();
+    }
+
+    /// S-37: With Bots off (default), scoped agent tabs, runtime child processes,
+    /// and unproven callers on a keyed runtime cannot hijack window registration
+    /// or intercept window-forwarded RPCs.
+    #[cfg(unix)]
+    #[test]
+    fn window_register_refuses_agent_tabs_runtime_children_and_unproven_callers_with_bots_off_s37() {
+        use std::os::unix::fs::PermissionsExt;
+        let _home = crate::store::temp_home();
+        assert!(!crate::bots::enabled(), "Bots must be off by default for S-37 test");
+        let (service, _sink) = headless_service();
+        let lifetime = crate::local_runtime::Lifetime::new(Duration::from_secs(60));
+        let service = service.with_local_lifetime(lifetime.clone());
+        TEST_WINDOW_KEY.with(|key| key.set(Some([9; 32])));
+
+        let attached = lifetime.command("runtime.attach", json!({"protocol": crate::local_runtime::PROTOCOL})).unwrap();
+        let short = tempfile::Builder::new().prefix("s37").tempdir_in("/tmp").unwrap();
+        std::os::unix::fs::symlink(crate::store::root().unwrap().join("run"), short.path().join("r")).unwrap();
+        let endpoint = short.path().join("r").join("w.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&endpoint).unwrap();
+        std::fs::set_permissions(&endpoint, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let registration = json!({"epoch": attached["epoch"], "lease": attached["lease"], "socket": endpoint, "token": "ab".repeat(16)});
+
+        // 1. Scoped agent tab token is unconditionally refused.
+        let cap = crate::hooks::TabCapability {
+            session_id: "s1".into(),
+            tab_id: "t1".into(),
+            launch_id: "l1".into(),
+            permission_mode: "bypassPermissions".into(),
+            bot_id: None,
+            bot_access: None,
+            orchestration_role: "standard".into(),
+        };
+        crate::hooks::with_caller_capability(Some(cap), || {
+            let err = service.execute(crate::serve_cli::consent::WINDOW_REGISTER, registration.clone(), "s37-cap").unwrap_err();
+            assert_eq!(err.code, "forbidden", "scoped tab must be refused WINDOW_REGISTER: {err:?}");
+        });
+
+        // 2. Runtime child process is unconditionally refused even on an unkeyed runtime.
+        TEST_WINDOW_KEY.with(|key| key.set(None));
+        let mut child = std::process::Command::new("/bin/sleep").arg("30").spawn().unwrap();
+        crate::hooks::TEST_CALLER_PID.with(|c| c.set(Some(child.id() as i32)));
+        let err = service.execute(crate::serve_cli::consent::WINDOW_REGISTER, registration.clone(), "s37-child").unwrap_err();
+        assert_eq!(err.code, "forbidden", "runtime child must be refused WINDOW_REGISTER: {err:?}");
+        crate::hooks::TEST_CALLER_PID.with(|c| c.set(None));
+        let _ = child.kill();
+        let _ = child.wait();
+
+        // 3. Unproven detached caller on a keyed runtime is refused even with Bots off.
+        TEST_WINDOW_KEY.with(|key| key.set(Some([9; 32])));
+        let mut stranger = detached_process();
+        crate::hooks::TEST_CALLER_PID.with(|c| c.set(Some(stranger.id() as i32)));
+        let res = service.execute(crate::serve_cli::consent::WINDOW_REGISTER, registration, "s37-unproven").unwrap();
+        assert_eq!((res["registered"].clone(), res["proven"].clone()), (json!(false), json!(false)), "{res}");
+        assert!(!lifetime.window.available(), "unproven caller must not become active window provider");
+        assert!(lifetime.window.call("computer.capabilities", json!({})).is_err());
+
+        crate::hooks::TEST_CALLER_PID.with(|c| c.set(None));
+        TEST_WINDOW_KEY.with(|key| key.set(None));
+        let _ = stranger.kill();
+        let _ = stranger.wait();
     }
 
     /// S-08: Caller identity is resolved unconditionally from OS peer-PID ancestry

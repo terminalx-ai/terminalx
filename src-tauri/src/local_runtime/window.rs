@@ -148,7 +148,9 @@ impl Registry {
     }
 
     /// [`Self::register`], for a window that did not prove it is the window
-    /// on a runtime that pins its key, while Bots is off (PRO-489).
+    /// on a runtime that pins its key. Kept only for legacy slot bookkeeping;
+    /// unproven providers never serve window RPCs (S-37).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn register_unproven(&self, lifetime: &Lifetime, params: Value) -> Result<Value, ControlError> {
         self.register_as(lifetime, params, true)
     }
@@ -185,9 +187,9 @@ impl Registry {
         if let Some(previous) = current.as_ref().filter(|service| service.attachment.valid()) {
             let same = previous.lease == registration.lease && previous.socket == registration.socket
                 && crate::hooks::token_matches(&previous.token,&registration.token);
-            // An unproven provider gives way to a registration that proves
-            // it, and to any while Bots is on, when it serves nothing (PRO-507).
-            let gives_way = previous.unproven && (!unproven || crate::bots::enabled_cached());
+            // An unproven provider serves nothing (S-37) and always gives way
+            // to a subsequent registration.
+            let gives_way = previous.unproven;
             if same && (!previous.unproven || unproven) {
                 return Ok(json!({"registered":true}));
             }
@@ -204,9 +206,8 @@ impl Registry {
     }
 
     /// A registration as the window, on `params`' attachment, that the
-    /// runtime refused for want of the window's proof while Bots is on: a
-    /// window service asked for meanwhile says so, and not that no window is
-    /// open (PRO-507).
+    /// runtime refused for want of the window's proof: a window service asked
+    /// for meanwhile says so, and not that no window is open (PRO-507, S-37).
     pub(crate) fn refused_unproven(&self, lifetime: &Lifetime, params: &Value) {
         let attachment = lifetime.attachment(params["epoch"].as_str().unwrap_or_default(), params["lease"].as_str().unwrap_or_default());
         if let Ok(attachment) = attachment {
@@ -214,13 +215,12 @@ impl Registry {
         }
     }
 
-    /// The provider of window services now: none while Bots is on for one
-    /// that did not prove it is the window (PRO-507). It is kept, not
-    /// dropped: it serves again once Bots is off, and gives way meanwhile to a
-    /// registration that proves it, or to any while Bots is on (`register_as`).
+    /// The provider of window services now: unconditionally refuses unproven
+    /// providers regardless of whether Bots is enabled, so an unproven caller
+    /// cannot intercept window-forwarded RPCs (S-37).
     fn live(&self) -> Option<Arc<Service>> {
         let service = self.0.lock().unwrap().clone().filter(|service| service.attachment.valid())?;
-        if service.unproven && crate::bots::enabled_cached() {
+        if service.unproven {
             *self.2.lock().unwrap_or_else(|e| e.into_inner()) = Some(service.attachment.clone());
             return None;
         }
@@ -228,10 +228,10 @@ impl Registry {
     }
 
     /// Why no window serves: an attached window that has not proved it is
-    /// the window while Bots is on, or none attached.
+    /// the window, or none attached.
     fn missing(&self) -> ControlError {
         let unproven = self.2.lock().unwrap_or_else(|e| e.into_inner()).as_ref().is_some_and(|attachment| attachment.valid());
-        if unproven && crate::bots::enabled_cached() {
+        if unproven {
             return ControlError::new("desktop_unavailable", UNPROVEN,
                 Some("In the TerminalX window, unlock your login Keychain, then choose Try again on its notice. Check the result before repeating an action; it was not replayed.".into()));
         }
@@ -542,10 +542,11 @@ mod tests {
         bots(false);
         let unproven = attach(&lifetime);
         lifetime.window.register_unproven(&lifetime, registration(&unproven, &endpoint)).unwrap();
-        lifetime.window.register_unproven(&lifetime, registration(&unproven, &endpoint)).unwrap();
-        assert!(lifetime.window.call("computer.listApps", json!({})).is_ok(), "Bots off: it serves");
-        let other = attach(&lifetime);
-        assert!(lifetime.window.register_unproven(&lifetime, registration(&other, &endpoint)).is_err(), "Bots off: another unproven one does not unseat it");
+        // S-37: unproven providers never serve window RPCs, even with Bots off.
+        assert!(!lifetime.window.available(), "unproven provider never serves even with Bots off");
+        let error = lifetime.window.call("computer.listApps", json!({})).unwrap_err();
+        assert_eq!(error.code, "desktop_unavailable");
+        assert!(error.message == UNPROVEN && error.recovery.as_deref().is_some_and(|hint| hint.contains("Try again")), "{error:?}");
         // The window, proving it on another lease, takes over.
         let proven = attach(&lifetime);
         lifetime.window.register(&lifetime, registration(&proven, &endpoint)).unwrap();
@@ -553,8 +554,8 @@ mod tests {
         assert!(lifetime.window.call("computer.listApps", json!({})).is_ok());
         lifetime.command("runtime.detach", proven).unwrap();
 
-        // Bots on: an unproven provider serves nothing, and says why; Bots
-        // off again, it serves again, as nothing re-registers it.
+        // Bots on or off: an unproven provider serves nothing, and gives way to a proven window.
+        let other = attach(&lifetime);
         lifetime.window.register_unproven(&lifetime, registration(&other, &endpoint)).unwrap();
         bots(true);
         assert!(!lifetime.window.available(), "held while Bots is on");
@@ -562,19 +563,15 @@ mod tests {
         assert_eq!(error.code, "desktop_unavailable");
         assert!(error.message == UNPROVEN && error.recovery.as_deref().is_some_and(|hint| hint.contains("Try again")), "{error:?}");
         bots(false);
-        assert!(lifetime.window.call("computer.listApps", json!({})).is_ok(), "Bots off again: it serves again");
-        // Bots on, any registration unseats it, unproven too (`|| bots`): it serves nothing then anyway.
-        bots(true);
+        assert!(!lifetime.window.available(), "still refused with Bots off (S-37)");
         let third = attach(&lifetime);
         lifetime.window.register_unproven(&lifetime, registration(&third, &endpoint)).unwrap();
-        bots(false);
-        assert!(lifetime.window.register_unproven(&lifetime, registration(&other, &endpoint)).is_err(), "the one that took its place holds it");
         lifetime.window.register(&lifetime, registration(&other, &endpoint)).unwrap();
         bots(true);
         assert!(lifetime.window.call("computer.listApps", json!({})).is_ok(), "a window proved serves while Bots is on");
         lifetime.command("runtime.detach", third).unwrap();
         lifetime.command("runtime.detach", other).unwrap();
-        // A registration refused for want of proof while Bots is on says why too, while it is attached.
+        // A registration refused for want of proof says why too, while it is attached.
         let refused = attach(&lifetime);
         lifetime.window.refused_unproven(&lifetime, &registration(&refused, &endpoint));
         assert_eq!(lifetime.window.call("computer.listApps", json!({})).unwrap_err().message, UNPROVEN);

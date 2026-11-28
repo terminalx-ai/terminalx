@@ -107,7 +107,8 @@ impl BrowserRuntime {
         let inherited: HashMap<String, String> = std::env::vars().collect();
         let env = environment::create(&inherited, &home);
         let pages = PageStore::open(root.join("pages.json"))?;
-        let _ = pages.reset();
+        // Resetting `pages.json` writes+fsyncs to disk; perform it asynchronously
+        // in `sweep_orphans()` so cold start never blocks first window paint (P-21).
         let profiles = ProfileStore::open(root.clone())?;
         Ok(Self {
             bridge: Bridge::new(env),
@@ -127,12 +128,17 @@ impl BrowserRuntime {
         self.app.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
-    /// Close daemons a crashed run left behind, off the startup path.
+    /// Close daemons a crashed run left behind and reset stale remembered pages,
+    /// off the startup path (P-21).
     pub fn sweep_orphans(self: &Arc<Self>) {
         let rt = self.clone();
         std::thread::Builder::new()
             .name("agent-browser-sweep".into())
             .spawn(move || {
+                let snapshot = rt.pages.snapshot();
+                if !snapshot.pages.is_empty() || !snapshot.active.is_empty() {
+                    let _ = rt.pages.reset();
+                }
                 let Some(binary) = binary::locate() else { return };
                 let live: Vec<String> = rt.bridge.live_session_names();
                 let closed = sweep::sweep(&binary, &rt.bridge.env, |name| live.iter().any(|l| l == name));

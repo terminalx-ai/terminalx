@@ -69,17 +69,25 @@ fn the_file_is_bounded_with_one_older_file_kept() {
     while !dir().unwrap().join(OLDER).exists() {
         note(&mut t, true, |t, c| t.send(c, Origin::Composer, Admission::Busy, Some(Refusal::Busy), None, Some((true, 0))));
         written += 1;
+        if written.is_multiple_of(256) { flush(); }
         assert!(written < 100_000, "never rotated");
     }
+    flush();
     // A second rotation replaces the older file rather than keeping a third.
     let size = || std::fs::metadata(dir().unwrap().join(FILE)).map(|meta| meta.len()).unwrap_or(0);
     let mut last = size();
+    let mut round = 0u64;
     loop {
         note(&mut t, true, |t, c| t.send(c, Origin::Composer, Admission::Busy, Some(Refusal::Busy), None, Some((true, 0))));
-        let now = size();
-        if now < last { break; }
-        last = now;
+        round += 1;
+        if round.is_multiple_of(256) {
+            flush();
+            let now = size();
+            if now < last { break; }
+            last = now;
+        }
     }
+    flush();
     let names: Vec<_> = std::fs::read_dir(dir().unwrap()).unwrap().map(|entry| entry.unwrap().file_name().into_string().unwrap()).collect();
     assert_eq!(names.len(), 2, "{names:?}");
     for file in [FILE, OLDER] { assert!(std::fs::metadata(dir().unwrap().join(file)).unwrap().len() <= MAX_BYTES); }
@@ -98,6 +106,7 @@ fn a_line_that_cannot_be_written_is_counted_and_never_fails_the_work() {
     std::fs::write(&diagnostics, "not a folder").unwrap();
     let mut t = tracker();
     for seq in 0..3 { note(&mut t, true, |t, c| t.raised(c, RecoveryKind::Timeout, Source::Watcher, seq)); }
+    flush();
     std::fs::remove_file(&diagnostics).unwrap();
     note(&mut t, true, |t, c| t.cleared(c, "progress", 9));
     let lines = read_all().unwrap();
@@ -299,6 +308,7 @@ fn a_name_that_is_a_file_location_is_never_kept() {
     note(&mut t, true, |t, c| t.raised(c, RecoveryKind::Timeout, Source::Watcher, 1));
     let shown = report(json!({ "kind": "exposure", "phase": "shown", "reason": "timeout" })).unwrap().bounded("/Users/alice/build/0.2.25");
     note(&mut t, true, |t, c| t.ui(c, &shown));
+    flush();
     let kept = std::fs::read_to_string(dir().unwrap().join(FILE)).unwrap();
     assert!(!kept.contains("alice") && !kept.contains("gguf"), "{kept}");
     assert!(kept.contains(PATH));
