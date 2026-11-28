@@ -3,21 +3,30 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { CloudSessionModel } from "@/lib/cloudSession";
 import { CloudWorkspaceTransfer } from "./CloudWorkspaceTransfer";
 
-const mocks = vi.hoisted(() => ({ invoke: vi.fn(), archive: vi.fn(), operation: vi.fn(), role: "manager", sharedWith: 2 }));
+const mocks = vi.hoisted(() => ({ invoke: vi.fn(), archive: vi.fn(), operation: vi.fn(), role: "manager", sharedWith: 2, ssh: false, privateMode: false, openEditor: vi.fn() }));
+vi.mock("@/lib/cloudSsh", () => ({
+  openWorkspaceInEditor: mocks.openEditor,
+  SSH_EDITORS: [{ id: "vscode", label: "VS Code" }, { id: "cursor", label: "Cursor" }, { id: "zed", label: "Zed" }],
+}));
+vi.mock("@/lib/dataPrivacy", async (original) => ({
+  ...(await original<typeof import("@/lib/dataPrivacy")>()),
+  useDataPrivacy: () => ({ enabled: mocks.privateMode }),
+}));
+vi.mock("@/lib/platform", async (original) => ({ ...(await original<typeof import("@/lib/platform")>()), isWindows: false }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: async () => "/Users/someone/code/widgets" }));
 vi.mock("@/lib/api", () => ({ api: { cloudWorkspaceArchive: mocks.archive, cloudWorkspaceOperation: mocks.operation } }));
 vi.mock("@/lib/cloudCatalog", () => ({
   cloudOrgArg: (orgId: string) => orgId,
   useCloudCatalog: () => ({ orgs: { org: { source: "live", error: null, workspaces: [
-    { workspace: { id: "workspace", orgId: "org", sharedWith: mocks.sharedWith, you: { role: mocks.role, canApprove: true } } },
+    { workspace: { id: "workspace", orgId: "org", state: "ready", sharedWith: mocks.sharedWith, you: { role: mocks.role, canApprove: true } } },
   ] } } }),
 }));
 vi.mock("@/lib/sessions", () => ({ selectSession: vi.fn(), upsertSession: vi.fn(), useSessionStore: () => ({ loaded: false, sessions: [] }) }));
 vi.mock("@/lib/account", () => ({
   getAccount: () => ({ status: {
     state: "signed-in", context: { revision: "r" },
-    phase2Readiness: { org: ["cloud.workspaces.transfer-to-local.v1"] },
+    phase2Readiness: { org: ["cloud.workspaces.transfer-to-local.v1", ...(mocks.ssh ? ["cloud.workspaces.ssh.v1"] : [])] },
   } }),
 }));
 
@@ -27,6 +36,9 @@ beforeEach(() => {
   mocks.archive.mockReset();
   mocks.role = "manager";
   mocks.sharedWith = 2;
+  mocks.ssh = false;
+  mocks.privateMode = false;
+  mocks.openEditor.mockReset();
 });
 afterEach(cleanup);
 
@@ -178,4 +190,26 @@ it.each([
   expect(await screen.findByText(expected)).toBeTruthy();
   expect(mocks.archive).not.toHaveBeenCalled();
   expect(screen.queryByRole("button", { name: "Open local session" })).toBeNull();
+});
+
+it("offers the editors over SSH only when workspace SSH is ready and the person may set it up", async () => {
+  mocks.openEditor.mockRejectedValueOnce(new Error("Workspace SSH is unavailable"));
+  const view = render(<CloudWorkspaceTransfer cloud={model(runtime())} accountRevision="r" sessionId="session-editors" tabId="tab" />);
+  fireEvent.click(screen.getByRole("button", { name: "Move to this Mac…" }));
+  await screen.findByText("Bring topic");
+  expect(screen.queryByRole("button", { name: /^VS Code/ })).toBeNull();
+  mocks.ssh = true;
+  view.rerender(<CloudWorkspaceTransfer cloud={model(runtime())} accountRevision="r" sessionId="session-editors" tabId="tab" />);
+  expect(screen.getByText("Or keep it in the cloud and open it in an editor")).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: /^Zed/ }));
+  expect(mocks.openEditor).toHaveBeenCalledExactlyOnceWith({ orgId: "org", workspaceId: "workspace" }, "zed");
+  expect(await screen.findByText("Workspace SSH is unavailable")).toBeTruthy();
+  expect(mocks.invoke).not.toHaveBeenCalled();
+  mocks.privateMode = true;
+  view.rerender(<CloudWorkspaceTransfer cloud={model(runtime())} accountRevision="r" sessionId="session-editors" tabId="tab" />);
+  expect(screen.queryByRole("button", { name: /^Cursor/ })).toBeNull();
+  mocks.privateMode = false;
+  mocks.role = "viewer";
+  view.rerender(<CloudWorkspaceTransfer cloud={model(runtime())} accountRevision="r" sessionId="session-editors" tabId="tab" />);
+  expect(screen.queryByRole("button", { name: /^VS Code/ })).toBeNull();
 });
